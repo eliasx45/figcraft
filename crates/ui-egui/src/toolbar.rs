@@ -50,6 +50,8 @@ const GROUPS: &[Group] = &[
     Group { key: "comment", name: tr_noop("Comment"), tools: &[(ToolId::Comment, Icon::Comment)] },
 ];
 
+const DROPDOWN_W: f32 = 16.0;
+
 fn remembered(ui: &Ui, key: &str, default: ToolId) -> ToolId {
     ui.data(|d| d.get_temp::<u8>(egui::Id::new(("tb_last", key)))).and_then(|i| ToolId::ALL.get(i as usize).copied()).unwrap_or(default)
 }
@@ -74,7 +76,12 @@ pub fn show(app: &mut FigApp, ui: &mut Ui) {
     }
     let cell = 32.0;
     let gap = 4.0;
-    let width = GROUPS.len() as f32 * (cell + 4.0) + 4.0 * 10.0 + 2.0 * (cell + 4.0) + 16.0 + 4.0 * 34.0 + 24.0;
+    let width = GROUPS.len() as f32 * (cell + gap)
+        + GROUPS.iter().filter(|g| g.tools.len() > 1).count() as f32 * DROPDOWN_W
+        + 2.0 * (cell + gap)
+        + 8.0
+        + (4.0 * 34.0 + 4.0)
+        + 16.0;
     let rect = pill(ui, &mut app.ui.nav, canvas, width, &t);
     let current = app.session.tool.tool;
     let mut x = rect.min.x + 8.0;
@@ -89,6 +96,7 @@ pub fn show(app: &mut FigApp, ui: &mut Ui) {
             a11y::prefer(&mut app.ui.nav, Region::Toolbar, resp.id);
         }
         if resp.clicked() {
+            app.ui.tool_flyout = None;
             // Enter (a keyboard click) on the shape or frame tool already chosen places one; the
             // canvas takes the keyboard.
             if in_group && shown.draws_shape() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
@@ -101,7 +109,7 @@ pub fn show(app: &mut FigApp, ui: &mut Ui) {
         x += cell;
         // Flyout chevron.
         if g.tools.len() > 1 {
-            let cr = Rect::from_center_size(pos2(x + 5.0, cy), vec2(10.0, cell));
+            let cr = Rect::from_center_size(pos2(x + DROPDOWN_W / 2.0, cy), vec2(DROPDOWN_W, cell));
             let cresp = ui.interact(cr, ui.id().with(("flyout", g.key)), Sense::click());
             let open = app.ui.tool_flyout == Some(g.key);
             a11y::menu_button(&cresp, tr(g.name), open);
@@ -111,15 +119,16 @@ pub fn show(app: &mut FigApp, ui: &mut Ui) {
             if cresp.hovered() {
                 ui.painter().rect_filled(cr, CornerRadius::same(4), t.hover);
             }
-            icons::paint(ui.painter(), Rect::from_center_size(cr.center(), vec2(10.0, 10.0)), Icon::Chevron, t.icon_secondary);
+            icons::paint(ui.painter(), Rect::from_center_size(cr.center(), vec2(12.0, 12.0)), Icon::Chevron, t.icon_secondary);
             if cresp.clicked() {
                 app.ui.tool_flyout = if app.ui.tool_flyout == Some(g.key) { None } else { Some(g.key) };
             }
-            x += 10.0;
+            x += DROPDOWN_W;
         }
+        let anchor = Rect::from_min_max(r.min, pos2(x, r.max.y));
         x += gap;
         if app.ui.tool_flyout == Some(g.key) {
-            flyout(app, ui, g, pos2(r.min.x, rect.min.y - 8.0));
+            flyout(app, ui, g, anchor, rect.min.y - 8.0);
         }
     }
     // Resources (components, plugins) opens the Assets panel; Actions palette.
@@ -132,7 +141,7 @@ pub fn show(app: &mut FigApp, ui: &mut Ui) {
         if resp.hovered() {
             ui.painter().rect_filled(r, CornerRadius::same(5), t.hover);
         }
-        icons::paint(ui.painter(), r.shrink(7.0), icon, t.icon);
+        icons::paint(ui.painter(), Rect::from_center_size(r.center(), vec2(20.0, 20.0)), icon, t.icon);
         if resp.clicked() {
             if id == "actions" {
                 app.ui.palette = Some(String::new());
@@ -165,7 +174,12 @@ pub fn show(app: &mut FigApp, ui: &mut Ui) {
         } else if resp.hovered() {
             ui.painter().rect_filled(r, CornerRadius::same(6), t.hover);
         }
-        icons::paint(ui.painter(), r.shrink(9.0), *icon, if i == active { t.accent_text } else { t.icon_secondary });
+        icons::paint(
+            ui.painter(),
+            Rect::from_center_size(r.center(), vec2(18.0, 18.0)),
+            *icon,
+            if i == active { t.accent_text } else { t.icon_secondary },
+        );
         if resp.clicked() {
             match i {
                 0 => {
@@ -354,7 +368,7 @@ fn tool_cell(ui: &mut Ui, t: &Tokens, r: Rect, id: impl egui::AsIdSalt, icon: Ic
         Color32::TRANSPARENT
     };
     ui.painter().rect_filled(r, CornerRadius::same(5), bg);
-    icons::paint(ui.painter(), r.shrink(7.0), icon, if active { Color32::WHITE } else { t.icon });
+    icons::paint(ui.painter(), Rect::from_center_size(r.center(), vec2(20.0, 20.0)), icon, if active { Color32::WHITE } else { t.icon });
     resp
 }
 
@@ -375,15 +389,28 @@ fn done_button(ui: &mut Ui, t: &Tokens, x: f32, cy: f32, tip: &str) -> bool {
     resp.clicked()
 }
 
-fn flyout(app: &mut FigApp, ui: &mut Ui, g: &Group, bottom_left: egui::Pos2) {
+fn flyout(app: &mut FigApp, ui: &mut Ui, g: &Group, anchor: Rect, bottom: f32) {
     let t = Tokens::get(ui.ctx());
     let item_h = 32.0;
-    let w = 220.0;
+    let screen = ui.ctx().content_rect().shrink(8.0);
+    let width = g.tools.iter().fold(220.0_f32, |w, (tid, _)| {
+        let label = ui.painter().layout_no_wrap(tr(tid.label()).to_string(), regular(12.0), t.menu_text);
+        let key = ui.painter().layout_no_wrap(pretty_shortcut(tid.shortcut()), regular(12.0), t.menu_dim);
+        w.max(label.size().x + key.size().x + 96.0)
+    });
+    let w = width.min(screen.width().max(1.0));
     let h = item_h * g.tools.len() as f32 + 16.0;
+    let pos = pos2(
+        anchor.min.x.clamp(screen.min.x, (screen.max.x - w).max(screen.min.x)),
+        (bottom - h).clamp(screen.min.y, (screen.max.y - h).max(screen.min.y)),
+    );
     let mut chosen = None;
-    egui::Area::new(flyout_id(g.key)).fixed_pos(pos2(bottom_left.x, bottom_left.y - h)).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
+    let popup = egui::Area::new(flyout_id(g.key)).fixed_pos(pos).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
         let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+        ui.painter()
+            .add(egui::Shadow { offset: [0, 4], blur: 16, spread: 0, color: Color32::from_black_alpha(80) }.as_shape(rect, CornerRadius::same(13)));
         ui.painter().rect_filled(rect, CornerRadius::same(13), t.menu);
+        ui.painter().rect_stroke(rect, CornerRadius::same(13), Stroke::new(1.0, t.border), StrokeKind::Inside);
         let mut y = rect.min.y + 8.0;
         for (tid, icon) in g.tools {
             let r = Rect::from_min_size(pos2(rect.min.x + 8.0, y), vec2(w - 16.0, item_h));
@@ -397,16 +424,22 @@ fn flyout(app: &mut FigApp, ui: &mut Ui, g: &Group, bottom_left: egui::Pos2) {
             if *tid == app.session.tool.tool {
                 icons::paint(ui.painter(), Rect::from_center_size(pos2(r.min.x + 10.0, r.center().y), vec2(12.0, 12.0)), Icon::Check, t.menu_text);
             }
-            icons::paint(ui.painter(), Rect::from_center_size(pos2(r.min.x + 32.0, r.center().y), vec2(16.0, 16.0)), *icon, t.menu_text);
-            ui.painter().text(pos2(r.min.x + 48.0, r.center().y), Align2::LEFT_CENTER, tr(tid.label()), regular(12.0), t.menu_text);
-            ui.painter().text(pos2(r.max.x - 8.0, r.center().y), Align2::RIGHT_CENTER, pretty_shortcut(tid.shortcut()), regular(12.0), t.menu_dim);
+            icons::paint(ui.painter(), Rect::from_center_size(pos2(r.min.x + 32.0, r.center().y), vec2(18.0, 18.0)), *icon, t.menu_text);
+            let key = pretty_shortcut(tid.shortcut());
+            let key_width = ui.painter().layout_no_wrap(key.clone(), regular(12.0), t.menu_dim).size().x;
+            let label = crate::widgets::elide_font(ui, tr(tid.label()), (r.width() - key_width - 80.0).max(1.0), regular(12.0));
+            ui.painter().text(pos2(r.min.x + 48.0, r.center().y), Align2::LEFT_CENTER, label, regular(12.0), t.menu_text);
+            ui.painter().text(pos2(r.max.x - 8.0, r.center().y), Align2::RIGHT_CENTER, key, regular(12.0), t.menu_dim);
             if resp.clicked() {
                 chosen = Some(*tid);
             }
             y += item_h;
         }
     });
-    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+    if ui.input(|i| {
+        i.key_pressed(egui::Key::Escape)
+            || (i.pointer.any_click() && i.pointer.interact_pos().is_some_and(|p| !popup.response.rect.contains(p) && !anchor.contains(p)))
+    }) {
         app.ui.tool_flyout = None;
     }
     if let Some(tid) = chosen {
@@ -426,4 +459,54 @@ fn flyout_id(key: &str) -> egui::Id {
 /// Platform-specific, readable key names shared by every shortcut surface.
 pub fn pretty_shortcut(s: &str) -> String {
     figcraft_engine::keymap::display(s, crate::shortcuts::platform())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layers_drag_tests::Ui as Harness;
+
+    #[test]
+    fn mouse_opens_tool_menu_and_a_panel_click_dismisses_it() {
+        let mut h = Harness::new(figcraft_engine::Session::new());
+        h.ctx.enable_accesskit();
+        h.frame(vec![]);
+        let out = h.frame_output(vec![]);
+        let tree = out.platform_output.accesskit_update.unwrap();
+        let button = tree.nodes.iter().map(|(_, n)| n).find(|n| n.label() == Some("Move tools")).unwrap();
+        let b = button.bounds().unwrap();
+        let at = pos2(((b.x0 + b.x1) / 2.0) as f32, ((b.y0 + b.y1) / 2.0) as f32);
+        h.button(at, true);
+        h.button(at, false);
+        h.frame(vec![]);
+        assert_eq!(h.app.ui.tool_flyout, Some("move"), "the opening click must not dismiss its menu");
+        h.button(pos2(1410.0, 780.0), true);
+        h.button(pos2(1410.0, 780.0), false);
+        h.frame(vec![]);
+        assert_eq!(h.app.ui.tool_flyout, None, "a click outside the canvas also dismisses the menu");
+        assert_eq!(h.app.session.tool.tool, ToolId::Move);
+    }
+
+    #[test]
+    fn tool_menu_stays_inside_small_and_large_windows() {
+        for size in [vec2(800.0, 500.0), vec2(1440.0, 900.0)] {
+            let ctx = egui::Context::default();
+            let mut app = FigApp::new(figcraft_engine::Session::new(), Box::new(crate::NoServices));
+            app.ui.tool_flyout = Some("shape");
+            for i in 0..4 {
+                ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, size)),
+                        time: Some(i as f64 / 60.0),
+                        ..Default::default()
+                    },
+                    |ui| app.ui(ui),
+                )
+                .textures_delta
+                .clear();
+            }
+            let menu = ctx.memory(|m| m.area_rect(flyout_id("shape"))).unwrap();
+            assert!(ctx.content_rect().contains_rect(menu), "menu escapes window: {menu:?} at {size:?}");
+        }
+    }
 }
