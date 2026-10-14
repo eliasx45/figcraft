@@ -433,7 +433,14 @@ fn input(app: &mut FigApp, ui: &mut Ui, resp: &egui::Response) -> bool {
         open_context_menu(app, pos, mods.command);
         return true;
     }
-    if resp.double_clicked() {
+    // egui reports every later click in a fast burst as a triple-click. Keep drilling down
+    // until editing starts; text triple-clicks still select a line, and vector clicks edit points.
+    let keep_drilling = resp.triple_clicked()
+        && mods.is_none()
+        && !editing_text
+        && app.session.ds().is_ok_and(|d| d.vector_edit.is_none())
+        && matches!(app.session.tool.tool, ToolId::Move | ToolId::Scale);
+    if resp.double_clicked() || keep_drilling {
         let ev = pointer_event(app, PointerKind::DoubleClick, pos, &mods);
         if let Err(e) = app.session.pointer(&ev) {
             app.toast(e.to_string());
@@ -1341,4 +1348,114 @@ fn rulers(app: &FigApp, painter: &egui::Painter, t: &Tokens, doc: &Document, sel
 pub fn fmt(v: f64) -> String {
     let r = (v * 100.0).round() / 100.0;
     if (r - r.round()).abs() < 1e-9 { format!("{}", r.round() as i64) } else { format!("{r}") }
+}
+
+#[cfg(test)]
+mod rapid_click_tests {
+    use egui::{Event, Modifiers, PointerButton};
+    use figcraft_doc::NodeId;
+    use figcraft_engine::Session;
+    use serde_json::{Value, json};
+
+    use crate::layers_drag_tests::Ui as Harness;
+
+    fn create(s: &mut Session, command: &str, params: Value) -> NodeId {
+        NodeId(s.execute(command, &params).unwrap()["id"].as_u64().unwrap())
+    }
+
+    fn scene(kind: &str, text: bool) -> (Harness, NodeId) {
+        let mut s = Session::new();
+        let board = create(&mut s, "frame.create", json!({"width": 500, "height": 400}));
+        let mut parent = board;
+        let mut first = board;
+        if kind != "groups" {
+            for i in 0..6 {
+                parent = create(&mut s, "frame.create", json!({"parent": parent, "x": 10, "y": 10, "width": 300, "height": 250}));
+                if i == 0 {
+                    first = parent;
+                }
+            }
+        }
+        let mut params = json!({"type": if text {"text"} else {"rectangle"}, "parent": parent, "x": 60, "y": 60,
+            "width": 180, "height": 90});
+        if text {
+            params["text"] = json!("First line\nSecond line");
+            params["props"] = json!({"textAutoResize": "none", "fontSize": 30});
+        }
+        let mut leaf = create(&mut s, "node.create", params);
+        if kind == "groups" {
+            let mut group = leaf;
+            for _ in 0..6 {
+                group = create(&mut s, "object.group", json!({"ids": [group]}));
+            }
+        } else if kind == "instance" {
+            let component = create(&mut s, "component.create", json!({"ids": [first]}));
+            let instance = create(&mut s, "instance.create", json!({"component": component, "x": 600, "y": 0}));
+            leaf = instance;
+            while let Some(child) = s.doc().unwrap().node(leaf).unwrap().children.first().copied() {
+                leaf = child;
+            }
+        }
+        let center = s.doc().unwrap().world_bounds(leaf).unwrap().center();
+        s.execute("view.set", &json!({"cx": center.x, "cy": center.y, "zoom": 1})).unwrap();
+        s.execute("select.set", &json!({"ids": []})).unwrap();
+        (Harness::new(s), leaf)
+    }
+
+    fn click(h: &mut Harness, leaf: NodeId, modifiers: Modifiers) {
+        let c = h.app.session.doc().unwrap().world_bounds(leaf).unwrap().center();
+        let pos = h.app.to_screen(c.x, c.y);
+        for pressed in [true, false] {
+            h.frame_with(vec![Event::PointerMoved(pos), Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers }], modifiers);
+        }
+    }
+
+    #[test]
+    fn continuous_clicks_reach_nested_frames_groups_and_instances_then_edit() {
+        for kind in ["frames", "groups", "instance"] {
+            let (mut h, leaf) = scene(kind, false);
+            let bounds = h.app.session.doc().unwrap().world_bounds(leaf).unwrap();
+            for _ in 0..12 {
+                click(&mut h, leaf, Modifiers::NONE);
+                if h.app.session.ds().unwrap().vector_edit.is_some() {
+                    break;
+                }
+            }
+            assert_eq!(h.app.session.selection(), vec![leaf], "rapid clicks stalled in {kind}");
+            assert!(h.app.session.ds().unwrap().vector_edit.is_some(), "rapid clicks should enter the leaf in {kind}");
+            for _ in 0..2 {
+                click(&mut h, leaf, Modifiers::NONE);
+                assert!(h.app.session.ds().unwrap().vector_edit.is_some(), "later rapid clicks must stay in vector editing");
+            }
+            assert_eq!(h.app.session.doc().unwrap().world_bounds(leaf).unwrap(), bounds, "clicking must not move the artwork");
+        }
+    }
+
+    #[test]
+    fn rapid_drill_down_preserves_triple_click_line_selection_in_text() {
+        let (mut h, leaf) = scene("frames", true);
+        for _ in 0..12 {
+            click(&mut h, leaf, Modifiers::NONE);
+            if h.app.session.ds().unwrap().text_edit.is_some() {
+                break;
+            }
+        }
+        assert_eq!(h.app.session.ds().unwrap().text_edit.as_ref().unwrap().id, leaf);
+        click(&mut h, leaf, Modifiers::NONE);
+        assert!(h.ctx.input(|i| i.pointer.button_triple_clicked(PointerButton::Primary)));
+        let te = h.app.session.ds().unwrap().text_edit.as_ref().unwrap();
+        let text = "First line\nSecond line";
+        let selected: String = text.chars().skip(te.anchor.min(te.caret)).take(te.anchor.abs_diff(te.caret)).collect();
+        assert!(matches!(selected.trim_end_matches('\n'), "First line" | "Second line"), "triple-click should select a line, got {selected:?}");
+    }
+
+    #[test]
+    fn command_click_in_a_burst_selects_the_leaf_without_entering_edit_mode() {
+        let (mut h, leaf) = scene("frames", false);
+        click(&mut h, leaf, Modifiers::NONE);
+        click(&mut h, leaf, Modifiers::NONE);
+        click(&mut h, leaf, Modifiers::COMMAND);
+        assert_eq!(h.app.session.selection(), vec![leaf]);
+        assert!(h.app.session.ds().unwrap().vector_edit.is_none());
+    }
 }
