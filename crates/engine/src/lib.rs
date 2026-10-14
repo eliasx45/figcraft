@@ -25,6 +25,7 @@ pub mod devcompare;
 pub mod devinspect;
 pub mod distance;
 pub mod drop;
+pub mod effectcraft_clipboard;
 pub mod guard;
 pub mod guides;
 pub mod inspect;

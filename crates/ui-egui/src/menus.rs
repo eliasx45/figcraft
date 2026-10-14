@@ -26,6 +26,7 @@ pub const UI_COMMANDS: &[&str] = &[
     "edit.copyAsCss",
     "edit.copyAsSvg",
     "edit.copyAsPng",
+    "edit.copyForEffectCraft",
     "edit.copyLink",
 ];
 
@@ -97,6 +98,28 @@ pub fn invoke(app: &mut FigApp, id: &str) {
             if let Some(svg) = app.session.doc().ok().and_then(|d| figcraft_svg_export(d, &ids)) {
                 app.services.clipboard_set_text(&svg);
                 app.toast(tr("Copied as SVG"));
+            }
+        }
+        "edit.copyForEffectCraft" => {
+            if let Some(payload) = app.run(id, json!({})) {
+                match serde_json::to_string(&payload) {
+                    Ok(text) => {
+                        app.services.clipboard_set_text(&text);
+                        let warnings: Vec<_> = payload["warnings"].as_array().into_iter().flatten().filter_map(serde_json::Value::as_str).collect();
+                        if warnings.is_empty() {
+                            app.toast(tr("Copied for EffectCraft"));
+                        } else {
+                            app.toast(trf(
+                                "Copied for EffectCraft — {count} warning(s): {warnings}",
+                                &[
+                                    ("count", &warnings.len().to_string()),
+                                    ("warnings", &warnings.iter().take(3).copied().collect::<Vec<_>>().join("; ")),
+                                ],
+                            ));
+                        }
+                    }
+                    Err(e) => app.toast(e.to_string()),
+                }
             }
         }
         "edit.copyAsPng" => {
@@ -488,6 +511,7 @@ pub fn popups(app: &mut FigApp, ctx: &egui::Context) {
                         (tr("Copy as CSS"), "edit.copyAsCss"),
                         (tr("Copy as SVG"), "edit.copyAsSvg"),
                         (tr("Copy as PNG"), "edit.copyAsPng"),
+                        (tr("Copy for EffectCraft"), "edit.copyForEffectCraft"),
                         ("-", ""),
                         (tr("Delete"), "edit.delete"),
                     ]
@@ -677,4 +701,33 @@ fn palette(app: &mut FigApp, ctx: &egui::Context) {
     }
     app.ui.palette = if close { None } else { Some(q) };
     let _ = StrokeKind::Inside;
+}
+
+#[cfg(test)]
+mod effectcraft_clipboard_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    struct Clipboard(Arc<Mutex<String>>);
+    impl crate::Services for Clipboard {
+        fn clipboard_set_text(&mut self, text: &str) {
+            *self.0.lock().unwrap() = text.into();
+        }
+    }
+    #[test]
+    fn menu_writes_the_snapshot_and_failed_copy_leaves_clipboard_untouched() {
+        let clipboard = Arc::new(Mutex::new("before".into()));
+        let mut app = FigApp::new(figcraft_engine::Session::new(), Box::new(Clipboard(clipboard.clone())));
+        invoke(&mut app, "edit.copyForEffectCraft");
+        assert_eq!(*clipboard.lock().unwrap(), "before");
+        app.run("shape.rectangle", json!({"width": 40, "height": 20}));
+        invoke(&mut app, "edit.copyForEffectCraft");
+        let payload: serde_json::Value = serde_json::from_str(&clipboard.lock().unwrap()).unwrap();
+        assert_eq!(payload["format"], "figcraft.clipboard");
+        assert_eq!(payload["nodes"][0]["type"], "RECTANGLE");
+        assert!(app.session.clipboard.nodes.is_empty());
+        assert!(MENU.iter().any(|m| m.id == "edit.copyForEffectCraft" && m.menu == "Edit/Copy as"));
+        invoke(&mut app, "edit.copy");
+        assert!(!app.session.clipboard.nodes.is_empty());
+        assert!(!clipboard.lock().unwrap().contains("figcraft.clipboard"));
+    }
 }

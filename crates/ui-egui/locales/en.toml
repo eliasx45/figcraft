@@ -8,6 +8,9 @@
 name = "English"
 
 [ui]
+"Copied for EffectCraft — {count} warning(s): {warnings}" = "Copied for EffectCraft — {count} warning(s): {warnings}"
+"Copied for EffectCraft" = "Copied for EffectCraft"
+"Copy for EffectCraft" = "Copy for EffectCraft"
 "% of all commits" = "% of all commits"
 "(no longer published)" = "(no longer published)"
 "({n} warnings: some entries were skipped)" = { one = "({n} warning: some entries were skipped)", other = "({n} warnings: some entries were skipped)" }

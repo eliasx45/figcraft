@@ -1,6 +1,6 @@
 # File format parity
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** minor (SVG/PDF export depth refusal (#208); `.fig` export: instance sizes, variables with modes, shared styles, variable-width strokes; `.fig` export: written files checked by opening them in other software; experimental `.fig` export; export and inspect behaviour suite and fixes; .fig import: editable vector networks and more layer kinds; embedded image colour profiles; `.fig` import, best effort; animated GIF fills and TIFF images; last major: created, formats from the installed Figma's Info.plist and help center, ours from source) · **Target:** Figma Design (desktop app 126.10.7)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** minor (EffectCraft clipboard snapshot (runtime QA pending); SVG/PDF export depth refusal (#208); `.fig` export: instance sizes, variables with modes, shared styles, variable-width strokes; `.fig` export: written files checked by opening them in other software; experimental `.fig` export; export and inspect behaviour suite and fixes; .fig import: editable vector networks and more layer kinds; embedded image colour profiles; `.fig` import, best effort; animated GIF fills and TIFF images; last major: created, formats from the installed Figma's Info.plist and help center, ours from source) · **Target:** Figma Design (desktop app 126.10.7)
 
 Every format Figma reads or writes, with FigCraft's support. Sources: `Info.plist` of
 `/Applications/Figma.app` (document types only; nothing inside the bundle's code was read), Figma's
@@ -149,6 +149,25 @@ each.
   (`crates/format/src/fig/assets_tests.rs`), and every example document keeps its variables, styles
   and links through `file.export` and `file.open` (`crates/engine/src/fig_export_assets_tests.rs`).
 
+## Copy to EffectCraft
+
+Edit ▸ Copy as ▸ EffectCraft (`edit.copyForEffectCraft {ids?}`) copies the selection as a
+one-time native-layer snapshot for EffectCraft's Paste action. Ordinary Copy stays unchanged.
+The command returns a `figcraft.clipboard` JSON envelope, version 1, with `nodes` and `warnings`;
+the menu writes that same envelope to the system clipboard and shows its first warnings.
+
+Shapes, editable paths, text and styled ranges, solid/gradient paints, strokes, shadows,
+uniform layer blur, frame/group hierarchy and masks are exported with resolved layout and full
+world transforms. Paint order and render bounds include reversed auto layout and shadow overflow.
+Colours convert to sRGB. Components, variables, styles and auto layout become their current values;
+boolean results become editable paths. There is no source link or update mechanism.
+
+Image/pattern paints and unsupported effects are omitted with warnings; nothing is rasterized or
+fetched. Text metrics, gradients, advanced strokes and masks can differ, and their known limits
+are reported by the exporter and receiver. Both the source selection's serialized nodes and the
+emitted envelope are limited to 2 MiB, with at most 20,000 layers and 64 levels; over-budget copies
+fail without changing the clipboard. Native cross-app rendering and clipboard QA are pending.
+
 ## Fonts
 
 | | Figma | FigCraft |
@@ -162,6 +181,7 @@ each.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-14 | minor | One-time native EffectCraft clipboard export: explicit Copy as action and `edit.copyForEffectCraft`, bounded versioned JSON, resolved geometry/text/paints, warnings instead of raster fallback. Seven exporter regressions and the clipboard-service UI test passed, along with localization, parity and scoped clippy checks; native cross-app QA remains pending. Parity scores unchanged. |
 | 2026-10-14 | minor | SVG/PDF depth overflow (#208) is checked before bounds and drawing; public checked APIs return the offending root/layer, commands and CLI report it, and no incomplete export replaces an existing file. Tested at depths 255/256/257, with inner roots, hidden branches, masks, raster fallbacks and multiple roots/pages. Numbers unchanged. |
 | 2026-10-13 | minor | `.fig` export (gap 1): instances write what they change from their main as an override addressed by the main's id (their size, name and paints were lost elsewhere without it), what follows for their layers as derived data, and a scale factor when scaled as a whole; layers of a nested instance swapped for another component keep their overrides; variable collections, modes, variables and their bindings, the modes frames and pages set, shared styles with their links and variable-width strokes are written, and the import reads all of it back (style definitions and unused styles, variable order and scopes, bindings on paint lists, gradient stops, effects and layout grids, page modes, text field bindings, which a `.fig` import used to drop, and width profiles). Opened `.fig` and file JSON documents link nested instances of variants (and any nested instance under a name of its own) to their main's layers; they stayed unlinked, so a second export lost what they changed. Checked by opening written files in other software: resized and scaled instances keep their size and lay their layers out for it, variables with their modes and colour bindings resolve there (a frame set to another mode shows that mode's colours, also inside instances), colour, text, effect and grid styles are listed, and variable-width strokes that are the same on both sides of the path draw with their width; number, string and boolean bindings and bindings on effects, layout guides and gradient stops come across as the values they give but did not show as bound there (their entries now also name the layer field they set, not yet checked there), and strokes wider on one side of the path are written as filled outlines, no longer editable strokes there (the stroke itself is kept as plugin data and our own import puts it back; not yet checked there). Numbers unchanged |
 | 2026-10-12 | minor | `.fig` export made to open elsewhere (gap 1): the document and its pages say they are visible and opaque (left out, nothing was drawn), the schema in the file uses the format's own names, kinds, field ids and enum values, rectangles are rounded rectangles with four radii, frames and shapes carry their fill outline and plain strokes their stroke outline, text carries its layout settings, font styles use their standard names, line heights that are a share of the font size are raw multipliers, masks keep their type (read back too); the import reads per-side stroke weights whose zero sides are left out. Written files were checked by opening them in other software: layers, fills, gradients, strokes, shadows, vectors, components and text draw as in FigCraft; effects such as glass and noise, images and prototype interactions are still unchecked there, and variables are not written. Numbers unchanged |

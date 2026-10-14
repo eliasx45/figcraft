@@ -35,6 +35,15 @@ in the app. For renders that come out the same on every machine (CI), start it w
 `figcraft-cli mcp --no-system-fonts` or set `FIGCRAFT_NO_SYSTEM_FONTS=1`: text then uses only the
 built-in fonts. Attached, the app's own fonts apply. The browser build has no system fonts.
 
+## Copy into EffectCraft
+
+`run_command {command: "edit.copyForEffectCraft", params: {ids: [2]}}` returns a one-time editable
+snapshot: `{"format":"figcraft.clipboard","version":1,"nodes":[...],"warnings":[...]}`.
+Without `ids`, it uses the selection. It does not alter the document or the engine's ordinary
+clipboard. The desktop menu **Edit ▸ Copy as ▸ EffectCraft** writes the same JSON to the system
+clipboard; in EffectCraft, Paste imports it. Limits and omitted features are documented in
+[file-format-parity.md](file-format-parity.md#copy-to-effectcraft). This is a copy, with no live link.
+
 ## Configure a client
 
 Build the CLI first (`cargo build --release -p figcraft-cli`) and use the absolute path to
