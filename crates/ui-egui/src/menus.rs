@@ -34,6 +34,9 @@ pub const UI_COMMANDS: &[&str] = &[
 /// or text from another app); otherwise our copied layers. `event_text` is the text the platform
 /// handed over with the paste event (the browser has no other way to read it).
 pub fn paste(app: &mut FigApp, event_text: Option<&str>) {
+    if crate::clipboard::paste(app, json!({})) {
+        return;
+    }
     let sys_text = app.services.clipboard_get_text().or_else(|| event_text.map(str::to_string)).filter(|t| !t.is_empty());
     let ours = sys_text.is_some() && sys_text == app.ui.last_copy;
     let (cx, cy) = app.session.ds().map(|d| (d.view.cx, d.view.cy)).unwrap_or((0.0, 0.0));
@@ -142,7 +145,7 @@ pub fn invoke(app: &mut FigApp, id: &str) {
             app.services.clipboard_set_text(&text);
             app.ui.last_copy = Some(text);
         }
-        "edit.paste" => paste(app, None),
+        "edit.paste" | "edit.pasteFigma" => paste(app, None),
         "file.close" if app.session.ds().is_ok_and(|d| d.is_dirty() && d.branch_of.is_none()) => {
             let save = pretty_shortcut(crate::shortcuts::shortcut("file.save").unwrap_or(""));
             app.toast(trf(
@@ -521,7 +524,9 @@ pub fn popups(app: &mut FigApp, ctx: &egui::Context) {
                     if item(ui, label, sc, available(id), false, &t) {
                         if *id == "edit.paste" {
                             let p = app.to_page(pos);
-                            if app.session.clipboard.nodes.is_empty() {
+                            if crate::clipboard::paste(app, json!({"x": p.x, "y": p.y})) {
+                                // Native Figma content takes precedence over an earlier internal copy.
+                            } else if app.session.clipboard.nodes.is_empty() {
                                 invoke(app, id);
                             } else {
                                 app.run("edit.paste", json!({"x": p.x, "y": p.y}));

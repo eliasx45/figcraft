@@ -1,6 +1,6 @@
 # FigCraft architecture
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-11 · **Change:** minor (the shared hub in `collab-net` and the `figcraft-server` app) · **Target:** Figma Design
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** minor (native Figma clipboard import shares the file decoder; the shared hub in `collab-net` and the `figcraft-server` app) · **Target:** Figma Design
 
 How FigCraft is built today. Engine first, a thin swappable UI, everything a command; a Figma-shaped
 data model (a scene graph of frames with auto layout, components and variables). ~108,800 lines of
@@ -67,8 +67,11 @@ express an effect.
 `.figcraft` is the native format (atomic saves, autosave checkpoints; the desktop app keeps
 recovery copies of unsaved documents that reopen after a crash or a forced quit). Imports: REST API
 file JSON with variables and images, SVG, raster images, clipboard
-content. Exports: PNG, JPG, WebP, SVG, PDF, code. There is no `.fig` reader yet
-([`file-format-parity.md`](file-format-parity.md)).
+content, and best-effort `.fig` files. Exports: PNG, JPG, WebP, SVG, PDF, code and experimental
+`.fig` files ([`file-format-parity.md`](file-format-parity.md)). Desktop Figma clipboard paste
+uses that same Kiwi decoder, REST mapping and image resolver; native services resolve signed
+clipboard image URLs off the UI thread. The engine inserts the selection with fresh resource
+IDs as one undoable command ([`clipboard.md`](clipboard.md)).
 
 ## Robustness
 
@@ -81,6 +84,7 @@ input.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-14 | minor | M6: native Figma clipboard import shares .fig decoding; selection insertion and resource remapping in the engine, rich clipboard and bounded image fetching in native services. Closed painted contours without explicit regions import with their fill; vector mask outlines use geometry on canvas and in exports. Corrected the stale statement that .fig import was absent. |
 | 2026-10-11 | minor | `collab-net` hosts through one hub for the app's sessions and the standalone server; added the `figcraft-server` app |
 | 2026-10-10 | minor | Merged main after #101–#103: WASM plugins (plugins area 0% → 35% breadth, 20% ready; ecosystem 5% → 20%) and the multiplayer core without networking (multiplayer 5% → 15% breadth, 5% ready; collaboration 8% → 12%); menu breadth 97.5% → 98.5% (200/203); ready for real work ~46% → ~47%; full parity 420–790 h → 390–745 h; beta 210–380 h → 200–365 h. Fixed the stated weight sums (areas 1–16 sum to 94, total 113; percentages were already computed with those) |
 | 2026-10-10 | major | Created from the code as of PR #99 |

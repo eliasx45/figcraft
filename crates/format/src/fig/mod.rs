@@ -12,6 +12,7 @@
 //! tables, …) come in as the closest frames, text and vectors. Anything not understood is skipped
 //! with a warning; malformed input never panics.
 
+pub mod clipboard;
 mod export;
 #[cfg(test)]
 mod export_tests;
@@ -57,13 +58,18 @@ pub fn try_import(bytes: &[u8], name: &str) -> Option<Result<(Document, Vec<Stri
 /// Build a document from a `.fig` file. Returns it with the warnings about what was skipped or
 /// approximated. `name`: the document name when the file doesn't carry one.
 pub fn import(bytes: &[u8], name: &str) -> Result<(Document, Vec<String>), FormatError> {
+    import_with_images(bytes, name, &crate::rest::no_images)
+}
+
+/// The same file importer with additional image bytes (clipboard images travel separately).
+pub fn import_with_images(bytes: &[u8], name: &str, external: crate::rest::ImageResolver) -> Result<(Document, Vec<String>), FormatError> {
     let archive = Archive::open(bytes)?;
     let (schema, message) = decode_canvas(&archive.canvas)?;
     let root = schema.find("Message").ok_or_else(|| corrupt("the schema has no Message definition"))?;
     let msg = schema.decode_message(root, &message).map_err(|e| corrupt(e.to_string()))?;
     let file_name = archive.file_name.as_deref().filter(|n| !n.trim().is_empty()).unwrap_or(name);
     let (json, mut warnings) = map::to_rest(&msg, file_name);
-    let images = |r: &str| archive.image(r);
+    let images = |r: &str| archive.image(r).or_else(|| external(r));
     let (doc, more) = crate::rest::import(&json, &images)?;
     warnings.extend(more.into_iter().filter_map(map::adapt_warning));
     Ok((doc, warnings))

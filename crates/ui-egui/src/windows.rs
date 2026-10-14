@@ -40,6 +40,7 @@ struct Pane {
     worker: Option<Worker>,
     field_focus: bool,
     control_input: Vec<egui::Event>,
+    clipboard_pending: Option<crate::clipboard::Pending>,
 }
 
 /// The app's other windows.
@@ -162,6 +163,7 @@ fn exchange(app: &mut FigApp, p: &mut Pane) {
     std::mem::swap(&mut app.worker, &mut p.worker);
     std::mem::swap(&mut app.field_focus, &mut p.field_focus);
     std::mem::swap(&mut app.control_input, &mut p.control_input);
+    std::mem::swap(&mut app.clipboard_pending, &mut p.clipboard_pending);
 }
 
 /// Open a window (`window.new`) with open file `index` moved into it, the file at `path`, or a new

@@ -8,6 +8,9 @@
 name = "English"
 
 [ui]
+"Copied images are still loading…" = "Copied images are still loading…"
+"Loading copied images…" = "Loading copied images…"
+"The paste destination changed while images loaded. Paste again." = "The paste destination changed while images loaded. Paste again."
 "% of all commits" = "% of all commits"
 "(no longer published)" = "(no longer published)"
 "({n} warnings: some entries were skipped)" = { one = "({n} warning: some entries were skipped)", other = "({n} warnings: some entries were skipped)" }

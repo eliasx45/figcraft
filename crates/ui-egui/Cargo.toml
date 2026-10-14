@@ -31,4 +31,5 @@ serde_json = { workspace = true }
 toml = "1"
 
 [dev-dependencies]
+zip = { workspace = true }
 wat = { workspace = true }

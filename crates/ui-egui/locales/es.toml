@@ -8,6 +8,9 @@ name = "Español"
 status = "draft — needs native review"
 
 [ui]
+"Copied images are still loading…" = "Las imágenes copiadas aún se están cargando…"
+"Loading copied images…" = "Cargando las imágenes copiadas…"
+"The paste destination changed while images loaded. Paste again." = "El destino cambió mientras se cargaban las imágenes. Vuelve a pegar."
 
 "% of all commits" = "% del total de commits"
 "(no longer published)" = "(ya no publicado)"
@@ -1588,6 +1591,7 @@ status = "draft — needs native review"
 "⌥ drag" = "⌥ arrastrar"
 
 [commands]
+"edit.pasteFigma" = "Pegar capas de Figma"
 "align.bottom" = "Alinear abajo"
 "align.hcenter" = "Alinear centros horizontales"
 "align.left" = "Alinear a la izquierda"

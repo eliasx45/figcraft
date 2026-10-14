@@ -240,10 +240,21 @@ fn node_outline_at(doc: &Document, n: &Node, depth: usize) -> Option<(BezPath, F
 
 /// The union outline of a node and its descendants (for booleans of groups/frames).
 pub fn subtree_outline(doc: &Document, n: &Node, depth: usize) -> Option<(BezPath, FillRule)> {
+    subtree_outline_mode(doc, n, depth, false)
+}
+
+/// Vector masks clip by geometry, including closed unfilled vector contours. Figma copies can
+/// carry these as networks with no fill regions (winding rule NONE), often nested in a group.
+pub fn vector_mask_outline(doc: &Document, n: &Node, depth: usize) -> Option<(BezPath, FillRule)> {
+    subtree_outline_mode(doc, n, depth, true)
+}
+
+fn subtree_outline_mode(doc: &Document, n: &Node, depth: usize, mask: bool) -> Option<(BezPath, FillRule)> {
     if depth > 64 {
         return None;
     }
     match &n.kind {
+        NodeKind::Vector { network } if mask && network.regions.is_empty() => Some((network.stroke_path(), FillRule::Winding)),
         NodeKind::Group | NodeKind::Frame | NodeKind::Component { .. } | NodeKind::Instance { .. } if !n.children.is_empty() => {
             let mut out = BezPath::new();
             if n.kind.is_frame_like()
@@ -256,7 +267,7 @@ pub fn subtree_outline(doc: &Document, n: &Node, depth: usize) -> Option<(BezPat
                 if !c.visible {
                     continue;
                 }
-                if let Some((mut p, _)) = subtree_outline(doc, c, depth + 1) {
+                if let Some((mut p, _)) = subtree_outline_mode(doc, c, depth + 1, mask) {
                     p.apply_affine(c.transform);
                     out.extend(p.elements().iter().copied());
                 }
@@ -623,7 +634,7 @@ fn draw_masked(ctx: &Ctx, pix: &mut Pixmap, mask_id: NodeId, content: &[NodeId],
         m2.is_mask = false;
         let mxf = xf * m2.transform;
         if mask_type == figcraft_doc::MaskType::Vector {
-            if let Some((outline, rule)) = subtree_outline(ctx.doc, &m2, depth + 1)
+            if let Some((outline, rule)) = vector_mask_outline(ctx.doc, &m2, depth + 1)
                 && let Some(path) = ts_path(&outline)
             {
                 let mut paint = tiny_skia::Paint::default();

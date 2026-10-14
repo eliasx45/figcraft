@@ -527,7 +527,7 @@ fn load_with(
 
 /// Link imported instances to their mains (layer sources, overrides found by comparing values),
 /// innermost first so outer instances settle last.
-fn link_instances(doc: &mut Document) {
+pub(crate) fn link_instances(doc: &mut Document) {
     crate::style_vars::after_load(doc);
     let mut insts: Vec<(usize, NodeId)> =
         doc.nodes().filter(|n| matches!(n.kind, NodeKind::Instance { .. })).map(|n| (doc.ancestors(n.id).len(), n.id)).collect();

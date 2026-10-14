@@ -11,6 +11,7 @@ pub mod bidi;
 pub mod branch_ui;
 pub mod canvas;
 pub mod cjk;
+mod clipboard;
 pub mod colorpicker;
 pub mod comments;
 pub mod component_panel;
@@ -177,6 +178,16 @@ pub trait Services {
     }
     fn clipboard_set_text(&mut self, _s: &str) {}
     fn clipboard_get_text(&mut self) -> Option<String> {
+        None
+    }
+    fn clipboard_get_html(&mut self) -> Option<String> {
+        None
+    }
+    /// Resolve the images a Figma copy explicitly carries, without blocking the UI.
+    fn clipboard_images(
+        &mut self,
+        _images: std::collections::BTreeMap<String, String>,
+    ) -> Option<std::sync::mpsc::Receiver<std::collections::BTreeMap<String, Vec<u8>>>> {
         None
     }
     fn clipboard_set_png(&mut self, _w: u32, _h: u32, _rgba: &[u8]) {}
@@ -503,6 +514,7 @@ pub struct FigApp {
     window_requests: Vec<figcraft_engine::UiRequest>,
     /// Commands waiting for a server ([`FigApp::run_background`]) and what to do with their results.
     waiting: Vec<(String, Done)>,
+    clipboard_pending: Option<clipboard::Pending>,
 }
 
 /// What to do with the result of a command run in the background.
@@ -530,6 +542,7 @@ impl FigApp {
             windows: windows::Windows::default(),
             window_requests: Vec::new(),
             waiting: Vec::new(),
+            clipboard_pending: None,
         }
     }
 
@@ -972,6 +985,7 @@ impl FigApp {
         // Control requests run first so their results reflect this frame.
         control::drain(self, &ctx);
         windows::requests(self, &ctx);
+        clipboard::poll(self, &ctx);
         // Before any widget: the navigation keys (F6, Tab, arrows, Escape) move the keyboard.
         a11y::begin(self, &ctx);
         if self.ui.title_bar == TitleBar::Custom {

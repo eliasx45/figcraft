@@ -468,7 +468,7 @@ impl W<'_> {
                         // A vector mask is a clip path: its outline.
                         let cid = self.id("clip");
                         let outline =
-                            self.doc.node(c).and_then(|mn| Some((xf * mn.transform, figcraft_render::subtree_outline(self.doc, mn, depth + 1)?)));
+                            self.doc.node(c).and_then(|mn| Some((xf * mn.transform, figcraft_render::vector_mask_outline(self.doc, mn, depth + 1)?)));
                         let (shape, cr) = match &outline {
                             Some((mxf, (mp, rule))) => (
                                 format!(" transform=\"{}\" d=\"{}\"", matrix(*mxf), path_d(mp)),

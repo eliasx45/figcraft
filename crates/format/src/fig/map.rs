@@ -725,7 +725,7 @@ impl<'a> Mapper<'a> {
     fn network(&mut self, o: &mut Obj, v: &View<'a>) -> bool {
         let Some(vd) = v.get("vectorData") else { return false };
         let Some(blob) = num(vd, "vectorNetworkBlob").and_then(|i| self.blobs.get(i as usize)).copied() else { return false };
-        let Some(net) = network::decode(blob) else {
+        let Some(mut net) = network::decode(blob) else {
             self.warn("damaged vector networks import as outlines");
             return false;
         };
@@ -734,6 +734,9 @@ impl<'a> Mapper<'a> {
             o.get("fills").and_then(Value::as_array).is_some_and(|f| f.iter().any(|p| p.get("visible").and_then(Value::as_bool) != Some(false)));
         if net.segments.is_empty() || (net.regions.is_empty() && fills_shown && o.contains_key("fillGeometry")) {
             return false;
+        }
+        if fills_shown && net.regions.is_empty() {
+            net.fill_closed_contours();
         }
         let styles: BTreeMap<u64, &Kv> =
             vd.get("styleOverrideTable").map(Kv::list).unwrap_or_default().iter().filter_map(|s| Some((num(s, "styleID")? as u64, s))).collect();
