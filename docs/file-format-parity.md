@@ -1,6 +1,6 @@
 # File format parity
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** minor (one-time EffectCraft clipboard export (runtime QA pending); native Figma clipboard import through the existing .fig mapper; SVG/PDF export depth refusal (#208); `.fig` export: instance sizes, variables with modes, shared styles, variable-width strokes; `.fig` export: written files checked by opening them in other software; experimental `.fig` export; export and inspect behaviour suite and fixes; .fig import: editable vector networks and more layer kinds; embedded image colour profiles; `.fig` import, best effort; animated GIF fills and TIFF images; last major: created, formats from the installed Figma's Info.plist and help center, ours from source) · **Target:** Figma Design (desktop app 126.10.7)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** minor (one-time EffectCraft clipboard export verified through native copy/paste; native Figma clipboard import through the existing .fig mapper; SVG/PDF export depth refusal (#208); `.fig` export: instance sizes, variables with modes, shared styles, variable-width strokes; `.fig` export: written files checked by opening them in other software; experimental `.fig` export; export and inspect behaviour suite and fixes; .fig import: editable vector networks and more layer kinds; embedded image colour profiles; `.fig` import, best effort; animated GIF fills and TIFF images; last major: created, formats from the installed Figma's Info.plist and help center, ours from source) · **Target:** Figma Design (desktop app 126.10.7)
 
 Every format Figma reads or writes, with FigCraft's support. Sources: `Info.plist` of
 `/Applications/Figma.app` (document types only; nothing inside the bundle's code was read), Figma's
@@ -166,7 +166,22 @@ Image/pattern paints and unsupported effects are omitted with warnings; nothing 
 fetched. Text metrics, gradients, advanced strokes and masks can differ, and their known limits
 are reported by the exporter and receiver. Both the source selection's serialized nodes and the
 emitted envelope are limited to 2 MiB, with at most 20,000 layers and 64 levels; over-budget copies
-fail without changing the clipboard. Native cross-app rendering and clipboard QA are pending.
+fail without changing the clipboard.
+
+Verified on macOS with the production FigApp, control channel and native clipboard services in
+an isolated QA harness: Copy as ▸ EffectCraft followed by both EffectCraft's Paste menu and Cmd+V
+produced nine native layers (three text, six shapes), with no raster layers. Text edits, one-step
+Undo/Redo, independent repeated pastes, malformed-clipboard atomicity and save/reopen worked;
+reopened renders were identical. Source edits did not update the pasted layers. Nested frames
+became native precomps with editable text; pasting into a 24 fps, 20-second composition preserved
+that timing. A standalone thick line and shadow exported and imported on a 220×120 canvas with
+the same opaque stroke bounds.
+
+The 640×420 comparison fixture had an exact background and a maximum channel difference of
+1/255 in its linear-gradient region. Text metrics still differ, and the warning remains; these
+fixtures do not establish general pixel parity. Local, gitignored evidence is in
+`plan/link/verification/`: `behavior-results.json`, `nested-results.json`, `pixel-comparison.json`
+and the source/target PNGs.
 
 ## Fonts
 
@@ -181,7 +196,7 @@ fail without changing the clipboard. Native cross-app rendering and clipboard QA
 
 | Date | Change | Summary |
 |---|---|---|
-| 2026-10-14 | minor | One-time native EffectCraft clipboard export: explicit Copy as action and `edit.copyForEffectCraft`, bounded versioned JSON, resolved geometry/text/paints, warnings instead of raster fallback. Seven exporter regressions and the clipboard-service UI test passed, along with localization, parity and scoped clippy checks; native cross-app QA remains pending. Parity scores unchanged. |
+| 2026-10-14 | minor | One-time native EffectCraft clipboard export: explicit Copy as action and `edit.copyForEffectCraft`, bounded versioned JSON, resolved geometry/text/paints, warnings instead of raster fallback. Exporter, clipboard-service, combined incoming/outgoing clipboard, localization, parity and scoped clippy checks passed. Native clipboard QA verified editable text/shapes, nested precomps, Undo/Redo, independent pastes, malformed-paste atomicity and save/reopen. The comparison fixture matched its background exactly and linear gradient within 1/255 per channel; text metrics still differ. Parity scores unchanged. |
 | 2026-10-14 | minor | M6: native Figma clipboard import shares the .fig decoder, mapping and image resolver; inserts editable layers into the current page with resource remapping and undo. Signed clipboard image URLs are loaded in the background. See clipboard.md for limits and verification. Numbers unchanged. |
 | 2026-10-14 | minor | SVG/PDF depth overflow (#208) is checked before bounds and drawing; public checked APIs return the offending root/layer, commands and CLI report it, and no incomplete export replaces an existing file. Tested at depths 255/256/257, with inner roots, hidden branches, masks, raster fallbacks and multiple roots/pages. Numbers unchanged. |
 | 2026-10-13 | minor | `.fig` export (gap 1): instances write what they change from their main as an override addressed by the main's id (their size, name and paints were lost elsewhere without it), what follows for their layers as derived data, and a scale factor when scaled as a whole; layers of a nested instance swapped for another component keep their overrides; variable collections, modes, variables and their bindings, the modes frames and pages set, shared styles with their links and variable-width strokes are written, and the import reads all of it back (style definitions and unused styles, variable order and scopes, bindings on paint lists, gradient stops, effects and layout grids, page modes, text field bindings, which a `.fig` import used to drop, and width profiles). Opened `.fig` and file JSON documents link nested instances of variants (and any nested instance under a name of its own) to their main's layers; they stayed unlinked, so a second export lost what they changed. Checked by opening written files in other software: resized and scaled instances keep their size and lay their layers out for it, variables with their modes and colour bindings resolve there (a frame set to another mode shows that mode's colours, also inside instances), colour, text, effect and grid styles are listed, and variable-width strokes that are the same on both sides of the path draw with their width; number, string and boolean bindings and bindings on effects, layout guides and gradient stops come across as the values they give but did not show as bound there (their entries now also name the layer field they set, not yet checked there), and strokes wider on one side of the path are written as filled outlines, no longer editable strokes there (the stroke itself is kept as plugin data and our own import puts it back; not yet checked there). Numbers unchanged |
