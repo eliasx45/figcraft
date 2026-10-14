@@ -287,7 +287,7 @@ fn opened_join(app: &mut FigApp) {
 fn getting_started(app: &mut FigApp, ui: &mut Ui, t: &Tokens) {
     let width = ui.available_width().min(3.0 * CARD_W + 2.0 * GAP);
     let columns = if width >= 720.0 { 3 } else { 1 };
-    let (cell_w, cell_h) = ((width - 32.0) / columns as f32, 62.0);
+    let (cell_w, cell_h) = ((width - 32.0) / columns as f32, 78.0);
     let rows = TIPS.len().div_ceil(columns);
     let (rect, _) = ui.allocate_exact_size(vec2(width, 52.0 + rows as f32 * cell_h + 8.0), Sense::hover());
     a11y::container_bounds(ui, rect);
@@ -313,12 +313,12 @@ fn getting_started(app: &mut FigApp, ui: &mut Ui, t: &Tokens) {
         ui.painter().rect_filled(badge, CornerRadius::same(10), t.panel);
         ui.painter().text(badge.center(), Align2::CENTER_CENTER, (i + 1).to_string(), semibold(10.0), t.text_secondary);
         let x = cell.min.x + 30.0;
-        let title_end = ui.painter().text(pos2(x, cell.min.y + 12.0), Align2::LEFT_CENTER, tr(title), semibold(12.0), t.text).max.x;
+        ui.painter().text(pos2(x, cell.min.y + 12.0), Align2::LEFT_CENTER, tr(title), semibold(12.0), t.text);
         if let Some(key) = shortcut(command) {
-            ui.painter().text(pos2(title_end + 8.0, cell.min.y + 12.0), Align2::LEFT_CENTER, key, regular(11.0), t.text_tertiary);
+            ui.painter().text(pos2(x, cell.min.y + 28.0), Align2::LEFT_CENTER, key, regular(11.0), t.text_secondary);
         }
         let galley = lines(ui, tr(line), regular(11.0), t.text_secondary, cell.max.x - x, 2);
-        ui.painter().galley(pos2(x, cell.min.y + 24.0), galley, t.text_secondary);
+        ui.painter().galley(pos2(x, cell.min.y + 40.0), galley, t.text_secondary);
     }
 }
 

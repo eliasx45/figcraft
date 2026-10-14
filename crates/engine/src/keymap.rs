@@ -333,27 +333,27 @@ pub static KEYS: &[Binding] = &[
 /// dispatched from here): (group, label, macOS keys, Windows/Linux keys).
 pub static GESTURES: &[(Group, &str, &str, &str)] = &[
     (Tools, "Pan the canvas", "Space drag", "Space+drag"),
-    (Tools, "Pan with nothing selected (Shift: farther)", "← ↑ → ↓", "← ↑ → ↓"),
-    (Tools, "Place a shape or frame (its tool chosen)", "↵", "Enter"),
+    (Tools, "Pan with nothing selected (Shift: farther)", "Arrow keys", "Arrow keys"),
+    (Tools, "Place a shape or frame (its tool chosen)", "Enter", "Enter"),
     (Zoom, "Zoom tool: click to zoom in, drag an area", "Hold Z", "Hold Z"),
-    (Zoom, "Zoom tool: zoom out", "Hold ⌥Z", "Hold Alt+Z"),
-    (Zoom, "Zoom around the pointer", "⌘ scroll", "Ctrl+scroll"),
-    (Selection, "Deep select", "⌘ click", "Ctrl+click"),
-    (Selection, "Measure to the selection", "Hold ⌥", "Hold Alt"),
-    (Edit, "Duplicate by dragging", "⌥ drag", "Alt+drag"),
-    (Transform, "Nudge (Shift: big nudge)", "← ↑ → ↓", "← ↑ → ↓"),
-    (Transform, "Resize by the nudge amount", "⌘ arrows", "Ctrl+arrows"),
+    (Zoom, "Zoom tool: zoom out", "Hold Option+Z", "Hold Alt+Z"),
+    (Zoom, "Zoom around the pointer", "Cmd+scroll", "Ctrl+scroll"),
+    (Selection, "Deep select", "Cmd+click", "Ctrl+click"),
+    (Selection, "Measure to the selection", "Hold Option", "Hold Alt"),
+    (Edit, "Duplicate by dragging", "Option+drag", "Alt+drag"),
+    (Transform, "Nudge (Shift: big nudge)", "Arrow keys", "Arrow keys"),
+    (Transform, "Resize by the nudge amount", "Cmd+arrows", "Ctrl+arrows"),
     (Transform, "Opacity 10%…90%, 0: 100%", "1…9, 0", "1…9, 0"),
     (Transform, "Exact opacity (4 then 5: 45%)", "Two digits", "Two digits"),
-    (Transform, "Suspend snapping while dragging", "Hold ⌃ or ⌘", "Hold Ctrl"),
-    (Prototype, "Presenting: next frame", "→, Space or N", "→, Space or N"),
-    (Prototype, "Presenting: previous frame", "←", "←"),
+    (Transform, "Suspend snapping while dragging", "Hold Ctrl or Cmd", "Hold Ctrl"),
+    (Prototype, "Presenting: next frame", "Right, Space or N", "Right, Space or N"),
+    (Prototype, "Presenting: previous frame", "Left", "Left"),
     (Prototype, "Presenting: restart", "R", "R"),
     (Prototype, "Presenting: cycle the size options", "Z", "Z"),
-    (Prototype, "Presenting: comments", "C or ⇧C", "C or Shift+C"),
+    (Prototype, "Presenting: comments", "C or Shift+C", "C or Shift+C"),
     (Prototype, "Presenting: full screen", "F", "F"),
-    (View, "Next or previous control in the focused region", "⇥ / ⇧⇥", "Tab / Shift+Tab"),
-    (View, "Move along the toolbar or the layer rows", "← → ↑ ↓", "← → ↑ ↓"),
+    (View, "Next or previous control in the focused region", "Tab / Shift+Tab", "Tab / Shift+Tab"),
+    (View, "Move along the toolbar or the layer rows", "Arrow keys", "Arrow keys"),
     (View, "Back to the canvas from a focused region", "Esc", "Esc"),
 ];
 
@@ -481,7 +481,7 @@ pub fn primary(id: &str, platform: Platform) -> Option<&'static str> {
     bindings(id, platform).next()
 }
 
-/// A binding as the platform writes it: `⇧⌘K` on macOS, `Ctrl+Shift+K` elsewhere.
+/// Readable key names, including with fonts that lack macOS keyboard symbols.
 pub fn display(spec: &str, platform: Platform) -> String {
     if spec.is_empty() {
         return String::new();
@@ -504,37 +504,28 @@ pub fn display(spec: &str, platform: Platform) -> String {
     }
     let mac = platform == Platform::Mac;
     let key = match (key, mac) {
-        ("Delete", true) => "⌫",
-        ("Enter", true) => "↵",
-        ("Tab", true) => "⇥",
-        ("PageUp", true) => "⇞",
-        ("PageDown", true) => "⇟",
         ("Delete", false) => "Backspace",
         ("PageUp", false) => "PgUp",
         ("PageDown", false) => "PgDn",
         ("Escape", _) => "Esc",
-        ("ArrowLeft", _) => "←",
-        ("ArrowRight", _) => "→",
-        ("ArrowUp", _) => "↑",
-        ("ArrowDown", _) => "↓",
+        ("ArrowLeft", _) => "Left",
+        ("ArrowRight", _) => "Right",
+        ("ArrowUp", _) => "Up",
+        ("ArrowDown", _) => "Down",
         (k, _) => k,
     };
     let mut out = String::new();
-    if mac {
-        for (on, glyph) in [(m.ctrl, "⌃"), (m.alt, "⌥"), (m.shift, "⇧"), (m.cmd, "⌘")] {
-            if on {
-                out.push_str(glyph);
-            }
-        }
-        out.push_str(key);
+    let modifiers = if mac {
+        [(m.ctrl, "Ctrl"), (m.alt, "Option"), (m.shift, "Shift"), (m.cmd, "Cmd")]
     } else {
-        for (on, name) in [(m.ctrl || m.cmd, "Ctrl"), (m.alt, "Alt"), (m.shift, "Shift"), (!key.is_empty(), key)] {
-            if on {
-                if !out.is_empty() {
-                    out.push('+');
-                }
-                out.push_str(name);
+        [(m.ctrl || m.cmd, "Ctrl"), (m.alt, "Alt"), (m.shift, "Shift"), (false, "")]
+    };
+    for (on, name) in modifiers.into_iter().chain([(!key.is_empty(), key)]) {
+        if on {
+            if !out.is_empty() {
+                out.push('+');
             }
+            out.push_str(name);
         }
     }
     out
