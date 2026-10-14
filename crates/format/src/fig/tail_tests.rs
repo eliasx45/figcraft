@@ -43,6 +43,45 @@ fn vector_data(blob: u64, nx: f64, ny: f64, styles: Vec<Kv<'static>>) -> Kv<'sta
     o(vec![("vectorNetworkBlob", u(blob)), ("normalizedSize", xy(nx, ny)), ("styleOverrideTable", arr(styles))])
 }
 
+#[test]
+fn closed_contours_with_paints_and_no_regions_keep_their_fill() {
+    let mut square = network::decode(&square_blob()).unwrap();
+    square.regions.clear();
+    let blob = network::encode(&square);
+    for filled in [false, true] {
+        let msg = o(vec![
+            (
+                "nodeChanges",
+                arr(vec![
+                    node(0, None, "DOCUMENT", "Document", vec![]),
+                    node(1, Some((0, "!")), "CANVAS", "Page", vec![]),
+                    node(
+                        2,
+                        Some((1, "!")),
+                        "VECTOR",
+                        "Contour",
+                        vec![
+                            ("size", xy(50.0, 50.0)),
+                            ("vectorData", vector_data(0, 50.0, 50.0, vec![])),
+                            ("fillPaints", arr(if filled { vec![solid(1.0, 0.0, 0.0)] } else { vec![] })),
+                        ],
+                    ),
+                ]),
+            ),
+            ("blobs", arr(vec![o(vec![("bytes", Kv::Bytes(blob.clone()))])])),
+        ]);
+        let (doc, warnings) = import(&canvas(&schema(), &msg), "Clipboard").unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let net = network_of(&doc, "Contour");
+        assert_eq!(net.regions.len(), usize::from(filled));
+        assert_eq!(net.fill_contains(figcraft_doc::geom::Point::new(25.0, 25.0)), filled);
+        assert_eq!(net.vertices.len(), 4);
+    }
+    let mut arrow = network::decode(&arrow_blob()).unwrap();
+    arrow.fill_closed_contours();
+    assert!(arrow.regions.is_empty(), "open strokes don't acquire a fill");
+}
+
 fn outline(blob: u64) -> Kv<'static> {
     arr(vec![o(vec![("windingRule", e("NONZERO")), ("commandsBlob", u(blob))])])
 }

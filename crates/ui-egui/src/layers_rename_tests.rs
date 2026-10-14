@@ -100,24 +100,27 @@ fn tab_on_the_last_row_commits_and_ends() {
 
 #[test]
 fn cmd_r_renames_the_selection_and_opens_its_parents() {
-    // Cmd+R on macOS; Ctrl+R elsewhere, where egui sets both `ctrl` and `command`.
-    let ctrl = Modifiers { ctrl: true, command: true, ..Default::default() };
-    for (k, held) in [Modifiers::MAC_CMD | Modifiers::COMMAND, ctrl].into_iter().enumerate() {
-        let (mut u, _, frame, child, _) = setup();
-        u.app.session.execute("select.set", &json!({"ids": [child]})).unwrap();
-        u.frame(vec![]);
-        // Collapsed again after the selection was revealed.
-        u.app.ui.expanded.clear();
-        u.frame(vec![]);
-        press(&mut u, Key::R, held);
-        assert!(u.app.ui.expanded.contains(&frame), "the renamed layer's parent opens ({k})");
-        assert_eq!(renaming(&u), Some(child), "({k})");
-        u.frame(vec![]);
-        type_text(&mut u, "Dot");
-        press(&mut u, Key::Enter, Modifiers::NONE);
-        assert_eq!(name(&u, child), "Dot", "({k})");
-        assert_eq!(renaming(&u), None);
-    }
+    let (mut u, _, frame, child, _) = setup();
+    // Test the shortcut for this context's OS. On macOS, Ctrl+R is not Cmd+R;
+    // exercising both modifier sets against the same context produced a false failure.
+    let held = if u.ctx.os() == egui::os::OperatingSystem::Mac {
+        Modifiers::MAC_CMD | Modifiers::COMMAND
+    } else {
+        Modifiers { ctrl: true, command: true, ..Default::default() }
+    };
+    u.app.session.execute("select.set", &json!({"ids": [child]})).unwrap();
+    u.frame(vec![]);
+    // Collapsed again after the selection was revealed.
+    u.app.ui.expanded.clear();
+    u.frame(vec![]);
+    press(&mut u, Key::R, held);
+    assert!(u.app.ui.expanded.contains(&frame), "the renamed layer's parent opens");
+    assert_eq!(renaming(&u), Some(child));
+    u.frame(vec![]);
+    type_text(&mut u, "Dot");
+    press(&mut u, Key::Enter, Modifiers::NONE);
+    assert_eq!(name(&u, child), "Dot");
+    assert_eq!(renaming(&u), None);
 }
 
 #[test]

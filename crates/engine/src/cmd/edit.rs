@@ -10,6 +10,9 @@ use super::{CommandSpec, ok};
 use crate::params::*;
 use crate::{EngineError, Result, Session, bad, spec};
 
+#[path = "paste_figma.rs"]
+mod paste_figma;
+
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         spec!("edit.undo", "Undo", "{}", false, |s, _| Ok(json!({"undone": s.undo()?}))),
@@ -32,6 +35,7 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
         spec!("edit.cut", "Cut", "{ids?}", true, cut),
         spec!("edit.paste", "Paste", "{parent?, x?, y? (page coordinates of the pasted top-left)}", true, paste),
+        spec!("edit.pasteFigma", "Paste Figma layers", "{html, images?: {hash: base64}, parent?, x?, y?} → {ids, warnings}", true, paste_figma::run),
         spec!("edit.pasteOver", "Paste over selection", "{}", true, paste_over),
         spec!("edit.pasteReplace", "Paste to replace", "{ids?}", true, paste_replace),
         spec!("edit.copyProperties", "Copy properties", "{id?}", false, copy_props),
@@ -549,7 +553,7 @@ pub fn paste_into(s: &mut Session, parent: NodeId, at: Option<(f64, f64)>) -> Re
     Ok(out)
 }
 
-fn paste(s: &mut Session, p: &Value) -> Result<Value> {
+pub(super) fn paste_destination(s: &Session, p: &Value, bounds: Option<figcraft_geom::Rect>) -> Result<(NodeId, Option<(f64, f64)>)> {
     let page = s.page()?;
     // Figma pastes into the selected frame (if one is selected), at the same position when it fits,
     // else in the frame's centre; otherwise in place on the page (or the viewport centre).
@@ -564,7 +568,7 @@ fn paste(s: &mut Session, p: &Value) -> Result<Value> {
     let at = match (num(p, "x"), num(p, "y")) {
         (Some(x), Some(y)) => Some((x, y)),
         _ => {
-            let b = s.clipboard.bounds;
+            let b = bounds;
             match (target, b) {
                 (Some(t), Some(b)) => {
                     let tb = doc.world_bounds(t);
@@ -585,6 +589,11 @@ fn paste(s: &mut Session, p: &Value) -> Result<Value> {
             }
         }
     };
+    Ok((parent, at))
+}
+
+fn paste(s: &mut Session, p: &Value) -> Result<Value> {
+    let (parent, at) = paste_destination(s, p, s.clipboard.bounds)?;
     let ids = paste_into(s, parent, at)?;
     s.set_selection(ids.clone());
     Ok(json!({"ids": ids}))

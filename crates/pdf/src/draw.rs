@@ -372,7 +372,7 @@ impl<'a> Exporter<'a> {
                 // The outline, fully opaque; nothing shows through a mask without one.
                 let mut plain = m.clone();
                 plain.is_mask = false;
-                let clip = figcraft_render::subtree_outline(self.doc, &plain, depth + 1).and_then(|(mut p, r)| {
+                let clip = figcraft_render::vector_mask_outline(self.doc, &plain, depth + 1).and_then(|(mut p, r)| {
                     p.apply_affine(xf * m.transform);
                     Some((to_path(&p)?, rule(r)))
                 });

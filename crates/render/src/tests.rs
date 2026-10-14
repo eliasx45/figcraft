@@ -204,6 +204,33 @@ fn boolean_subtract_renders_hole() {
 }
 
 #[test]
+fn vector_mask_groups_use_closed_geometry_even_without_fill_regions() {
+    let mut d = figcraft_doc::Document::new("Synthetic vector mask");
+    let p = d.first_page().unwrap();
+    let g = d.create(p, NodeKind::Group, "Masked group", 0.0, 0.0, 100.0, 100.0).unwrap();
+    let mask = d.create(g, NodeKind::Group, "Clip path group", 10.0, 10.0, 50.0, 50.0).unwrap();
+    d.get_mut(mask).unwrap().is_mask = true;
+    d.get_mut(mask).unwrap().mask_type = figcraft_doc::MaskType::Vector;
+    let mut network = figcraft_doc::VectorNetwork::from_points(
+        &[
+            figcraft_geom::Point::new(0.0, 0.0),
+            figcraft_geom::Point::new(50.0, 0.0),
+            figcraft_geom::Point::new(50.0, 50.0),
+            figcraft_geom::Point::new(0.0, 50.0),
+        ],
+        true,
+    );
+    network.regions.clear();
+    d.create(mask, NodeKind::Vector { network }, "Unfilled contour", 0.0, 0.0, 50.0, 50.0).unwrap();
+    let content = d.create(g, NodeKind::Rectangle, "Content", 0.0, 0.0, 100.0, 100.0).unwrap();
+    d.get_mut(content).unwrap().fills = vec![Paint::solid(Color::BLACK)];
+    assert!(subtree_outline(&d, d.get(mask).unwrap(), 0).unwrap().0.elements().is_empty(), "ordinary fills stay empty");
+    let pix = render_view(&d, p, &view(100, 100), &Options::default()).unwrap();
+    assert_eq!(px(&pix, 25, 25), [0, 0, 0, 255], "geometry admits content within the vector mask");
+    assert_eq!(px(&pix, 80, 80)[0], 0xF5, "outside the geometry stays clipped");
+}
+
+#[test]
 fn text_renders_something() {
     let mut d = figcraft_doc::Document::new("t");
     let p = d.first_page().unwrap();

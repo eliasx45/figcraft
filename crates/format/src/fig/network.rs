@@ -36,6 +36,56 @@ pub(super) struct Network {
     pub regions: Vec<Region>,
 }
 
+impl Network {
+    /// Figma also fills closed contours with no explicit regions (observed on a synthetic
+    /// red rectangle whose public vectorPaths windingRule is NONE). Recover simple cycles
+    /// without changing vertex/segment indices or point styles. Open/branched runs stay open.
+    pub fn fill_closed_contours(&mut self) {
+        if !self.regions.is_empty() {
+            return;
+        }
+        let mut adjacent = vec![Vec::new(); self.vertices.len()];
+        for (i, s) in self.segments.iter().enumerate() {
+            for v in [s.a, s.b] {
+                if let Some(edges) = adjacent.get_mut(v) {
+                    edges.push(i);
+                }
+            }
+        }
+        let mut used = vec![false; self.segments.len()];
+        let mut loops = Vec::new();
+        for (first, s) in self.segments.iter().enumerate() {
+            if used.get(first).copied().unwrap_or(true) {
+                continue;
+            }
+            let (mut edge, mut at) = (first, s.a);
+            let start = at;
+            let mut path = Vec::new();
+            while let Some(segment) = self.segments.get(edge) {
+                let Some(seen) = used.get_mut(edge).filter(|seen| !**seen) else { break };
+                *seen = true;
+                if adjacent.get(at).is_none_or(|edges| edges.len() != 2) {
+                    break;
+                }
+                path.push(edge);
+                at = if segment.a == at { segment.b } else { segment.a };
+                if at == start {
+                    loops.push(path);
+                    break;
+                }
+                let Some(next) = adjacent.get(at).filter(|edges| edges.len() == 2).and_then(|edges| edges.iter().find(|i| **i != edge)).copied()
+                else {
+                    break;
+                };
+                edge = next;
+            }
+        }
+        if !loops.is_empty() {
+            self.regions.push(Region { style: 0, non_zero: true, loops });
+        }
+    }
+}
+
 struct Reader<'b> {
     b: &'b [u8],
     pos: usize,

@@ -318,6 +318,8 @@ fn every_command_survives_junk_params() {
     let junk = [
         json!({}),
         json!(null),
+        json!({"html": "<!--(figma)@@(/figma)-->", "images": {"x": 42}}),
+        json!({"html": "<!--(figma)Zm lnLWtpd2k=(/figma)-->", "images": []}),
         json!({"ids": ["x", -1, 99999]}),
         json!({"id": "nope", "x": "NaN", "props": 5}),
         json!([1, 2, 3]),
