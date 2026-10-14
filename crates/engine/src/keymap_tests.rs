@@ -150,17 +150,17 @@ fn lookups_follow_the_platform_and_context() {
 #[test]
 fn display_per_platform() {
     let (mac, other) = (Platform::Mac, Platform::Other);
-    assert_eq!(display("Shift+Cmd+K", mac), "⇧⌘K");
+    assert_eq!(display("Shift+Cmd+K", mac), "Shift+Cmd+K");
     assert_eq!(display("Shift+Cmd+K", other), "Ctrl+Shift+K");
-    assert_eq!(display("Ctrl+Cmd+M", mac), "⌃⌘M");
+    assert_eq!(display("Ctrl+Cmd+M", mac), "Ctrl+Cmd+M");
     assert_eq!(display("Ctrl+Alt+M", other), "Ctrl+Alt+M");
-    assert_eq!(display("Alt+Cmd+Enter", mac), "⌥⌘↵");
+    assert_eq!(display("Alt+Cmd+Enter", mac), "Option+Cmd+Enter");
     assert_eq!(display("Alt+Cmd+Enter", other), "Ctrl+Alt+Enter");
-    assert_eq!(display("Cmd+=", mac), "⌘+");
+    assert_eq!(display("Cmd+=", mac), "Cmd++");
     assert_eq!(display("Shift+=", other), "+");
-    assert_eq!(display("Delete", mac), "⌫");
+    assert_eq!(display("Delete", mac), "Delete");
     assert_eq!(display("Alt", other), "Alt");
-    assert_eq!(display("Cmd", mac), "⌘");
+    assert_eq!(display("Cmd", mac), "Cmd");
     assert_eq!(display("", mac), "");
     assert_eq!(primary("object.mask", other), Some("Ctrl+Alt+M"));
     assert_eq!(primary("object.mask", mac), Some("Ctrl+Cmd+M"));

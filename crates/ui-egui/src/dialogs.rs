@@ -361,8 +361,8 @@ fn batch_rename_dialog(app: &mut FigApp, ctx: &Context) {
             b.regex = !b.regex;
         }
         let to = ui.add(egui::TextEdit::singleline(&mut b.to).hint_text(tr("Rename to")).desired_width(300.0));
-        ui.horizontal(|ui| {
-            for (label, code) in [(tr("Current name"), "$&"), (tr("Number ↑"), "$n"), (tr("Number ↓"), "$N")] {
+        ui.horizontal_wrapped(|ui| {
+            for (label, code) in [(tr("Current name"), "$&"), (tr("Number 1, 2, 3"), "$n"), (tr("Number 3, 2, 1"), "$N")] {
                 if ui.button(label).clicked() {
                     b.to.push_str(code);
                     to.request_focus();
@@ -382,7 +382,8 @@ fn batch_rename_dialog(app: &mut FigApp, ctx: &Context) {
                 for (old, new) in &preview {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(old).color(t.text_secondary));
-                        ui.label("→");
+                        let (arrow, _) = ui.allocate_exact_size(vec2(12.0, 16.0), Sense::hover());
+                        icons::paint(ui.painter(), arrow, Icon::ChevronRight, t.text_secondary);
                         ui.label(new);
                     });
                 }

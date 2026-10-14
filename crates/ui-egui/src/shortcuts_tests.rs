@@ -12,6 +12,33 @@ use serde_json::json;
 use crate::RightTab;
 use crate::layers_drag_tests::Ui;
 
+#[test]
+fn every_shortcut_and_gesture_has_glyphs_without_system_fonts() {
+    use figcraft_engine::keymap::{GESTURES, Platform, display};
+    let ctx = egui::Context::default();
+    crate::theme::install_fonts(&ctx, false, 0);
+    ctx.run_ui(egui::RawInput::default(), |ui| {
+        ui.fonts_mut(|fonts| {
+            for font in [crate::theme::regular(11.0), crate::theme::semibold(12.0)] {
+                for platform in [Platform::Mac, Platform::Other] {
+                    for binding in KEYS {
+                        for key in binding.keys(platform) {
+                            let label = display(key, platform);
+                            assert!(fonts.has_glyphs(&font, &label), "missing shortcut glyph: {label}");
+                        }
+                    }
+                    for (_, _, mac, other) in GESTURES {
+                        let label = if platform == Platform::Mac { mac } else { other };
+                        assert!(fonts.has_glyphs(&font, label), "missing gesture glyph: {label}");
+                    }
+                }
+            }
+        });
+    })
+    .textures_delta
+    .clear();
+}
+
 fn id(v: serde_json::Value) -> NodeId {
     NodeId(v["id"].as_u64().unwrap())
 }

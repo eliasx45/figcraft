@@ -17,7 +17,7 @@ fn f6_and_shift_f6_cycle_the_regions_on_every_platform_and_while_editing_text() 
         }
     }
     assert_eq!(display("F6", Platform::Other), "F6");
-    assert_eq!(display("Shift+F6", Platform::Mac), "⇧F6");
+    assert_eq!(display("Shift+F6", Platform::Mac), "Shift+F6");
     assert_eq!(display("Shift+F6", Platform::Other), "Shift+F6");
     // Listed with the view keys, next to the keyboard-mode keys they lead to.
     for id in ["view.nextRegion", "view.previousRegion"] {

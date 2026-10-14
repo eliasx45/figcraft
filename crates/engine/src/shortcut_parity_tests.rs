@@ -415,7 +415,7 @@ fn modifiers_read_the_platform_way() {
     for b in KEYS {
         for k in b.keys(Platform::Mac) {
             let shown = display(k, Platform::Mac);
-            assert!(!shown.contains("Ctrl") && !shown.contains("Alt"), "{}: macOS shows `{shown}`", b.id);
+            assert!(!shown.contains("Alt"), "{}: macOS shows `{shown}`", b.id);
         }
         for k in b.keys(Platform::Other) {
             let shown = display(k, Platform::Other);
@@ -425,6 +425,11 @@ fn modifiers_read_the_platform_way() {
         }
         assert!(b.keys(Platform::Mac).iter().chain(b.keys(Platform::Other)).all(|k| !k.contains("Option") && !k.contains("Win")));
     }
+    assert_eq!(display("Ctrl+Alt+Shift+Cmd+K", Platform::Mac), "Ctrl+Option+Shift+Cmd+K");
+    assert_eq!(display("Alt+Cmd+Enter", Platform::Mac), "Option+Cmd+Enter");
+    assert_eq!(display("Shift+Tab", Platform::Mac), "Shift+Tab");
+    assert_eq!(display("Alt", Platform::Mac), "Option");
+    assert_eq!(display("Alt+Cmd+Enter", Platform::Other), "Ctrl+Alt+Enter");
 }
 
 #[test]
