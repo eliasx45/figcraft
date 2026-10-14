@@ -425,5 +425,9 @@ fn flyout_id(key: &str) -> egui::Id {
 
 /// "Shift+Cmd+K" → "⇧⌘K" on macOS, "Ctrl+Shift+K" elsewhere.
 pub fn pretty_shortcut(s: &str) -> String {
+    // Spell out a standalone Option key in prose: UI fonts may lack the ⌥ glyph.
+    if matches!(s, "Alt" | "Option") && crate::shortcuts::platform() == figcraft_engine::keymap::Platform::Mac {
+        return "Option".into();
+    }
     figcraft_engine::keymap::display(s, crate::shortcuts::platform())
 }
