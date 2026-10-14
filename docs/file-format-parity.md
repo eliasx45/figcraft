@@ -1,6 +1,6 @@
 # File format parity
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** minor (one-time EffectCraft clipboard export verified through native copy/paste; native Figma clipboard import through the existing .fig mapper; SVG/PDF export depth refusal (#208); `.fig` export: instance sizes, variables with modes, shared styles, variable-width strokes; `.fig` export: written files checked by opening them in other software; experimental `.fig` export; export and inspect behaviour suite and fixes; .fig import: editable vector networks and more layer kinds; embedded image colour profiles; `.fig` import, best effort; animated GIF fills and TIFF images; last major: created, formats from the installed Figma's Info.plist and help center, ours from source) · **Target:** Figma Design (desktop app 126.10.7)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** minor (ordinary Copy/Cmd+C verified with native EffectCraft paste; one-time EffectCraft clipboard export verified through native copy/paste; native Figma clipboard import through the existing .fig mapper; SVG/PDF export depth refusal (#208); `.fig` export: instance sizes, variables with modes, shared styles, variable-width strokes; `.fig` export: written files checked by opening them in other software; experimental `.fig` export; export and inspect behaviour suite and fixes; .fig import: editable vector networks and more layer kinds; embedded image colour profiles; `.fig` import, best effort; animated GIF fills and TIFF images; last major: created, formats from the installed Figma's Info.plist and help center, ours from source) · **Target:** Figma Design (desktop app 126.10.7)
 
 Every format Figma reads or writes, with FigCraft's support. Sources: `Info.plist` of
 `/Applications/Figma.app` (document types only; nothing inside the bundle's code was read), Figma's
@@ -151,10 +151,18 @@ each.
 
 ## Copy to EffectCraft
 
-Edit ▸ Copy as ▸ EffectCraft (`edit.copyForEffectCraft {ids?}`) copies the selection as a
-one-time native-layer snapshot for EffectCraft's Paste action. Ordinary Copy stays unchanged.
-The command returns a `figcraft.clipboard` JSON envelope, version 1, with `nodes` and `warnings`;
-the menu writes that same envelope to the system clipboard and shows its first warnings.
+Select artwork and use ordinary **Copy** (the right-click menu or Cmd+C), then Paste in
+EffectCraft. The clipboard remains valid SVG for other apps, with a one-time editable snapshot
+inside `<metadata id="figcraft-clipboard-v1">`: standard padded base64 of the existing
+`figcraft.clipboard` JSON envelope, version 1. Normal Cut carries the same snapshot before
+removing the source. FigCraft's internal and cross-document paste still uses its native clipboard;
+copying selected characters while editing text stays plain text.
+
+**Copy for EffectCraft**, near the top of the right-click menu, and Edit ▸ Copy as ▸ EffectCraft
+remain optional. Their command (`edit.copyForEffectCraft {ids?}`) returns the plain JSON envelope
+with `nodes` and `warnings`; the explicit menu action writes that JSON directly. Ordinary Copy
+carries feature warnings silently for EffectCraft to show on Paste; the explicit action also
+shows its first warnings.
 
 Shapes, editable paths, text and styled ranges, solid/gradient paints, strokes, shadows,
 uniform layer blur, frame/group hierarchy and masks are exported with resolved layout and full
@@ -165,23 +173,31 @@ boolean results become editable paths. There is no source link or update mechani
 Image/pattern paints and unsupported effects are omitted with warnings; nothing is rasterized or
 fetched. Text metrics, gradients, advanced strokes and masks can differ, and their known limits
 are reported by the exporter and receiver. Both the source selection's serialized nodes and the
-emitted envelope are limited to 2 MiB, with at most 20,000 layers and 64 levels; over-budget copies
-fail without changing the clipboard.
+native JSON envelope are limited to 2 MiB, with at most 20,000 layers and 64 levels. The complete
+SVG carrier is limited to 8 MiB, and cannot gain a second snapshot. If native enrichment fails
+or exceeds a limit, ordinary Copy/Cut keeps its usual SVG and shows one concise warning. The
+explicit JSON action still fails without replacing the clipboard. Failed ordinary Copy/Cut
+preserves the prior system and internal clipboard contents.
 
-Verified on macOS with the production FigApp, control channel and native clipboard services in
-an isolated QA harness: Copy as ▸ EffectCraft followed by both EffectCraft's Paste menu and Cmd+V
-produced nine native layers (three text, six shapes), with no raster layers. Text edits, one-step
-Undo/Redo, independent repeated pastes, malformed-clipboard atomicity and save/reopen worked;
-reopened renders were identical. Source edits did not update the pasted layers. Nested frames
-became native precomps with editable text; pasting into a 24 fps, 20-second composition preserved
-that timing. A standalone thick line and shadow exported and imported on a 220×120 canvas with
-the same opaque stroke bounds.
+The ordinary-Copy carrier, plain-text copying, failed-Cut safety, fallback and internal paste
+have focused regression coverage. Native macOS QA used the production FigApp, control channel
+and clipboard services in an isolated harness. Actual pointer-driven right-click Copy, normal
+menu Copy and Cmd+C followed by EffectCraft Paste/Cmd+V produced ten native layers: three text
+and seven shapes, including an editable vector path, with no raster layers. Cut captured its
+snapshot before removing the source and Undo restored it; text-edit Copy stayed plain text, and
+the optional explicit action still worked. Text edits, one-step Undo/Redo, independent repeated
+pastes, malformed-carrier atomicity and save/reopen passed; reopened renders were identical.
+Source edits did not update pasted layers. A standalone thick line and shadow transferred on a
+220×120 canvas with matching stroke bounds. The right-click menu and source/target screenshots
+were inspected; text metrics still differ, as the warning explains.
 
-The 640×420 comparison fixture had an exact background and a maximum channel difference of
-1/255 in its linear-gradient region. Text metrics still differ, and the warning remains; these
-fixtures do not establish general pixel parity. Local, gitignored evidence is in
-`plan/link/verification/`: `behavior-results.json`, `nested-results.json`, `pixel-comparison.json`
-and the source/target PNGs.
+Earlier explicit-action QA also verified nested frames as native precomps with editable text
+and a destination composition's 24 fps, 20-second timing. Its 640×420 comparison fixture had an
+exact background and a maximum channel difference of 1/255 in the linear-gradient region.
+These fixtures do not establish general pixel parity. Local, gitignored ordinary-Copy evidence
+is in `plan/link/normal-copy/verification/behavior-results.json` and `right-click-menu.png` in the
+same directory, alongside the source/target PNGs. The earlier nested and pixel reports remain in
+`plan/link/verification/`.
 
 ## Fonts
 
@@ -196,6 +212,7 @@ and the source/target PNGs.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-14 | minor | Ordinary artwork Copy/Cut now keeps SVG compatibility while carrying the bounded EffectCraft snapshot as base64 metadata. Plain-text editing and internal cross-document paste remain native; failed commands retain prior clipboards, enrichment failures fall back to SVG with a warning. Optional Copy for EffectCraft moved near the top of the context menu. Nine engine, five UI and eleven localization checks passed, with scoped clippy and the portable engine check. Native right-click Copy/menu Copy/Cmd+C produced ten editable layers without rasterization; Cut/Undo, plain text, repeated paste, malformed-carrier atomicity and save/reopen passed. Text metrics still differ. Numbers unchanged. |
 | 2026-10-14 | minor | One-time native EffectCraft clipboard export: explicit Copy as action and `edit.copyForEffectCraft`, bounded versioned JSON, resolved geometry/text/paints, warnings instead of raster fallback. Exporter, clipboard-service, combined incoming/outgoing clipboard, localization, parity and scoped clippy checks passed. Native clipboard QA verified editable text/shapes, nested precomps, Undo/Redo, independent pastes, malformed-paste atomicity and save/reopen. The comparison fixture matched its background exactly and linear gradient within 1/255 per channel; text metrics still differ. Parity scores unchanged. |
 | 2026-10-14 | minor | M6: native Figma clipboard import shares the .fig decoder, mapping and image resolver; inserts editable layers into the current page with resource remapping and undo. Signed clipboard image URLs are loaded in the background. See clipboard.md for limits and verification. Numbers unchanged. |
 | 2026-10-14 | minor | SVG/PDF depth overflow (#208) is checked before bounds and drawing; public checked APIs return the offending root/layer, commands and CLI report it, and no incomplete export replaces an existing file. Tested at depths 255/256/257, with inner roots, hidden branches, masks, raster fallbacks and multiple roots/pages. Numbers unchanged. |

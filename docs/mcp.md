@@ -40,8 +40,12 @@ built-in fonts. Attached, the app's own fonts apply. The browser build has no sy
 `run_command {command: "edit.copyForEffectCraft", params: {ids: [2]}}` returns a one-time editable
 snapshot: `{"format":"figcraft.clipboard","version":1,"nodes":[...],"warnings":[...]}`.
 Without `ids`, it uses the selection. It does not alter the document or the engine's ordinary
-clipboard. The desktop menu **Edit ▸ Copy as ▸ EffectCraft** writes the same JSON to the system
-clipboard; in EffectCraft, Paste or Cmd+V imports native editable layers as one undo step.
+clipboard. On desktop, ordinary **Copy/Cmd+C** and Cut embed this JSON as standard padded base64
+in SVG metadata (`id="figcraft-clipboard-v1"`), retaining SVG compatibility and FigCraft's internal
+paste. Selected text in the text editor stays plain text. The optional **Copy for EffectCraft** /
+**Edit ▸ Copy as ▸ EffectCraft** action writes plain JSON directly. In EffectCraft, Paste or Cmd+V
+imports native editable layers as one undo step. The native JSON limit is 2 MiB; the enriched
+SVG limit is 8 MiB. Enrichment failures leave ordinary SVG copying available with a warning.
 Repeated pastes are independent. Text metrics can differ; limits and omitted features are documented in
 [file-format-parity.md](file-format-parity.md#copy-to-effectcraft). This is a copy, with no live link.
 

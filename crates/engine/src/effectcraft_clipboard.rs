@@ -2,6 +2,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
 
+use base64::Engine as _;
 use figcraft_color::{BlendMode, Color, ColorProfile, GradientKind, Paint, PaintKind};
 use figcraft_doc::*;
 use figcraft_geom::Affine;
@@ -11,6 +12,9 @@ use crate::{Result, Session, bad};
 
 const CMD: &str = "edit.copyForEffectCraft";
 pub const MAX_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_SVG_BYTES: usize = 8 * 1024 * 1024;
+pub const SVG_METADATA_START: &str = "<metadata id=\"figcraft-clipboard-v1\">";
+const SVG_METADATA_END: &str = "</metadata>";
 const MAX_NODES: usize = 20_000;
 const MAX_DEPTH: usize = 64;
 
@@ -28,6 +32,35 @@ impl Write for Budget {
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
+}
+
+/// Add our editable snapshot to an ordinary SVG without changing its painted content.
+/// Only FigCraft-generated SVG is passed here; other SVG readers ignore the metadata.
+pub fn enrich_svg(svg: &str, payload: &Value) -> Result<String> {
+    if svg.len() > MAX_SVG_BYTES {
+        return Err(bad(CMD, "SVG clipboard carrier exceeds 8 MiB"));
+    }
+    if svg.contains(SVG_METADATA_START) {
+        return Err(bad(CMD, "SVG already carries a FigCraft snapshot"));
+    }
+    if !figcraft_svg::looks_like_svg(svg) || !svg.trim_end().ends_with("</svg>") {
+        return Err(bad(CMD, "expected a complete SVG clipboard document"));
+    }
+    let at = svg.rfind("</svg>").ok_or_else(|| bad(CMD, "missing SVG closing tag"))?;
+    serde_json::to_writer(Budget(0), payload).map_err(|e| bad(CMD, e.to_string()))?;
+    let json = serde_json::to_vec(payload).map_err(|e| bad(CMD, e.to_string()))?;
+    let size = svg
+        .len()
+        .checked_add(SVG_METADATA_START.len() + SVG_METADATA_END.len() + json.len().div_ceil(3) * 4)
+        .filter(|size| *size <= MAX_SVG_BYTES)
+        .ok_or_else(|| bad(CMD, "SVG clipboard carrier exceeds 8 MiB"))?;
+    let mut out = String::with_capacity(size);
+    out.push_str(svg.get(..at).ok_or_else(|| bad(CMD, "invalid SVG boundary"))?);
+    out.push_str(SVG_METADATA_START);
+    base64::engine::general_purpose::STANDARD.encode_string(&json, &mut out);
+    out.push_str(SVG_METADATA_END);
+    out.push_str(svg.get(at..).ok_or_else(|| bad(CMD, "invalid SVG boundary"))?);
+    Ok(out)
 }
 
 pub fn copy(s: &mut Session, p: &Value) -> Result<Value> {

@@ -8,6 +8,7 @@
 name = "English"
 
 [ui]
+"Copied normally; editable EffectCraft data could not be included" = "Copied normally; editable EffectCraft data could not be included"
 "Copied for EffectCraft — {count} warning(s): {warnings}" = "Copied for EffectCraft — {count} warning(s): {warnings}"
 "Copied for EffectCraft" = "Copied for EffectCraft"
 "Copy for EffectCraft" = "Copy for EffectCraft"

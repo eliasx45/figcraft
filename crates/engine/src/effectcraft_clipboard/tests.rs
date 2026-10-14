@@ -136,3 +136,44 @@ fn junk_parameters_never_become_internal_errors() {
         assert_eq!(*session.doc().unwrap(), before);
     }
 }
+
+#[test]
+fn svg_carrier_preserves_valid_svg_and_the_exact_native_snapshot() {
+    let mut doc = Document::new("Carrier");
+    let page = doc.first_page().unwrap();
+    let id = add(&mut doc, page, NodeKind::Rectangle, "Spécial <&>");
+    let payload = export(&doc, &[id]).unwrap();
+    let svg = String::from_utf8(crate::cmd::file::export_bytes(&doc, &[id], ExportFormat::Svg, 1.0).unwrap()).unwrap();
+    let carrier = enrich_svg(&svg, &payload).unwrap();
+    assert!(figcraft_svg::looks_like_svg(&carrier));
+    let (prefix, rest) = carrier.split_once(SVG_METADATA_START).unwrap();
+    let (encoded, suffix) = rest.split_once(SVG_METADATA_END).unwrap();
+    assert_eq!(format!("{prefix}{suffix}"), svg);
+    assert!(!encoded.contains(char::is_whitespace));
+    let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).unwrap();
+    assert_eq!(base64::engine::general_purpose::STANDARD.encode(&bytes), encoded);
+    assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap(), payload);
+    let mut plain_doc = Document::new("Imported");
+    let mut native_doc = Document::new("Imported");
+    let page = plain_doc.first_page().unwrap();
+    figcraft_svg::import_svg(&mut plain_doc, svg.as_bytes(), page, 0.0, 0.0, "SVG").unwrap();
+    figcraft_svg::import_svg(&mut native_doc, carrier.as_bytes(), page, 0.0, 0.0, "SVG").unwrap();
+    assert_eq!(native_doc, plain_doc, "metadata must not change ordinary SVG readers' layers");
+    assert!(enrich_svg(&carrier, &payload).is_err(), "never append a second snapshot");
+    assert_eq!(carrier.matches(SVG_METADATA_START).count(), 1);
+}
+
+#[test]
+fn svg_carrier_rejects_incomplete_svg_and_both_size_limits() {
+    let svg = "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>\n";
+    let payload = json!({"format": "figcraft.clipboard", "version": 1, "nodes": [], "warnings": []});
+    for invalid in ["not SVG", "<svg/>", "<svg>", "<svg></svg>trailing"] {
+        assert!(enrich_svg(invalid, &payload).is_err());
+    }
+    assert!(enrich_svg(svg, &json!({"large": "x".repeat(MAX_BYTES)})).is_err());
+    let too_large = format!("<svg>{}</svg>", " ".repeat(MAX_SVG_BYTES));
+    assert!(enrich_svg(&too_large, &payload).is_err());
+    let almost_full = format!("<svg>{}</svg>", " ".repeat(MAX_SVG_BYTES - "<svg></svg>".len()));
+    assert_eq!(almost_full.len(), MAX_SVG_BYTES);
+    assert!(enrich_svg(&almost_full, &payload).is_err(), "account for the appended base64 and tags");
+}

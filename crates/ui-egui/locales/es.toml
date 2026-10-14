@@ -8,6 +8,7 @@ name = "Español"
 status = "draft — needs native review"
 
 [ui]
+"Copied normally; editable EffectCraft data could not be included" = "Copiado normalmente; no se pudieron incluir los datos editables de EffectCraft"
 "Copied for EffectCraft — {count} warning(s): {warnings}" = "Copiado para EffectCraft — {count} advertencia(s): {warnings}"
 "Copied for EffectCraft" = "Copiado para EffectCraft"
 "Copy for EffectCraft" = "Copiar para EffectCraft"

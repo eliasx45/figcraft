@@ -158,15 +158,38 @@ pub fn invoke(app: &mut FigApp, id: &str) {
         // So is the server address for publishing (it carries the server key).
         "collab.publish" => crate::live::open_publish(app),
         "edit.copy" | "edit.cut" => {
+            if app.session.ds().is_ok_and(|d| d.text_edit.is_some()) {
+                if let Some(text) = figcraft_engine::textedit::selected_text(&app.session).filter(|t| !t.is_empty()) {
+                    if id == "edit.cut" && app.run("text.edit.key", json!({"key": "Delete"})).is_none() {
+                        return;
+                    }
+                    app.services.clipboard_set_text(&text);
+                }
+                return;
+            }
             let ids = app.session.selection();
-            // SVG for other apps, taken before a cut removes the layers.
+            // Both snapshots must be made before Cut removes the source layers.
+            let payload = app.session.execute("edit.copyForEffectCraft", &json!({"ids": ids}));
             let svg = app.session.doc().ok().and_then(|d| figcraft_svg_export(d, &ids));
-            app.run(id, json!({}));
-            // Mirror to the system clipboard (SVG text, else a marker) and remember it, so a later
-            // paste knows whether the clipboard still holds our layers.
-            let text = svg.unwrap_or_else(|| format!("figcraft://clipboard/{}", ids.len()));
+            let enriched = svg
+                .as_ref()
+                .zip(payload.as_ref().ok())
+                .and_then(|(svg, payload)| figcraft_engine::effectcraft_clipboard::enrich_svg(svg, payload).ok());
+            let native_unavailable = enriched.is_none();
+            // A refused cut can already have copied its source internally before validation.
+            let previous_clipboard = (id == "edit.cut").then(|| app.session.clipboard.clone());
+            if app.run(id, json!({})).is_none() {
+                if let Some(previous) = previous_clipboard {
+                    app.session.clipboard = previous;
+                }
+                return;
+            }
+            let text = enriched.or(svg).unwrap_or_else(|| format!("figcraft://clipboard/{}", ids.len()));
             app.services.clipboard_set_text(&text);
             app.ui.last_copy = Some(text);
+            if native_unavailable {
+                app.toast(tr("Copied normally; editable EffectCraft data could not be included"));
+            }
         }
         "edit.paste" | "edit.pasteFigma" => paste(app, None),
         "file.close" if app.session.ds().is_ok_and(|d| d.is_dirty() && d.branch_of.is_none()) => {
@@ -485,6 +508,7 @@ pub fn popups(app: &mut FigApp, ctx: &egui::Context) {
                 let mut entries: Vec<(&str, &str)> = if has_sel {
                     vec![
                         (tr("Copy"), "edit.copy"),
+                        (tr("Copy for EffectCraft"), "edit.copyForEffectCraft"),
                         (tr("Paste here"), "edit.paste"),
                         (tr("Paste to replace"), "edit.pasteReplace"),
                         ("-", ""),
@@ -514,7 +538,6 @@ pub fn popups(app: &mut FigApp, ctx: &egui::Context) {
                         (tr("Copy as CSS"), "edit.copyAsCss"),
                         (tr("Copy as SVG"), "edit.copyAsSvg"),
                         (tr("Copy as PNG"), "edit.copyAsPng"),
-                        (tr("Copy for EffectCraft"), "edit.copyForEffectCraft"),
                         ("-", ""),
                         (tr("Delete"), "edit.delete"),
                     ]
@@ -717,6 +740,14 @@ mod effectcraft_clipboard_tests {
         fn clipboard_set_text(&mut self, text: &str) {
             *self.0.lock().unwrap() = text.into();
         }
+        fn clipboard_get_text(&mut self) -> Option<String> {
+            Some(self.0.lock().unwrap().clone())
+        }
+    }
+    fn native_payload(text: &str) -> serde_json::Value {
+        use base64::Engine as _;
+        let encoded = text.split_once(figcraft_engine::effectcraft_clipboard::SVG_METADATA_START).unwrap().1.split_once("</metadata>").unwrap().0;
+        serde_json::from_slice(&base64::engine::general_purpose::STANDARD.decode(encoded).unwrap()).unwrap()
     }
     #[test]
     fn menu_writes_the_snapshot_and_failed_copy_leaves_clipboard_untouched() {
@@ -733,6 +764,102 @@ mod effectcraft_clipboard_tests {
         assert!(MENU.iter().any(|m| m.id == "edit.copyForEffectCraft" && m.menu == "Edit/Copy as"));
         invoke(&mut app, "edit.copy");
         assert!(!app.session.clipboard.nodes.is_empty());
-        assert!(!clipboard.lock().unwrap().contains("figcraft.clipboard"));
+        let svg = clipboard.lock().unwrap().clone();
+        assert!(figcraft_engine::looks_like_svg(&svg));
+        assert_eq!(native_payload(&svg)["format"], "figcraft.clipboard");
+        assert_eq!(app.ui.last_copy.as_deref(), Some(svg.as_str()));
+        app.run("file.new", json!({"name": "Destination"}));
+        invoke(&mut app, "edit.paste");
+        assert_eq!(app.session.doc().unwrap().node_count(), 2, "internal paste must not import an SVG wrapper");
+        assert!(app.session.doc().unwrap().node(app.session.selection()[0]).unwrap().kind.is_shape());
+        *clipboard.lock().unwrap() = "before shortcut".into();
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput { events: vec![egui::Event::Copy], ..Default::default() }, |ui| {
+            crate::shortcuts::handle(&mut app, ui.ctx(), false);
+        });
+        output.textures_delta.clear();
+        assert_eq!(native_payload(&clipboard.lock().unwrap())["format"], "figcraft.clipboard");
+    }
+
+    #[test]
+    fn ordinary_cut_carries_the_snapshot_before_removing_source_and_undoes() {
+        let clipboard = Arc::new(Mutex::new(String::new()));
+        let mut app = FigApp::new(figcraft_engine::Session::new(), Box::new(Clipboard(clipboard.clone())));
+        let created = app.run("shape.rectangle", json!({"width": 40, "height": 20})).unwrap();
+        let id = figcraft_doc::NodeId(created["id"].as_u64().unwrap());
+        let undo = app.session.undo_depth();
+        invoke(&mut app, "edit.cut");
+        assert_eq!(native_payload(&clipboard.lock().unwrap())["nodes"][0]["id"], id.to_string());
+        assert!(!app.session.doc().unwrap().contains(id));
+        assert_eq!(app.session.undo_depth().0, undo.0 + 1);
+        app.run("edit.undo", json!({}));
+        assert!(app.session.doc().unwrap().contains(id));
+        invoke(&mut app, "edit.paste");
+        assert_eq!(app.session.doc().unwrap().node_count(), 3);
+    }
+
+    #[test]
+    fn failed_normal_copy_and_cut_preserve_system_and_internal_clipboards() {
+        let clipboard = Arc::new(Mutex::new("before".into()));
+        let mut app = FigApp::new(figcraft_engine::Session::new(), Box::new(Clipboard(clipboard.clone())));
+        app.run("shape.rectangle", json!({"width": 40, "height": 20}));
+        invoke(&mut app, "edit.copy");
+        let before = clipboard.lock().unwrap().clone();
+        let internal = app.session.clipboard.nodes.clone();
+        let marker = app.ui.last_copy.clone();
+        app.session.set_selection(vec![]);
+        invoke(&mut app, "edit.copy");
+        assert_eq!(*clipboard.lock().unwrap(), before);
+        assert_eq!(app.session.clipboard.nodes, internal);
+        let created = app.run("shape.ellipse", json!({"width": 50, "height": 50})).unwrap();
+        let id = figcraft_doc::NodeId(created["id"].as_u64().unwrap());
+        let snapshot = app.session.ds().unwrap().doc.clone();
+        app.session.ds_mut().unwrap().start_preview("v", "Read only", 0, snapshot.clone());
+        app.session.set_selection(vec![id]);
+        invoke(&mut app, "edit.cut");
+        assert_eq!(*app.session.doc().unwrap(), *snapshot);
+        assert_eq!(*clipboard.lock().unwrap(), before);
+        assert_eq!(app.ui.last_copy, marker);
+        assert_eq!(app.session.clipboard.nodes, internal);
+        assert!(app.ui.last_error.is_some());
+    }
+
+    #[test]
+    fn oversized_native_snapshot_falls_back_to_normal_svg_and_internal_paste() {
+        let clipboard = Arc::new(Mutex::new(String::new()));
+        let mut app = FigApp::new(figcraft_engine::Session::new(), Box::new(Clipboard(clipboard.clone())));
+        let created = app.run("shape.rectangle", json!({"width": 40, "height": 20})).unwrap();
+        let id = figcraft_doc::NodeId(created["id"].as_u64().unwrap());
+        app.session.doc_mut().unwrap().get_mut(id).unwrap().name = "x".repeat(figcraft_engine::effectcraft_clipboard::MAX_BYTES);
+        app.ui.toast = None;
+        invoke(&mut app, "edit.copy");
+        let svg = clipboard.lock().unwrap().clone();
+        assert!(figcraft_engine::looks_like_svg(&svg));
+        assert!(!svg.contains(figcraft_engine::effectcraft_clipboard::SVG_METADATA_START));
+        assert_eq!(app.ui.last_copy.as_deref(), Some(svg.as_str()));
+        assert!(app.ui.toast.as_ref().unwrap().0.contains("editable EffectCraft data"));
+        invoke(&mut app, "edit.paste");
+        assert_eq!(app.session.doc().unwrap().node_count(), 3);
+    }
+
+    #[test]
+    fn artwork_copy_keeps_native_warnings_quiet_and_text_copy_stays_plain() {
+        let clipboard = Arc::new(Mutex::new(String::new()));
+        let mut app = FigApp::new(figcraft_engine::Session::new(), Box::new(Clipboard(clipboard.clone())));
+        let created = app.run("text.create", json!({"text": "Plain 😀 text"})).unwrap();
+        app.ui.toast = None;
+        invoke(&mut app, "edit.copy");
+        assert!(!native_payload(&clipboard.lock().unwrap())["warnings"].as_array().unwrap().is_empty());
+        assert!(app.ui.toast.is_none());
+        app.run("text.edit.begin", json!({"id": created["id"]}));
+        invoke(&mut app, "edit.copy");
+        assert_eq!(*clipboard.lock().unwrap(), "Plain 😀 text");
+        *clipboard.lock().unwrap() = "before shortcut".into();
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput { events: vec![egui::Event::Copy], ..Default::default() }, |ui| {
+            crate::shortcuts::handle(&mut app, ui.ctx(), false);
+        });
+        output.textures_delta.clear();
+        assert_eq!(*clipboard.lock().unwrap(), "Plain 😀 text", "native Cmd+C event stays in the text path");
     }
 }
