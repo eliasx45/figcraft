@@ -29,7 +29,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "edit.copyForEffectCraft",
             "Copy for EffectCraft",
-            "{ids?} → {format, version, nodes, warnings}; native editable snapshot, at most 2 MiB",
+            "{ids?} → {format, version, nodes, warnings, assets}; native editable snapshot with embedded images, at most 64 MiB",
             false,
             crate::effectcraft_clipboard::copy
         ),

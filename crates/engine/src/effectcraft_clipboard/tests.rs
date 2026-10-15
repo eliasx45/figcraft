@@ -66,7 +66,7 @@ fn native_shapes_shadows_and_unsupported_paints_are_explicit() {
     assert!(v["nodes"][0]["vectorPaths"][0]["data"].as_str().unwrap().starts_with('M'));
     assert_eq!(v["nodes"][0]["fills"].as_array().unwrap().len(), 1);
     assert_eq!(v["nodes"][0]["effects"][0]["type"], "DROP_SHADOW");
-    assert!(v["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("image/pattern")));
+    assert!(v["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("embedded image is missing")));
     assert!(!serde_json::to_string(&v).unwrap().contains("not-a-file"));
 }
 
@@ -176,4 +176,60 @@ fn svg_carrier_rejects_incomplete_svg_and_both_size_limits() {
     let almost_full = format!("<svg>{}</svg>", " ".repeat(MAX_SVG_BYTES - "<svg></svg>".len()));
     assert_eq!(almost_full.len(), MAX_SVG_BYTES);
     assert!(enrich_svg(&almost_full, &payload).is_err(), "account for the appended base64 and tags");
+}
+
+#[test]
+fn embedded_images_are_deduplicated_and_keep_original_bytes_and_placement() {
+    use figcraft_color::{ImagePaint, ImageScaleMode};
+    let mut doc = Document::new("Synthetic image clipboard");
+    let page = doc.first_page().unwrap();
+    let root = add(&mut doc, page, NodeKind::Frame, "Root");
+    let a = add(&mut doc, root, NodeKind::Rectangle, "Image A");
+    let b = add(&mut doc, root, NodeKind::Ellipse { start: 0.0, sweep: std::f64::consts::TAU, inner: 0.0 }, "Image B");
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image::RgbaImage::from_pixel(2, 3, image::Rgba([200, 20, 40, 128])).write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+    let bytes = bytes.into_inner();
+    doc.images.insert("synthetic".into(), ImageData { bytes: std::sync::Arc::new(bytes.clone()), width: 2, height: 3 });
+    for id in [a, b] {
+        doc.get_mut(id).unwrap().fills = vec![Paint::image("synthetic", ImageScaleMode::Fill)];
+    }
+    let payload = export(&doc, &[root]).unwrap();
+    assert_eq!(payload["version"], 2);
+    assert_eq!(payload["assets"].as_object().unwrap().len(), 1);
+    assert_eq!(base64::engine::general_purpose::STANDARD.decode(payload["assets"]["synthetic"]["data"].as_str().unwrap()).unwrap(), bytes);
+    for node in payload["nodes"][0]["children"].as_array().unwrap() {
+        assert_eq!(node["fills"][0]["imageRef"], "synthetic");
+        assert_eq!(node["fills"][0]["figcraftImageTransform"], json!([[50.0, 0.0, 0.0], [0.0, 50.0, -55.0]]));
+    }
+    if let PaintKind::Image(img) = &mut doc.get_mut(b).unwrap().fills[0].kind {
+        img.scale_mode = ImageScaleMode::Crop;
+        img.crop = Some(ImagePaint::crop_from_rect(0.25, 0.0, 0.75, 1.0));
+    }
+    let payload = export(&doc, &[root]).unwrap();
+    let transform = &payload["nodes"][0]["children"][1]["fills"][0]["figcraftImageTransform"];
+    assert_eq!(transform[0], json!([25.0, 0.0, 25.0]));
+    assert!((transform[1][1].as_f64().unwrap() - 40.0 / 3.0).abs() < 0.00001);
+}
+
+#[test]
+fn source_only_properties_do_not_consume_native_clipboard_budget() {
+    let mut doc = Document::new("Synthetic large source properties");
+    let page = doc.first_page().unwrap();
+    let root = add(&mut doc, page, NodeKind::Frame, "Root");
+    // The previous limit included unrelated document properties; exported geometry is tiny.
+    doc.get_mut(root).unwrap().plugin_data.insert("large".into(), "x".repeat(MAX_BYTES));
+    let payload = export(&doc, &[root]).unwrap();
+    assert!(serde_json::to_vec(&payload).unwrap().len() < 2048);
+}
+
+#[test]
+fn text_exports_actual_baseline_and_auto_line_height() {
+    let mut doc = Document::new("Synthetic text metrics");
+    let page = doc.first_page().unwrap();
+    let text = add(&mut doc, page, NodeKind::Text(TextData { characters: "First\nSecond".into(), ..Default::default() }), "Text");
+    let n = doc.get(text).unwrap();
+    let (layout, offset) = figcraft_text::layout_node(n).unwrap();
+    let payload = export(&doc, &[text]).unwrap();
+    assert_eq!(payload["nodes"][0]["figcraftTextBaseline"], layout.lines[0].baseline + offset);
+    assert_eq!(payload["nodes"][0]["style"]["lineHeightPx"], layout.lines[0].height);
 }
