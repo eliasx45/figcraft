@@ -241,9 +241,9 @@ fn pages(app: &mut FigApp, ui: &mut Ui) {
         }
         if renaming {
             let tr = Rect::from_min_max(pos2(r.min.x + 8.0, r.min.y + 4.0), pos2(r.max.x - 4.0, r.max.y - 4.0));
-            if let Some(new) =
-                crate::widgets::text_field_inline(ui, Id::new(("pagename", id)), &name, tr, if id == cur { semibold(11.0) } else { regular(11.0) })
-            {
+            let start = ui.data_mut(|d| d.remove_temp::<bool>(page_rename_start_id())).unwrap_or(false);
+            let font = if id == cur { semibold(11.0) } else { regular(11.0) };
+            if let (Some(new), _) = crate::widgets::rename_field(ui, Id::new(("pagename", id)), &name, tr, font, start) {
                 rename_done = Some((id, new));
             }
         } else if !divider {
@@ -255,7 +255,9 @@ fn pages(app: &mut FigApp, ui: &mut Ui) {
         }
         if resp.double_clicked() {
             app.ui.rename_page = Some((id, name.clone()));
-            ui.memory_mut(|m| m.request_focus(Id::new(("pagename", id)).with("te")));
+            // The field takes the focus next frame, once it's drawn: focusing it now would put a
+            // node that isn't there yet in the screen reader tree, which AccessKit aborts on.
+            ui.data_mut(|d| d.insert_temp(page_rename_start_id(), true));
         }
         crate::right::context_popup(&resp).show(|ui| {
             if ui.button(tr("Rename page")).clicked() {
@@ -293,6 +295,11 @@ fn pages(app: &mut FigApp, ui: &mut Ui) {
         app.run("page.select", json!({"id": p}));
     }
     crate::widgets::separator(ui);
+}
+
+/// A page rename just asked for by a double click: its field takes the focus when drawn (temp data).
+fn page_rename_start_id() -> Id {
+    Id::new("page_rename_start")
 }
 
 /// The layer row being dragged in the panel (temp data).

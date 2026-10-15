@@ -16,3 +16,18 @@
 #
 # To remove your names, delete your entry (or set fields empty) in a PR. The next
 # contributors.py run, and the next build, drop them.
+
+[people.tylerjenningsw]
+real_name = "Tyler Jennings"
+display_name = "tylerjenningsw"
+
+[people.VanTan666]
+display_name = "VanTan"
+
+[people.Silvertree2010]
+display_name = "Netter"
+sync_github_name = false
+
+[people.hakifx]
+display_name = "Elias"
+consent_source = "Explicit owner request in the FigCraft contribution PR chat, 2026-10-15: Use Elias."

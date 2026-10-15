@@ -41,6 +41,7 @@ env:
 
 jobs:
   version:
+    timeout-minutes: 10
     name: version
     runs-on: ubuntu-latest
     # No `environment: release`: this job reads no secrets, so a branch dry run can run it.
@@ -69,6 +70,7 @@ jobs:
           echo "### FigCraft v$v (\`${GITHUB_SHA::9}\`)" >>"$GITHUB_STEP_SUMMARY"
 
   macos:
+    timeout-minutes: 90
     name: macOS universal
     needs: version
     runs-on: macos-15-xlarge  # M2 Pro larger runner; use only in release.yml (actions_macos_xl budget caps spend)
@@ -127,6 +129,7 @@ jobs:
           if [ -n "${MACOS_KEYCHAIN:-}" ]; then security delete-keychain "$MACOS_KEYCHAIN" || true; fi
 
   windows:
+    timeout-minutes: 90
     name: Windows ${{ matrix.arch }}
     needs: version
     runs-on: windows-latest
@@ -187,6 +190,7 @@ jobs:
           if-no-files-found: error
 
   linux:
+    timeout-minutes: 90
     name: Linux ${{ matrix.arch }}
     needs: version
     # The oldest GitHub-hosted image, so the binaries only need glibc >= 2.35 (Ubuntu 22.04+,
@@ -252,6 +256,7 @@ jobs:
           if-no-files-found: error
 
   server:
+    timeout-minutes: 90
     name: Server Linux ${{ matrix.arch }}
     needs: version
     # The headless collaboration server (docs/server.md): figcraft-server-<v>-linux-<arch>.tar.gz
@@ -295,6 +300,7 @@ jobs:
           if-no-files-found: error
 
   flatpak:
+    timeout-minutes: 90
     name: Flatpak ${{ matrix.arch }}
     needs: [version, linux]
     # Repackages the Linux job's tarball (the same binaries as the AppImage/deb/rpm); no Rust
@@ -388,6 +394,7 @@ jobs:
           if-no-files-found: error
 
   web:
+    timeout-minutes: 90
     name: Web (wasm)
     needs: version
     runs-on: ubuntu-latest
@@ -433,6 +440,7 @@ jobs:
           if-no-files-found: error
 
   linux-riscv64:
+    timeout-minutes: 90
     name: Linux riscv64
     needs: version
     # Cross-compiled on x86_64 (no hosted RISC-V runners) against the runner's own Ubuntu release
@@ -502,6 +510,7 @@ jobs:
           if-no-files-found: error
 
   release:
+    timeout-minutes: 10
     name: Draft GitHub Release
     needs: [version, macos, windows, linux, linux-riscv64, flatpak, freebsd, web, server]
     runs-on: ubuntu-latest

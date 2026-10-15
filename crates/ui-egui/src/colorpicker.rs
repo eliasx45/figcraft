@@ -438,10 +438,10 @@ pub fn show(app: &mut FigApp, ctx: &egui::Context) {
             ) {
                 let kinds = [
                     (Icon::Fill, tr("Solid")),
-                    (Icon::LayoutH, tr("Linear")),
-                    (Icon::Ellipse, tr("Radial")),
-                    (Icon::Rotate, tr("Angular")),
-                    (Icon::Instance, tr("Diamond")),
+                    (Icon::GradientLinear, tr("Linear")),
+                    (Icon::GradientRadial, tr("Radial")),
+                    (Icon::GradientAngular, tr("Angular")),
+                    (Icon::GradientDiamond, tr("Diamond")),
                     (Icon::Image, tr("Image")),
                     (Icon::ViewGrid, tr("Pattern")),
                 ];

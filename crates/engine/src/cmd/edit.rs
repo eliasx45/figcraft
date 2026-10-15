@@ -21,7 +21,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "edit.duplicate",
             "Duplicate",
-            "{ids?, dx?, dy? (offset; default 0 for frames-in-place... Figma offsets top-level frames to the right)}",
+            "{ids?, dx?, dy? (page offset; default: the offset of the last duplicate when ids are its copies, still selected; else top-level frames to the right with a 100 gap, everything else in place)}",
             true,
             duplicate
         ),
@@ -264,7 +264,7 @@ pub fn specs() -> Vec<CommandSpec> {
             ok()
         }),
         spec!("effect.set", "Set effect", "{ids?, index, effect {..}}", true, |s, p| {
-            let i = req_num("effect.set", p, "index")? as usize;
+            let i = req_index("effect.set", p, "index")?;
             let e: Effect = parse("effect.set", p, "effect")?.ok_or_else(|| bad("effect.set", "`effect` required"))?;
             for id in req_targets("effect.set", s, p)? {
                 let n = s.doc_mut()?.get_mut(id)?;
@@ -313,7 +313,7 @@ pub fn specs() -> Vec<CommandSpec> {
             true,
             |s, p| {
                 let cmd = "export.update";
-                let i = req_num(cmd, p, "index")? as usize;
+                let i = req_index(cmd, p, "index")?;
                 super::file::export_setting(cmd, ExportSetting::default(), p)?;
                 for id in req_targets(cmd, s, p)? {
                     let n = s.doc_mut()?.get_mut(id)?;
@@ -325,7 +325,7 @@ pub fn specs() -> Vec<CommandSpec> {
             }
         ),
         spec!("export.remove", "Remove export setting", "{ids?, index}", true, |s, p| {
-            let i = req_num("export.remove", p, "index")? as usize;
+            let i = req_index("export.remove", p, "index")?;
             for id in req_targets("export.remove", s, p)? {
                 let n = s.doc_mut()?.get_mut(id)?;
                 if i < n.exports.len() {
@@ -423,13 +423,48 @@ fn delete(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"deleted": ids}))
 }
 
+/// Layers duplicated last (Duplicate or Alt-drag) and their copies, in the same order. While the
+/// copies are the selection, Duplicate places the next copies as far from them as they are from
+/// their sources, measured then: so moving the copies first sets the step.
+#[derive(Clone, Debug)]
+pub struct Duplicated {
+    pub sources: Vec<NodeId>,
+    pub copies: Vec<NodeId>,
+}
+
+impl Duplicated {
+    pub fn is_selection(&self, sel: &[NodeId]) -> bool {
+        let set = |v: &[NodeId]| v.iter().copied().collect::<BTreeSet<_>>();
+        !self.copies.is_empty() && set(&self.copies) == set(sel)
+    }
+
+    /// The page offset from the sources to the copies, if both are still there and the copies move
+    /// freely (an auto layout places its own).
+    fn offset(&self, doc: &Document) -> Option<(f64, f64)> {
+        let free = self
+            .copies
+            .iter()
+            .all(|c| doc.node(*c).is_some_and(|n| n.child_layout.absolute || n.parent.and_then(|p| doc.node(p)).is_none_or(|p| p.layout.is_none())));
+        if !free || self.sources.iter().chain(&self.copies).any(|i| !doc.contains(*i)) {
+            return None;
+        }
+        let (a, b) = (doc.bounds_of(&self.sources)?, doc.bounds_of(&self.copies)?);
+        let d = (b.x0 - a.x0, b.y0 - a.y0);
+        (d.0.is_finite() && d.1.is_finite() && (d.0 != 0.0 || d.1 != 0.0)).then_some(d)
+    }
+}
+
 fn duplicate(s: &mut Session, p: &Value) -> Result<Value> {
     let ids = req_targets("edit.duplicate", s, p)?;
     let rename = s.prefs.rename_duplicates;
+    let explicit = num(p, "dx").is_some() || num(p, "dy").is_some();
+    let ds = s.ds()?;
+    let roots_now = z_sorted(&ds.doc, &roots(&ds.doc, &ids));
+    let repeat = ds.last_duplicate.as_ref().filter(|d| !explicit && d.is_selection(&roots_now)).and_then(|d| d.offset(&ds.doc));
     let doc = s.doc_mut()?;
-    let ids = z_sorted(doc, &roots(doc, &ids));
+    let ids = roots_now;
     let mut out = Vec::new();
-    for i in ids {
+    for i in ids.iter().copied() {
         let n = doc.get(i)?;
         let parent = n.parent.ok_or_else(|| bad("edit.duplicate", "pages are duplicated with page.duplicate"))?;
         let top_frame = doc.node(parent).is_some_and(Node::is_page) && n.kind.is_frame_like();
@@ -443,22 +478,30 @@ fn duplicate(s: &mut Session, p: &Value) -> Result<Value> {
             _ if top_frame => (w + 100.0, 0.0),
             _ => (0.0, 0.0),
         };
-        let nn = doc.get_mut(nid)?;
-        nn.transform = Affine::translate((dx, dy)) * nn.transform;
+        match repeat {
+            Some((rx, ry)) => super::arrange::move_world(doc, nid, rx, ry)?,
+            None => {
+                let nn = doc.get_mut(nid)?;
+                nn.transform = Affine::translate((dx, dy)) * nn.transform;
+            }
+        }
         if rename {
+            let nn = doc.get_mut(nid)?;
             nn.name = bump_name(&nn.name);
         }
         out.push(nid);
     }
     s.set_selection(out.clone());
+    s.ds_mut()?.last_duplicate = Some(Duplicated { sources: ids, copies: out.clone() });
     Ok(json!({"ids": out}))
 }
 
 fn bump_name(n: &str) -> String {
     if let Some((base, num)) = n.rsplit_once(' ')
         && let Ok(k) = num.parse::<u64>()
+        && let Some(next) = k.checked_add(1)
     {
-        return format!("{base} {}", k + 1);
+        return format!("{base} {next}");
     }
     format!("{n} 2")
 }
@@ -819,7 +862,8 @@ pub fn opacity_from_digits(digits: &str) -> Option<f32> {
     let mut n = 0u32;
     let mut count = 0;
     for c in digits.chars() {
-        n = n * 10 + c.to_digit(10)?;
+        // Input-derived: a number that outgrows `u32` stops the scan (None); it never wraps.
+        n = n.checked_mul(10)?.checked_add(c.to_digit(10)?)?;
         count += 1;
     }
     match count {
@@ -986,13 +1030,20 @@ fn find_replace(s: &mut Session, p: &Value) -> Result<Value> {
             }
             if let NodeKind::Text(t) = &mut n.kind {
                 // Replace occurrence by occurrence so styles shift correctly.
+                // The search resumes after each inserted replacement, so a replacement that
+                // contains `find` neither loops forever nor stops the other occurrences.
                 let mut guard = 0;
-                while let Some(pos) = t.characters.find(find.as_str()) {
-                    let start = t.characters.get(..pos).map(|x| x.chars().count()).unwrap_or(0);
-                    let len = find.chars().count();
+                let mut cursor = 0;
+                let len = find.chars().count();
+                let r_len = r.chars().count();
+                loop {
+                    let from = t.characters.char_indices().nth(cursor).map_or(t.characters.len(), |(b, _)| b);
+                    let Some(pos) = t.characters.get(from..).and_then(|tail| tail.find(find.as_str())) else { break };
+                    let start = cursor + t.characters.get(from..from + pos).map_or(0, |x| x.chars().count());
                     t.replace_range(start, start + len, r);
+                    cursor = start + r_len;
                     guard += 1;
-                    if guard > 10_000 || r.contains(find.as_str()) {
+                    if guard > 10_000 {
                         break;
                     }
                 }

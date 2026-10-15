@@ -162,6 +162,28 @@ fn text_create_autosize_and_edit() {
 }
 
 #[test]
+fn find_replace_replaces_every_occurrence_when_replacement_contains_find() {
+    for (text, find, replace, want) in [
+        ("cat and cat", "cat", "cats", "cats and cats"),
+        ("cat and cat", "cat", "category", "category and category"),
+        ("banana", "a", "aa", "baanaanaa"),
+    ] {
+        let mut s = sess();
+        let t = id(&s.execute("text.create", &json!({"text": text, "x": 0, "y": 0})).unwrap());
+        s.execute("edit.findReplace", &json!({"find": find, "replace": replace})).unwrap();
+        assert_eq!(s.doc().unwrap().node(t).unwrap().kind.text().unwrap().characters, want, "{text}: {find} -> {replace}");
+    }
+}
+
+#[test]
+fn find_replace_rejects_empty_find() {
+    let mut s = sess();
+    let t = id(&s.execute("text.create", &json!({"text": "cat", "x": 0, "y": 0})).unwrap());
+    assert!(s.execute("edit.findReplace", &json!({"find": "", "replace": "x"})).is_err());
+    assert_eq!(s.doc().unwrap().node(t).unwrap().kind.text().unwrap().characters, "cat");
+}
+
+#[test]
 fn components_and_instances_sync() {
     let mut s = sess();
     let f = id(&s.execute("frame.create", &json!({"x": 0, "y": 0, "width": 100, "height": 50, "name": "Button"})).unwrap());
@@ -251,6 +273,49 @@ fn align_distribute_zorder() {
     s.execute("arrange.back", &json!({"ids": [c]})).unwrap();
     let page = s.page().unwrap();
     assert_eq!(s.doc().unwrap().node(page).unwrap().children[0], c);
+}
+
+#[test]
+fn a_layer_alone_on_the_page_has_nothing_to_align_to() {
+    use crate::cmd::arrange::can_align;
+    let mut s = sess();
+    let f = id(&s.execute("frame.create", &json!({"x": 0, "y": 0, "width": 200, "height": 100})).unwrap());
+    let inner = id(&s.execute("shape.rectangle", &json!({"x": 20, "y": 30, "width": 10, "height": 10, "parent": f})).unwrap());
+    let loose = id(&s.execute("shape.rectangle", &json!({"x": 300, "y": 5, "width": 10, "height": 10})).unwrap());
+    let doc = s.doc().unwrap();
+    assert!(!can_align(doc, &[]));
+    assert!(!can_align(doc, &[loose]), "alone on the page");
+    assert!(!can_align(doc, &[f, inner]), "a frame with its own child is the frame alone");
+    assert!(can_align(doc, &[inner]), "one in a frame aligns to it");
+    assert!(can_align(doc, &[f, loose]), "two align to each other");
+    // Where the buttons are off, the command still does nothing (and no harm).
+    let before = doc.world_bounds(loose);
+    s.execute("align.right", &json!({"ids": [loose]})).unwrap();
+    assert_eq!(s.doc().unwrap().world_bounds(loose), before);
+    s.execute("align.right", &json!({"ids": [inner]})).unwrap();
+    assert_eq!(s.doc().unwrap().world_bounds(inner).unwrap().x1, 200.0);
+}
+
+#[test]
+fn send_to_back_across_frames_counts_per_parent() {
+    let mut s = sess();
+    let make = |s: &mut Session, p: Value| id(&s.execute("node.create", &p).unwrap());
+    let fa = make(&mut s, json!({"type": "frame", "x": 0, "y": 0, "width": 200, "height": 200}));
+    let fb = make(&mut s, json!({"type": "frame", "x": 300, "y": 0, "width": 200, "height": 200}));
+    let rect = |parent: NodeId| json!({"type": "rectangle", "parent": parent, "x": 10, "y": 10, "width": 20, "height": 20});
+    let a: Vec<NodeId> = (0..2).map(|_| make(&mut s, rect(fa))).collect();
+    let b: Vec<NodeId> = (0..3).map(|_| make(&mut s, rect(fb))).collect();
+    let idx = |s: &Session, n: NodeId| s.doc().unwrap().index_in_parent(n);
+    assert_eq!(idx(&s, a[1]), Some(1));
+    assert_eq!(idx(&s, b[2]), Some(2));
+    s.execute("arrange.back", &json!({"ids": [a[1], b[2]]})).unwrap();
+    assert_eq!(idx(&s, a[1]), Some(0), "top of frame A at the back");
+    assert_eq!(idx(&s, b[2]), Some(0), "top of frame B at the back");
+    // Two from B plus one from A: each parent's selection ends at 0..n in its original order.
+    s.execute("arrange.back", &json!({"ids": [b[1], a[0], b[0]]})).unwrap();
+    let kids = |s: &Session, f: NodeId| s.doc().unwrap().node(f).unwrap().children.clone();
+    assert_eq!(kids(&s, fa), vec![a[0], a[1]]);
+    assert_eq!(kids(&s, fb), vec![b[0], b[1], b[2]]);
 }
 
 #[test]

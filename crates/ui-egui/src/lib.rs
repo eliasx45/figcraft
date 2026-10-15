@@ -65,6 +65,9 @@ pub mod widgets;
 pub mod windows;
 
 #[cfg(test)]
+mod theme_startup_tests;
+
+#[cfg(test)]
 mod a11y_tests;
 #[cfg(test)]
 mod branch_ui_tests;
@@ -79,11 +82,15 @@ mod cursors_tests;
 #[cfg(test)]
 mod dev_mode_tests;
 #[cfg(test)]
+mod export_preview_tests;
+#[cfg(test)]
 mod field_tests;
 #[cfg(test)]
 mod frame_label_tests;
 #[cfg(test)]
 mod gap_handle_tests;
+#[cfg(test)]
+mod gradient_shorthand_tests;
 #[cfg(test)]
 mod home_recents_tests;
 #[cfg(test)]
@@ -145,11 +152,17 @@ mod shortcut_keys_tests;
 #[cfg(test)]
 mod shortcuts_tests;
 #[cfg(test)]
+mod style_folder_rename_tests;
+#[cfg(test)]
 mod text_enter_tests;
 #[cfg(test)]
 mod titlebar_tests;
 #[cfg(test)]
+mod variables_rename_tests;
+#[cfg(test)]
 mod vector_tail_ui_tests;
+#[cfg(test)]
+mod web_clipboard_tests;
 #[cfg(test)]
 mod windows_qa_tests;
 #[cfg(test)]
@@ -223,6 +236,23 @@ pub trait Services {
 /// No-op services (tests, headless screenshots).
 pub struct NoServices;
 impl Services for NoServices {}
+
+/// Put `text` on the system clipboard through egui's output, which the browser shell writes while
+/// it handles the copy event (the only time a page may write it). For shells without a clipboard
+/// of their own.
+pub fn egui_copy_text(ctx: &egui::Context, text: &str) {
+    ctx.copy_text(text.to_string());
+}
+
+/// Put a straight-RGBA image on the system clipboard through egui's output (see
+/// [`egui_copy_text`]); a buffer that doesn't match its size is dropped.
+pub fn egui_copy_png(ctx: &egui::Context, w: u32, h: u32, rgba: &[u8]) {
+    let (w, h) = (w as usize, h as usize);
+    if w.checked_mul(h).and_then(|n| n.checked_mul(4)) != Some(rgba.len()) {
+        return;
+    }
+    ctx.copy_image(egui::ColorImage::from_rgba_unmultiplied([w, h], rgba));
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum RightTab {
@@ -901,11 +931,13 @@ impl FigApp {
         }
         let dark = match self.session.prefs.theme.as_str() {
             "dark" => true,
-            "system" => ctx.global_style().visuals.dark_mode,
+            // The active visuals were set by us last frame (possibly for a manual theme).
+            // Read the integration's OS theme instead; without one, keep the light fallback.
+            "system" => ctx.system_theme() == Some(egui::Theme::Dark),
             _ => false,
         };
         self.ui.dark = dark;
-        // New files and pages take the theme's page colour (existing pages keep theirs).
+        // New files take the theme's page colour (existing pages keep theirs).
         self.session.set_ui_dark(dark);
         theme::apply_with(ctx, if dark { theme::Tokens::dark() } else { theme::Tokens::light() }, self.reduce_motion());
         if self.worker.is_none() {

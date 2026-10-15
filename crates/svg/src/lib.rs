@@ -86,6 +86,12 @@ fn clip_attr(clip: &Option<String>) -> String {
     clip.as_ref().map(|c| format!(" clip-path=\"url(#{c})\"")).unwrap_or_default()
 }
 
+/// `el` in a group with `clip` (a ` clip-path` attribute, or nothing). A clip path is in page
+/// coordinates, and on an element with a `transform` it would be read after that transform.
+fn clipped(clip: &str, el: String) -> String {
+    if clip.is_empty() { el } else { format!("<g{clip}>{el}</g>") }
+}
+
 fn num(v: f64) -> String {
     if !v.is_finite() {
         return "0".into();
@@ -433,7 +439,8 @@ impl W<'_> {
             let fr = if *rule == figcraft_render::FillRule::EvenOdd { " fill-rule=\"evenodd\"" } else { "" };
             for p in &n.fills {
                 if let Some(a) = self.paint_attr(p, w, h) {
-                    let _ = write!(self.body, "<path transform=\"{}\" d=\"{}\" {a}{fr}{paint_clip}/>", matrix(xf), path_d(path));
+                    let el = format!("<path transform=\"{}\" d=\"{}\" {a}{fr}/>", matrix(xf), path_d(path));
+                    self.body.push_str(&clipped(&paint_clip, el));
                 }
             }
         }
@@ -505,7 +512,7 @@ impl W<'_> {
         if n.has_visible_stroke()
             && let Some(simple) = self.opts.simplify_stroke.then(|| self.simple_stroke(n, xf)).flatten()
         {
-            self.body.push_str(&simple);
+            self.body.push_str(&clipped(&paint_clip, simple));
         } else if n.has_visible_stroke() {
             let geom = match &n.kind {
                 NodeKind::BooleanOp { .. } | NodeKind::Text(_) => outline.as_ref().map(|(p, _)| p.clone()),
@@ -517,7 +524,8 @@ impl W<'_> {
                 let fr = if even { " fill-rule=\"evenodd\"" } else { "" };
                 for p in &n.strokes {
                     if let Some(a) = self.paint_attr(p, w, h) {
-                        let _ = write!(self.body, "<path transform=\"{}\" d=\"{}\" {a}{fr}{paint_clip}/>", matrix(xf), path_d(&area));
+                        let el = format!("<path transform=\"{}\" d=\"{}\" {a}{fr}/>", matrix(xf), path_d(&area));
+                        self.body.push_str(&clipped(&paint_clip, el));
                     }
                 }
             }

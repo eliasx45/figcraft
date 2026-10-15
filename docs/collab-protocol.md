@@ -726,8 +726,10 @@ resuming with its offline edits, and leaving the session going back to snapshot 
 - **What is kept.** The published library a library file holds (manifest and snapshot with
   per-asset versions) travels as a small `.figcraft` archive holding only it. The server reads it
   in full with the limits a library file is read with, requires the file's library id once one is
-  kept and a newer version, then writes it beside the file (`library.bin`, atomically) and records
-  id, name and version in the file's description. Publishing from the app first fetches the
+  kept and a newer version, then writes it beside the file in a file of its own
+  (`library-<version>.bin`, atomically) and only then records id, name and version in the file's
+  description, so a failed write or a crash in between leaves the previous version served whole;
+  the previous version's file is deleted after. Publishing from the app first fetches the
   server's version and publishes the next one from it, so per-asset versions continue whoever
   published last; a race is refused and the next publish follows.
 - **Using it.** A file enables the library with the link in place of a library file's path

@@ -980,12 +980,30 @@ fn overlays(app: &FigApp, painter: &egui::Painter, t: &Tokens) -> Vec<(NodeId, [
         if app.session.tool.tool == ToolId::Pencil {
             painter.add(Shape::line(pts, stroke(t.text, 2.0)));
         } else {
+            for [x0, y0, x1, y1] in &ov.pen_handles {
+                bezier_handle(painter, app.to_screen(*x0, *y0), app.to_screen(*x1, *y1), 3.5, Color32::WHITE);
+            }
             for p in &pts {
                 painter.circle_filled(*p, 3.5, Color32::WHITE);
                 painter.circle_stroke(*p, 3.5, stroke(ACCENT, 1.0));
             }
             if let Some([x0, y0, x1, y1]) = ov.rubber {
-                painter.line_segment([app.to_screen(x0, y0), app.to_screen(x1, y1)], stroke(ACCENT, 1.0));
+                let (a, b) = (app.to_screen(x0, y0), app.to_screen(x1, y1));
+                // The segment a click would make: along the last anchor's out handle, if it has one.
+                match ov.rubber_handle {
+                    Some([hx, hy]) => {
+                        let h = app.to_screen(hx, hy);
+                        painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
+                            [a, h, b, b],
+                            false,
+                            Color32::TRANSPARENT,
+                            stroke(ACCENT, 1.0),
+                        ));
+                    }
+                    None => {
+                        painter.line_segment([a, b], stroke(ACCENT, 1.0));
+                    }
+                }
             }
         }
     }
@@ -1118,6 +1136,14 @@ fn width_overlay(app: &FigApp, painter: &egui::Painter, doc: &Document, ve: &fig
     }
 }
 
+/// A bezier handle from its anchor `v` to its end `e` (screen points): the line, and a dot of
+/// radius `r` filled with `fill` (vector edit mode and the Pen draw them alike).
+fn bezier_handle(painter: &egui::Painter, v: Pos2, e: Pos2, r: f32, fill: Color32) {
+    painter.line_segment([v, e], stroke(ACCENT, 1.0));
+    painter.circle_filled(e, r, fill);
+    painter.circle_stroke(e, r, stroke(ACCENT, 1.0));
+}
+
 /// Vector edit mode: a layer's segments, handles and points (`points`) with its `hover`ed part, and
 /// for the `active` layer the closed area under the paint bucket and the pen's rubber band.
 fn vector_overlay(
@@ -1158,13 +1184,9 @@ fn vector_overlay(
         return;
     }
     for h in &o.handles {
-        let (v, e) = (sp(&h.vertex), sp(&h.handle));
-        painter.line_segment([v, e], stroke(ACCENT, 1.0));
         let hovered = hover == Some(VHit::Handle { seg: h.seg, start: h.start });
-        let r = if hovered { 4.5 } else { 3.5 };
         let on = o.selected_handles.contains(&(h.seg, h.start));
-        painter.circle_filled(e, r, if on { ACCENT } else { Color32::WHITE });
-        painter.circle_stroke(e, r, stroke(ACCENT, 1.0));
+        bezier_handle(painter, sp(&h.vertex), sp(&h.handle), if hovered { 4.5 } else { 3.5 }, if on { ACCENT } else { Color32::WHITE });
     }
     for (i, v) in o.vertices.iter().enumerate() {
         let p = sp(v);

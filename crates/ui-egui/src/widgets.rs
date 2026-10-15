@@ -625,6 +625,21 @@ pub fn elide_font(ui: &Ui, s: &str, max_w: f32, font: egui::FontId) -> String {
         .unwrap_or_else(|| "…".into())
 }
 
+/// [`elide_font`] cut at its start, keeping its end: a path keeps its file and the folders
+/// nearest it.
+pub fn elide_start_font(ui: &Ui, s: &str, max_w: f32, font: egui::FontId) -> String {
+    let fits = |s: &str| ui.painter().layout_no_wrap(s.to_string(), font.clone(), Color32::WHITE).size().x <= max_w;
+    if fits(s) {
+        return s.to_string();
+    }
+    let chars: Vec<char> = s.chars().collect();
+    (1..chars.len())
+        .rev()
+        .map(|n| format!("…{}", chars[chars.len() - n..].iter().collect::<String>().trim_start()))
+        .find(|c| fits(c))
+        .unwrap_or_else(|| "…".into())
+}
+
 /// A row of icon buttons; returns the index clicked.
 pub fn segmented(ui: &mut Ui, items: &[(Icon, &str)], active: Option<usize>, cell: f32) -> Option<usize> {
     let names: Vec<&str> = items.iter().map(|(_, tip)| *tip).collect();

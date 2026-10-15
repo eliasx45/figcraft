@@ -599,11 +599,14 @@ fn position_fields(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[NodeId]
             (Icon::AlignBottom, tip(tr("Align bottom"), cmds[5])),
         ];
         let w = col / 3.0;
-        if let Some(i) = widgets::segmented(ui, &items[..3], None, w) {
+        let picked = ui.add_enabled_ui(figcraft_engine::cmd::arrange::can_align(doc, sel), |ui| {
+            let h = widgets::segmented(ui, &items[..3], None, w);
+            let v = widgets::segmented(ui, &items[3..], None, w).map(|i| i + 3);
+            h.or(v)
+        });
+        picked.response.on_disabled_hover_text(tr("A layer on its own aligns to its frame: select more layers, or one in a frame"));
+        if let Some(i) = picked.inner {
             app.run(cmds[i], json!({"ids": ids}));
-        }
-        if let Some(i) = widgets::segmented(ui, &items[3..], None, w) {
-            app.run(cmds[i + 3], json!({"ids": ids}));
         }
         if sel.len() > 2 {
             let more = icons::button(ui, Icon::DistributeH, 24.0, false, tr("Distribute and tidy"));

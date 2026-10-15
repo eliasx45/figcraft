@@ -533,3 +533,38 @@ fn the_home_screen_draws_no_frames_once_the_pictures_are_in() {
     assert!(delay >= Duration::from_secs(1), "a frame in {delay:?}: {:?}", h.ctx.repaint_causes());
     assert_eq!(file(&h.app.inspect()["homeRecents"], "pic")["picture"], "picture");
 }
+
+#[test]
+fn files_deleted_while_in_view_show_as_gone() {
+    let (_, paths) = files("deleted");
+    let (mut h, _) = crate::live_tests::Harness::new();
+    h.app.session.prefs.recent_files = paths.clone();
+    h.app.session.prefs.getting_started_dismissed = true;
+    h.app.ui.home = true;
+    let exists = |h: &mut crate::live_tests::Harness, name: &str| file(&h.app.inspect()["homeRecents"], name)["exists"].clone();
+    // Up to `n` frames (1/60 s of UI time each), giving the reader thread time between them.
+    let wait_n = |h: &mut crate::live_tests::Harness, name: &str, want: bool, n: usize| {
+        for _ in 0..n {
+            h.frame(vec![]);
+            if exists(h, name) == want {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        false
+    };
+    let wait = |h: &mut crate::live_tests::Harness, name: &str, want: bool| wait_n(h, name, want, 400);
+    assert!(wait(&mut h, "pic", true) && wait(&mut h, "art", true));
+    // Deleted while the recent files stay in view: within a couple of seconds.
+    std::fs::remove_file(&paths[0]).unwrap();
+    h.frames(5);
+    assert_eq!(exists(&mut h, "pic"), true, "not read again on every frame");
+    h.skip(2.5);
+    assert!(wait(&mut h, "pic", false), "read again after a while");
+    // Deleted while the window was in the background: as soon as it has the focus again.
+    std::fs::remove_file(&paths[2]).unwrap();
+    h.frame(vec![egui::Event::WindowFocused(false)]);
+    h.frame(vec![egui::Event::WindowFocused(true)]);
+    // Well under the regular interval, so only the focus can have caused it.
+    assert!(wait_n(&mut h, "art", false, 30), "read again on getting the focus back");
+}

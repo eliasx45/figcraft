@@ -30,12 +30,13 @@ supported by both apps (CJK, Arabic and Devanagari shaping, IME); Figma has no v
   channel stay English. Accessibility names come from the same strings.
 - **Language preference:** Preferences ▸ Language (System, English, Deutsch, Español, Español
   (Latinoamérica), Français, 日本語, 한국어, Português (Brasil), 简体中文), applied at once without a
-  restart; System takes the first of the OS's preferred languages that has a catalog (Windows'
-  language list, macOS AppleLanguages, `LANGUAGE` then the locale variables on Linux and BSD; a regional tag
-  falls back to its language, pt-PT or pt to pt-BR, and es-419, es-MX, es-AR, es-CO and the other
-  Latin American and US Spanish tags to es-419; zh, zh-CN, zh-SG and zh-Hans read zh-Hans, while
-  Traditional Chinese (zh-Hant, zh-TW, zh-HK, zh-MO) has no catalog and reads English or the next OS
-  language, never Simplified) or the browser's language on the web.
+  restart; System takes the first of the OS's preferred languages that has a catalog (on Windows
+  only the first preferred language counts, since that list also holds the languages added for a
+  keyboard; macOS AppleLanguages, `LANGUAGE` then the locale variables on Linux and BSD; a regional
+  tag falls back to its language, pt-PT or pt to pt-BR, and es-419, es-MX, es-AR, es-CO and the
+  other Latin American and US Spanish tags to es-419; zh, zh-CN, zh-SG and zh-Hans read zh-Hans,
+  while Traditional Chinese (zh-Hant, zh-TW, zh-HK, zh-MO) has no catalog and reads English or the
+  next OS language, never Simplified) or the browser's language on the web.
   `pref.language {language}` sets it from the CLI, MCP and the control channel.
 - **Regional overlays:** a regional catalog whose language has a catalog lists only what differs
   (`es-419.toml` over `es.toml`); its UI strings, command labels and menu wordings read the
@@ -107,6 +108,7 @@ Vietnamese and Arabic. Traditional Chinese is not planned (no catalog; its users
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-14 | minor | Windows UI language (#291): the interface language comes from Windows' first preferred language alone; that list is also the input-language list (a German keyboard on a Polish system adds Deutsch), and taking the first entry with a catalog turned the interface German there. A first preferred language without a catalog reads English; macOS AppleLanguages and gettext's `LANGUAGE` still take the first language with a catalog |
 | 2026-10-12 | minor | Drafts catch up again, and the counts with them: French, German, Brazilian Portuguese, Japanese, Korean and Simplified Chinese translate the 71 UI strings and 5 command labels they lacked since sharing with a join code and open hosting (the Share popover, join codes, owner tokens, reports, the .fig export notes), and with Spanish the 26 strings and 3 command labels of your online files (Home ▸ Online, its menu and dialogs, the marks on tabs); machine-drafted in each file's conventions, still drafts. The Latin American overlay adds computadora and agrega where the new Spanish says ordenador and añade (98 entries). 2,076 entries per catalog (1,503 UI strings, 544 command labels, 29 menu wordings) |
 | 2026-10-12 | minor | Draft catalogs catch up: French, German, Brazilian Portuguese, Japanese and Korean translate the 66 UI strings and 17 command labels added since they were drafted (cursor chat and spotlight, the plugin directory, Rename layers, presentation and snapping keys, list levels, the rotation origin, placing with Enter…), Simplified Chinese the 46 and 12 it lacked; machine-drafted from the English in each file's conventions, still drafts (not in `COMPLETE`). The Latin American overlay adds Control for a gamepad controller and presiona in the plugin directory hint (90 entries, with Enter for the keycap). String counts re-measured: 1,417 UI keys, 536 command labels and 29 menu wordings (1,982 entries), every draft at 100%. Localization grade unchanged |
 | 2026-10-12 | minor | Simplified Chinese draft catalog (gap 5): `zh-Hans.toml` translates every UI string (1,371 keys; plurals give only `other`, and `plural_one` never picks "one"), command label (524) and menu wording (29), machine-drafted in a concise UI style with full-width punctuation and marked as a draft awaiting native review; Preferences ▸ Language lists 简体中文, System maps zh, zh-CN, zh-SG and zh-Hans to it, and Traditional Chinese (zh-Hant, zh-TW, zh-HK, zh-MO) has no catalog and stays English (or the next OS language), never Simplified. A Chinese UI draws Han in a Chinese face first (Microsoft YaHei, PingFang SC, Noto Sans CJK SC), ahead of the craft-fonts build's Japanese BIZ UDPGothic, and changing the UI language lays the CJK faces out again (switching from Japanese to Chinese no longer keeps the Japanese face in front). String counts re-measured: 1,371 UI keys, 524 command labels and 29 menu wordings (1,924 entries); the French, German, Brazilian Portuguese, Japanese and Korean drafts have 1,899 of them (the 25 newer strings read English). Localization 36% → 39%, 31–54 h → 29–51 h |

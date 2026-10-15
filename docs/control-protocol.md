@@ -51,7 +51,9 @@ unknown id is an error.
 
 Run any command (the same ids as the menus, shortcuts, Actions palette, CLI and MCP). Programmatic
 calls never open dialogs: dialog requests are dropped. Returns the command's result (creation
-commands return `{"id": N}`).
+commands return `{"id": N}`). Paints (`fills`, `strokes`, `paint`) take a colour, the full paint
+JSON or the gradient shorthand `{"type":"linearGradient","stops":["#hex","#hex"],"from"?,"to"?}`
+(as in `docs/mcp.md`).
 
 ```json
 {"id":1,"method":"engine.execute","params":{"command":"shape.rectangle","params":{"x":10,"y":10,"width":100,"height":50}}}

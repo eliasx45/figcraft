@@ -903,15 +903,22 @@ impl Document {
     /// A unique name like "Frame 3" for a new node of a kind.
     pub fn next_name(&self, base: &str) -> String {
         let mut max = 0u64;
+        let mut taken = std::collections::BTreeSet::new();
         for n in self.nodes() {
             if let Some(rest) = n.name.strip_prefix(base)
                 && let Some(num) = rest.strip_prefix(' ')
                 && let Ok(k) = num.parse::<u64>()
             {
                 max = max.max(k);
+                taken.insert(k);
             }
         }
-        format!("{base} {}", max + 1)
+        let next = match max.checked_add(1) {
+            Some(next) => next,
+            // The counter is spent: the lowest free number instead of wrapping onto a name.
+            None => (1u64..).find(|k| !taken.contains(k)).unwrap_or(1),
+        };
+        format!("{base} {next}")
     }
 
     pub fn style(&self, id: &str) -> Option<&Style> {

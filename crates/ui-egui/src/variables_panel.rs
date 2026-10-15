@@ -47,6 +47,8 @@ pub struct Editor {
     collection: Option<String>,
     query: String,
     rename: Option<Rename>,
+    /// The rename just started: its field takes the focus in the frame it's first drawn.
+    rename_start: bool,
     /// The variable whose details (name, description, scopes) are open.
     details: Option<String>,
     /// The group the table shows ("space" or "color/brand"); None = every variable.
@@ -240,15 +242,19 @@ fn rename_id(target: &Rename) -> Id {
     Id::new(("var_rename", target))
 }
 
-fn start_rename(ui: &Ui, st: &mut Editor, target: Rename) {
-    ui.memory_mut(|m| m.request_focus(rename_id(&target).with("te")));
+/// Start renaming `target`. The field isn't drawn yet (a new collection, mode or variable shows next
+/// frame), and focusing it now would put a node that isn't there in the screen reader tree, which
+/// AccessKit aborts on (#224): the field takes the focus when drawn.
+fn start_rename(st: &mut Editor, target: Rename) {
     st.rename = Some(target);
+    st.rename_start = true;
 }
 
 /// The inline editor of a rename in progress: the new name once committed. The rename ends when
 /// the editor closes.
 fn rename_field(ui: &mut Ui, st: &mut Editor, target: &Rename, value: &str, rect: Rect, font: egui::FontId) -> Option<String> {
-    let (out, open) = widgets::rename_field(ui, rename_id(target), value, rect, font, false);
+    let start = std::mem::take(&mut st.rename_start);
+    let (out, open) = widgets::rename_field(ui, rename_id(target), value, rect, font, start);
     if !open {
         st.rename = None;
     }
@@ -271,7 +277,7 @@ fn sidebar(app: &mut FigApp, ui: &mut Ui, views: &[View], local: &Variables, st:
         Icon::Plus,
         tr("Create collection"),
     ) {
-        create_collection(app, ui, local, st);
+        create_collection(app, local, st);
     }
     egui::ScrollArea::vertical().id_salt("vars_collections").auto_shrink([false, false]).show(ui, |ui| {
         for view in views {
@@ -332,11 +338,11 @@ fn collection_row(app: &mut FigApp, ui: &mut Ui, view: &View, c: &Collection, st
     }
     if view.editable() {
         if resp.double_clicked() {
-            start_rename(ui, st, target.clone());
+            start_rename(st, target.clone());
         }
         crate::right::context_popup(&resp).show(|ui| {
             if menu_item(ui, tr("Rename"), "") {
-                start_rename(ui, st, target.clone());
+                start_rename(st, target.clone());
                 ui.close();
             }
             if menu_item(ui, tr("Delete collection"), "") {
@@ -421,11 +427,11 @@ fn group_rows(app: &mut FigApp, ui: &mut Ui, view: &View, coll: &Collection, st:
             continue;
         }
         if resp.double_clicked() {
-            start_rename(ui, st, target.clone());
+            start_rename(st, target.clone());
         }
         crate::right::context_popup(&resp).show(|ui| {
             if menu_item(ui, tr("Rename group"), "") {
-                start_rename(ui, st, target.clone());
+                start_rename(st, target.clone());
                 ui.close();
             }
             if menu_item(ui, tr("Delete group"), "") {
@@ -468,14 +474,14 @@ fn rename_group(app: &mut FigApp, members: &[&Variable], g: &str, new: &str, st:
     }
 }
 
-fn create_collection(app: &mut FigApp, ui: &Ui, vars: &Variables, st: &mut Editor) {
+fn create_collection(app: &mut FigApp, vars: &Variables, st: &mut Editor) {
     let name = unique("Collection", |n| vars.collections.iter().any(|c| c.name == n));
     if let Some(id) =
         app.run("variable.createCollection", json!({"name": name, "modes": ["Mode 1"]})).and_then(|r| r["id"].as_str().map(str::to_string))
     {
         st.library = None;
         st.collection = Some(id.clone());
-        start_rename(ui, st, Rename::Collection(id));
+        start_rename(st, Rename::Collection(id));
     }
 }
 
@@ -503,7 +509,7 @@ fn table(app: &mut FigApp, ui: &mut Ui, view: &View, st: &mut Editor) {
                 );
                 ui.add_space(12.0);
                 if widgets::button(ui, tr("Create collection"), true, true).clicked() {
-                    create_collection(app, ui, view.vars, st);
+                    create_collection(app, view.vars, st);
                 }
             });
         });
@@ -599,18 +605,18 @@ fn header_row(app: &mut FigApp, ui: &mut Ui, view: &View, coll: &Collection, st:
         }
         ui.painter().with_clip_rect(cell).text(name_pos, Align2::LEFT_CENTER, &m.name, regular(11.0), t.text_secondary);
         if resp.double_clicked() {
-            start_rename(ui, st, target.clone());
+            start_rename(st, target.clone());
         }
         crate::right::context_popup(&resp).show(|ui| {
             if menu_item(ui, tr("Rename mode"), "") {
-                start_rename(ui, st, target.clone());
+                start_rename(st, target.clone());
                 ui.close();
             }
             if menu_item(ui, tr("Duplicate mode"), "") {
                 let name = unique(&format!("{} copy", m.name), |n| coll.modes.iter().any(|x| x.name == n));
                 let made = app.run("variable.addMode", json!({"collection": coll.id, "name": name, "from": m.id}));
                 if let Some(id) = made.and_then(|r| r["id"].as_str().map(str::to_string)) {
-                    start_rename(ui, st, Rename::Mode(coll.id.clone(), id));
+                    start_rename(st, Rename::Mode(coll.id.clone(), id));
                 }
                 ui.close();
             }
@@ -645,7 +651,7 @@ fn header_row(app: &mut FigApp, ui: &mut Ui, view: &View, coll: &Collection, st:
         let name = unique("Mode", |n| coll.modes.iter().any(|m| m.name == n));
         if let Some(id) = app.run("variable.addMode", json!({"collection": coll.id, "name": name})).and_then(|r| r["id"].as_str().map(str::to_string))
         {
-            start_rename(ui, st, Rename::Mode(coll.id.clone(), id));
+            start_rename(st, Rename::Mode(coll.id.clone(), id));
         }
     }
     ui.painter().line_segment([r.left_bottom(), r.right_bottom()], Stroke::new(1.0, t.border));
@@ -679,7 +685,7 @@ fn var_row(app: &mut FigApp, ui: &mut Ui, view: &View, coll: &Collection, v: &Va
     }
     if editable {
         if !inherited && resp.double_clicked() && ui.input(|i| i.pointer.interact_pos()).is_some_and(|p| p.x < name_r.max.x) {
-            start_rename(ui, st, target.clone());
+            start_rename(st, target.clone());
         }
         crate::right::context_popup(&resp).show(|ui| {
             if menu_item(ui, tr("Edit variable"), "") {
@@ -687,7 +693,7 @@ fn var_row(app: &mut FigApp, ui: &mut Ui, view: &View, coll: &Collection, v: &Va
                 ui.close();
             }
             if !inherited && menu_item(ui, tr("Rename"), "") {
-                start_rename(ui, st, target.clone());
+                start_rename(st, target.clone());
                 ui.close();
             }
             if !v.overrides.is_empty() && menu_item(ui, tr("Reset overrides"), "") {
@@ -894,7 +900,7 @@ fn create_row(app: &mut FigApp, ui: &mut Ui, view: &View, coll: &Collection, st:
                     let params = json!({"collection": coll.id, "name": name, "type": kind.id()});
                     if let Some(id) = app.run("variable.create", params).and_then(|r| r["id"].as_str().map(str::to_string)) {
                         st.query.clear();
-                        start_rename(ui, st, Rename::Variable(id));
+                        start_rename(st, Rename::Variable(id));
                     }
                     ui.close();
                 }

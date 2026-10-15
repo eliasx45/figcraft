@@ -88,26 +88,49 @@ pub(crate) struct FileRow<'a> {
     pub detail_ink: Color32,
 }
 
-/// Paint `row` in `r` (highlighted while `resp` is hovered): the name gives way to the detail.
-pub(crate) fn file_row(ui: &Ui, t: &Tokens, r: Rect, resp: &Response, row: &FileRow) {
+/// Paint `row` in `r` (highlighted while `resp` is hovered): the name first, the detail in the
+/// room left after it, cut at its start; true when either is cut.
+pub(crate) fn file_row(ui: &Ui, t: &Tokens, r: Rect, resp: &Response, row: &FileRow) -> bool {
+    /// Between the name and the detail.
+    const GAP: f32 = 16.0;
+    /// A detail with less room than this is left out rather than shown as a bare ellipsis.
+    const MIN_DETAIL: f32 = 48.0;
     if resp.hovered() {
         ui.painter().rect_filled(r, CornerRadius::same(5), t.hover);
     }
     if let Some((icon, tint)) = row.mark {
         icons::paint(ui.painter(), Rect::from_min_size(pos2(r.min.x + 8.0, r.center().y - 8.0), vec2(16.0, 16.0)), icon, tint);
     }
-    let detail = ui.painter().text(pos2(r.max.x - 8.0, r.center().y), Align2::RIGHT_CENTER, row.detail, regular(row.detail_size), row.detail_ink);
-    let name = widgets::elide_font(ui, row.name, (detail.min.x - r.min.x - 44.0).max(40.0), regular(12.0));
-    ui.painter().text(pos2(r.min.x + 32.0, r.center().y), Align2::LEFT_CENTER, name, regular(12.0), row.ink);
+    let (name_font, detail_font) = (regular(12.0), regular(row.detail_size));
+    let width = |s: &str, font: &egui::FontId| ui.painter().layout_no_wrap(s.to_string(), font.clone(), Color32::WHITE).size().x;
+    let room = (r.width() - 40.0).max(0.0);
+    let name_w = width(row.name, &name_font);
+    let detail_w = width(row.detail, &detail_font);
+    // When both don't fit, the name keeps at least 60% of the row and the detail gets the rest.
+    let name_max = if name_w + GAP + detail_w <= room { name_w } else { name_w.min((room - GAP - detail_w).max(room * 0.6)) };
+    let name = widgets::elide_font(ui, row.name, name_max, name_font.clone());
+    let detail_room = room - width(&name, &name_font) - GAP;
+    let detail = if row.detail.is_empty() || detail_room < MIN_DETAIL {
+        String::new()
+    } else {
+        widgets::elide_start_font(ui, row.detail, detail_room, detail_font.clone())
+    };
+    let cut = name != row.name || detail != row.detail;
+    ui.painter().text(pos2(r.min.x + 32.0, r.center().y), Align2::LEFT_CENTER, name, name_font, row.ink);
+    ui.painter().text(pos2(r.max.x - 8.0, r.center().y), Align2::RIGHT_CENTER, detail, detail_font, row.detail_ink);
+    cut
 }
 
 /// A row of Recents' own lists: laid out in place, named for screen readers, ringed with the
 /// keyboard on it; true when chosen.
 fn listed(ui: &mut Ui, t: &Tokens, id: Id, height: f32, row: &FileRow) -> bool {
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width().min(640.0), height), Sense::hover());
-    let resp = ui.interact(r, id, Sense::click());
+    let mut resp = ui.interact(r, id, Sense::click());
     a11y::button(&resp, row.name);
-    file_row(ui, t, r, &resp, row);
+    if file_row(ui, t, r, &resp, row) {
+        // Cut to fit: in full on hover.
+        resp = resp.on_hover_text(format!("{}\n{}", row.name, row.detail));
+    }
     focus_ring(ui, t, r, &resp, 5);
     resp.clicked()
 }

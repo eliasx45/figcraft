@@ -4,9 +4,11 @@ FigCraft's interface strings live in one TOML catalog per language in
 [`crates/ui-egui/locales/`](../crates/ui-egui/locales). The build bakes every catalog into the
 binary (desktop and web); nothing is read at run time. Preferences ▸ Language picks the language
 and the interface switches at once. System takes the first of the OS's preferred languages that has
-a catalog (the browser's language on the web): a regional tag reads its language's catalog
-(`fr-CA` → `fr`), a language with only a regional catalog reads that one (`pt-PT` → `pt-BR`), and
-Latin American and US Spanish (`es-MX`, `es-AR`, `es-CO`, `es-US`, `es-419`…) read `es-419`.
+a catalog (the browser's language on the web; on Windows only the first preferred language counts,
+since that list also holds the languages added for a keyboard, and a first language without a
+catalog reads English): a regional tag reads its language's catalog (`fr-CA` → `fr`), a language
+with only a regional catalog reads that one (`pt-PT` → `pt-BR`), and Latin American and US Spanish
+(`es-MX`, `es-AR`, `es-CO`, `es-US`, `es-419`…) read `es-419`.
 Chinese (`zh`, `zh-CN`, `zh-SG`, `zh-Hans`) reads `zh-Hans`; Traditional Chinese (`zh-Hant`,
 `zh-TW`, `zh-HK`, `zh-MO`) has no catalog and reads English (or the next OS language), not
 Simplified.

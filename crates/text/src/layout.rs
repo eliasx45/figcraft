@@ -1213,7 +1213,8 @@ impl TextLayout {
             }
             let (x0, _) = self.caret(a.max(line.char_start));
             let x1 = if b >= line.char_end {
-                self.line_end_x(line) + if line.para_end && b > line.char_end.saturating_sub(1) { 4.0 } else { 0.0 }
+                // The last line has no paragraph break to show, so it ends at its glyphs.
+                self.line_end_x(line) + if line.para_end && li + 1 < self.lines.len() && b > line.char_end.saturating_sub(1) { 4.0 } else { 0.0 }
             } else {
                 self.caret(b).0
             };

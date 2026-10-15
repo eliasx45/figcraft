@@ -1407,7 +1407,7 @@ checksum = "b97b65636e5b9ef369943878ac74335ba1c55c1cb6adbf1e2c293c624248d693"
 
 [[package]]
 name = "figcraft"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "arboard",
  "eframe",
@@ -1418,6 +1418,7 @@ dependencies = [
  "figcraft-format",
  "figcraft-text",
  "figcraft-ui-egui",
+ "fmv-macos-events",
  "image",
  "log",
  "rfd",
@@ -1432,7 +1433,7 @@ dependencies = [
 
 [[package]]
 name = "figcraft-cli"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "figcraft-doc",
  "figcraft-engine",
@@ -1446,7 +1447,7 @@ dependencies = [
 
 [[package]]
 name = "figcraft-collab"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "base64 0.22.1",
  "figcraft-color",
@@ -1461,7 +1462,7 @@ dependencies = [
 
 [[package]]
 name = "figcraft-collab-net"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "base64 0.22.1",
  "figcraft-collab",
@@ -1484,7 +1485,7 @@ dependencies = [
 
 [[package]]
 name = "figcraft-color"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "kurbo",
  "serde",
@@ -1493,7 +1494,7 @@ dependencies = [
 
 [[package]]
 name = "figcraft-doc"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "figcraft-color",
  "figcraft-geom",
@@ -1505,7 +1506,7 @@ dependencies = [
 
 [[package]]
 name = "figcraft-engine"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "base64 0.22.1",
  "figcraft-collab",
@@ -1533,7 +1534,7 @@ dependencies = [
 
 [[package]]
 name = "figcraft-format"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "base64 0.22.1",
  "figcraft-doc",
@@ -1549,7 +1550,7 @@ dependencies = [
 
 [[package]]
 name = "figcraft-geom"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "kurbo",
  "serde",
@@ -1557,7 +1558,7 @@ dependencies = [
 
 [[package]]
 name = "figcraft-layout"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "figcraft-doc",
  "figcraft-geom",
@@ -1565,7 +1566,7 @@ dependencies = [
 
 [[package]]
 name = "figcraft-mcp"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "base64 0.22.1",
  "figcraft-collab-net",
@@ -1581,7 +1582,7 @@ dependencies = [
 
 [[package]]
 name = "figcraft-pathops"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "figcraft-doc",
  "figcraft-geom",
@@ -1590,7 +1591,7 @@ dependencies = [
 
 [[package]]
 name = "figcraft-pdf"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "figcraft-color",
  "figcraft-doc",
@@ -1607,7 +1608,7 @@ dependencies = [
 
 [[package]]
 name = "figcraft-plugin"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "figcraft-color",
  "serde",
@@ -1620,7 +1621,7 @@ dependencies = [
 
 [[package]]
 name = "figcraft-render"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "crc32fast",
  "figcraft-color",
@@ -1638,7 +1639,7 @@ dependencies = [
 
 [[package]]
 name = "figcraft-server"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "crc32fast",
  "ctrlc",
@@ -1662,7 +1663,7 @@ dependencies = [
 
 [[package]]
 name = "figcraft-svg"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "base64 0.22.1",
  "figcraft-color",
@@ -1678,7 +1679,7 @@ dependencies = [
 
 [[package]]
 name = "figcraft-text"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "figcraft-doc",
  "figcraft-geom",
@@ -1691,7 +1692,7 @@ dependencies = [
 
 [[package]]
 name = "figcraft-ui-egui"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "base64 0.22.1",
  "egui",
@@ -1716,7 +1717,7 @@ dependencies = [
 
 [[package]]
 name = "figcraft-web"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "eframe",
  "egui",
@@ -1753,6 +1754,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "98de4bbd547a563b716d8dfa9aad1cb19bfab00f4fa09a6a4ed21dbcf44ce9c4"
 dependencies = [
  "num-traits",
+]
+
+[[package]]
+name = "fmv-macos-events"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "90642cf66dde7f205dc8b42dfe57b47d0f3a29f571b832742883ef512e23fe55"
+dependencies = [
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
 ]
 
 [[package]]
@@ -5846,7 +5858,7 @@ checksum = "9440ea3e5aeabb0ac63af70daf835274065238cdd0cec83418f417eae38bacee"
 
 [[package]]
 name = "xtask"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "figcraft-engine",
  "serde_json",

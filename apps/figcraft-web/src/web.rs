@@ -40,7 +40,7 @@ pub fn start() {
                     // on the socket wakes the page for a frame.
                     let ctx = cc.egui_ctx.clone();
                     session.live.install(Box::new(figcraft_collab_net::NetLink::new(std::sync::Arc::new(move || ctx.request_repaint()))));
-                    let fig = FigApp::new(session, Box::new(WebServices { reduce_motion }));
+                    let fig = FigApp::new(session, Box::new(WebServices { reduce_motion, ctx: cc.egui_ctx.clone() }));
                     Ok(Box::new(WebShell { fig }))
                 }),
             )
@@ -69,14 +69,22 @@ impl eframe::App for WebShell {
     }
 }
 
-/// Browser services. File dialogs return nothing for now (the trait's defaults); the clipboard
-/// goes through egui's own web clipboard handling.
+/// Browser services. File dialogs return nothing for now (the trait's defaults). Copies go to the
+/// system clipboard through egui's output; pastes arrive as paste events with their text (a page
+/// can't read the clipboard when it likes).
 struct WebServices {
     /// `prefers-reduced-motion: reduce` (it follows the setting while the page is open).
     reduce_motion: Option<web_sys::MediaQueryList>,
+    ctx: egui::Context,
 }
 
 impl Services for WebServices {
+    fn clipboard_set_text(&mut self, s: &str) {
+        figcraft_ui_egui::egui_copy_text(&self.ctx, s);
+    }
+    fn clipboard_set_png(&mut self, w: u32, h: u32, rgba: &[u8]) {
+        figcraft_ui_egui::egui_copy_png(&self.ctx, w, h, rgba);
+    }
     fn open_url(&mut self, url: &str) {
         let Some(window) = web_sys::window() else { return };
         if let Err(e) = window.open_with_url_and_target(url, "_blank") {

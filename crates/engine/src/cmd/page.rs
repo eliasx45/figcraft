@@ -26,7 +26,12 @@ fn settle(s: &mut Session, cmd: &str) -> crate::Result<()> {
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         spec!("page.add", "Add page", "{name?} (a name starting with a hyphen adds a divider)", true, |s, p| {
-            let background = s.new_page_background();
+            // An added page takes the current page's colour; the theme only decides new files.
+            let current = s.page().ok().and_then(|p| match s.doc().ok()?.node(p)?.kind {
+                NodeKind::Page { background, .. } => Some(background),
+                _ => None,
+            });
+            let background = current.unwrap_or_else(|| s.new_page_background());
             let doc = s.doc_mut()?;
             let name = string(p, "name").unwrap_or_else(|| format!("Page {}", doc.pages.len() + 1));
             let id = doc.add_page(&name);
@@ -47,7 +52,7 @@ pub fn specs() -> Vec<CommandSpec> {
             let id = match id(p, "id") {
                 Some(i) => i,
                 None => {
-                    let k = req_num("page.select", p, "index")? as usize;
+                    let k = req_index("page.select", p, "index")?;
                     *doc.pages.get(k).ok_or_else(|| bad("page.select", "no such page"))?
                 }
             };

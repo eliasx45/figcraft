@@ -800,3 +800,41 @@ fn the_server_forgets_addresses_whose_connections_are_gone() {
     assert!(server.blocks_remembered() <= 2, "{} blocks remembered", server.blocks_remembered());
     server.stop();
 }
+
+#[test]
+fn a_library_publish_that_fails_keeps_serving_the_old_version() {
+    let dir = TempDir::new("libfail");
+    let mut store = Store::open(dir.path(), config(dir.path()).store()).unwrap();
+    let (file, ..) = store.publish("Library", &snapshot("Library")).unwrap();
+    // Version 1, then a changed library as version 2.
+    let mut s = Session::new();
+    let f = s.execute("frame.create", &json!({"x": 0, "y": 0, "width": 50, "height": 20, "name": "Button"})).unwrap()["id"].as_u64().unwrap();
+    let c = s.execute("component.create", &json!({"ids": [f]})).unwrap()["id"].as_u64().unwrap();
+    s.execute("library.publish", &json!({})).unwrap();
+    let v1 = figcraft_engine::library_server::archive(&s.doc().unwrap().published.clone().unwrap()).unwrap();
+    s.execute("node.set", &json!({"id": c, "props": {"fill": "#00ff00"}})).unwrap();
+    s.execute("library.publish", &json!({})).unwrap();
+    let v2 = figcraft_engine::library_server::archive(&s.doc().unwrap().published.clone().unwrap()).unwrap();
+    assert_eq!(store.publish_library(&file.id, &v1).unwrap(), 1);
+    let files = dir.path().join(crate::store::FILES).join(&file.id);
+    // The description can't be written: a directory sits where its temporary file goes.
+    let tmp = crate::disk::temp_of(&files.join(crate::disk::META));
+    std::fs::create_dir(&tmp).unwrap();
+    assert!(store.publish_library(&file.id, &v2).is_err());
+    let fetch = |s: &mut Store| s.library(ip("198.51.100.1"), &file.id, Access::View, LibraryReq::Fetch { have: None, usage: None });
+    let served = |reply: LibraryReply| match reply {
+        LibraryReply::Library { version, archive } => (version, archive),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(served(fetch(&mut store)), (1, v1.clone()), "version 1, with its own bytes");
+    // A crash right after the archive was written leaves it on disk, the description unchanged.
+    std::fs::write(files.join(crate::store::library_name(2)), &v2).unwrap();
+    drop(store);
+    std::fs::remove_dir(&tmp).unwrap();
+    let mut store = Store::open(dir.path(), config(dir.path()).store()).unwrap();
+    assert_eq!(served(fetch(&mut store)), (1, v1), "still version 1 after a restart");
+    // Publishing again works, and serves the new version.
+    assert_eq!(store.publish_library(&file.id, &v2).unwrap(), 2);
+    assert_eq!(served(fetch(&mut store)), (2, v2));
+    assert!(!files.join(crate::store::library_name(1)).exists(), "the old version is deleted");
+}

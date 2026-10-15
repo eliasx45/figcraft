@@ -825,7 +825,11 @@ fn text_seg(ui: &mut Ui, salt: &str, items: &[(&str, &str)], active: Option<usiz
             ui.painter().rect_filled(r.shrink(2.0), CornerRadius::same(4), t.hover);
         }
         let col = if active == Some(i) { t.text } else { t.text_secondary };
-        let galley = ui.painter().layout_no_wrap((*label).to_string(), regular(11.5), col);
+        let galley = if *tip == "Small caps" {
+            small_caps_sample(ui, label, col)
+        } else {
+            ui.painter().layout_no_wrap((*label).to_string(), regular(11.5), col)
+        };
         let gr = Rect::from_center_size(r.center(), galley.size());
         let size = galley.size();
         ui.painter().galley(gr.min, galley, col);
@@ -846,6 +850,33 @@ fn text_seg(ui: &mut Ui, salt: &str, items: &[(&str, &str)], active: Option<usiz
         }
     }
     out
+}
+
+/// The Small caps sample: a capital, then its other letters as smaller capitals. Drawn from
+/// ordinary capitals because the small-capital letters (`ɢ`, U+0262) are missing from many UI
+/// fonts, egui's defaults among them, where they showed as a box.
+fn small_caps_sample(ui: &Ui, label: &str, col: Color32) -> Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::default();
+    let mut chars = label.chars();
+    let first: String = chars.next().into_iter().collect();
+    let rest: String = chars.map(small_capital_to_capital).collect::<String>().to_uppercase();
+    job.append(&first, 0.0, egui::TextFormat { font_id: regular(11.5), color: col, valign: egui::Align::BOTTOM, ..Default::default() });
+    job.append(&rest, 0.0, egui::TextFormat { font_id: regular(8.5), color: col, valign: egui::Align::BOTTOM, ..Default::default() });
+    ui.painter().layout_job(job)
+}
+
+/// The capital a small-capital letter stands for (the ones a sample uses), else the letter.
+fn small_capital_to_capital(c: char) -> char {
+    match c {
+        'ɢ' => 'G',
+        'ʜ' => 'H',
+        'ɪ' => 'I',
+        'ʟ' => 'L',
+        'ɴ' => 'N',
+        'ʀ' => 'R',
+        'ʏ' => 'Y',
+        c => c,
+    }
 }
 
 /// One OpenType feature toggle; `on` None = mixed. Returns true when clicked.
@@ -1135,6 +1166,29 @@ pub(crate) fn font_picker(ui: &mut Ui, current: Option<&str>, just_opened: bool)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn small_caps_sample_draws_only_letters_the_ui_font_has() {
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx, false, 0);
+        let mut shown = None;
+        let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 300.0))), ..Default::default() };
+        let mut out = ctx.run_ui(input, |ui| {
+            shown = Some(small_caps_sample(ui, "Aɢ", Color32::WHITE));
+        });
+        out.textures_delta.clear();
+        let g = shown.expect("drawn");
+        assert_eq!(g.job.text, "AG");
+        let [a, rest] = g.job.sections.as_slice() else { panic!("two sections: {:?}", g.job.sections) };
+        assert!(rest.format.font_id.size < a.format.font_id.size, "the other letters are smaller capitals");
+        ctx.fonts_mut(|f| {
+            for sec in &g.job.sections {
+                assert!(f.has_glyphs(&sec.format.font_id, &g.job.text), "UI font draws {:?}", g.job.text);
+            }
+        });
+        assert_eq!(small_capital_to_capital('ʀ'), 'R');
+        assert_eq!(small_capital_to_capital('x'), 'x');
+    }
 
     #[test]
     fn parses_line_height_and_letter_spacing() {

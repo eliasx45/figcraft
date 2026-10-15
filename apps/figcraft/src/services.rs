@@ -59,12 +59,16 @@ impl Desktop {
 
 /// The system's preferred interface languages, most preferred first, comma-separated
 /// ("nl-NL,de-DE,en-US"): Windows' language list, macOS's AppleLanguages, `LANGUAGE` and the
-/// locale variables elsewhere. The UI shows the first one it has a catalog for.
+/// locale variables elsewhere. The UI shows the first language in the list that has a catalog.
+/// Windows keeps only its first preferred language (and English when it has no catalog): that
+/// list is also the input-language list, so a language added for a keyboard (Deutsch on a Polish
+/// system) must not decide the interface language.
 fn system_language() -> Option<String> {
     #[cfg(target_os = "windows")]
     {
         windows::System::UserProfile::GlobalizationPreferences::Languages()
-            .map(|l| l.into_iter().map(|s| s.to_string()).collect::<Vec<_>>().join(","))
+            .and_then(|l| l.GetAt(0))
+            .map(|s| s.to_string())
             .inspect_err(|e| log::info!("language: can't read the system languages: {e}"))
             .ok()
     }

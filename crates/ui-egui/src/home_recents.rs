@@ -319,7 +319,15 @@ pub struct Recents {
     pub selected: Option<String>,
     /// The pass the recent files were last drawn in: coming back to them reads the dates again.
     drawn: u64,
+    /// When the dates were last read again while in view, and whether the window had the focus:
+    /// files deleted, moved or saved elsewhere show up within [`RECHECK_SECS`], or at once when
+    /// the window gets the focus back.
+    checked: f64,
+    focused: bool,
 }
+
+/// How often the dates of the recent files in view are read again (seconds).
+const RECHECK_SECS: f64 = 2.0;
 
 enum Job {
     Stat(String),
@@ -423,10 +431,15 @@ impl Recents {
     /// files not looked at since the recent files came into view. `time`: the input time.
     fn refresh(&mut self, ctx: &egui::Context, paths: &[String], time: f64) {
         let pass = ctx.cumulative_pass_nr();
-        if pass > self.drawn.saturating_add(1) {
+        let (focused, refocused) = ctx.input(|i| (i.focused, i.events.iter().any(|e| matches!(e, egui::Event::WindowFocused(true)))));
+        let back = pass > self.drawn.saturating_add(1) || refocused || (focused && !self.focused);
+        if back || time - self.checked >= RECHECK_SECS {
             self.files.values_mut().for_each(|k| k.asked = false);
+            self.checked = time;
         }
         self.drawn = pass;
+        self.focused = focused;
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64(RECHECK_SECS));
         let loader = self.loader.get_or_insert_with(|| Loader::new(ctx));
         for reply in loader.poll() {
             match reply {

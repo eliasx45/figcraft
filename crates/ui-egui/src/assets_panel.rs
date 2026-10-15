@@ -190,15 +190,27 @@ fn same_layers(a: &Document, b: &Document, id: NodeId) -> bool {
 }
 
 pub(crate) fn thumbnail(ctx: &egui::Context, doc: &Document, id: NodeId, px: f32) -> Option<egui::TextureHandle> {
-    let b = figcraft_render::export_bounds(doc, id)?;
+    let pix = thumbnail_pixmap(doc, id, px)?;
+    let img = crate::render_worker::screen_image(&pix, doc.color_profile);
+    Some(ctx.load_texture(format!("asset-thumb-{}", id.0), img, egui::TextureOptions::LINEAR))
+}
+
+/// The pixels a thumbnail shows. A slice paints nothing itself, so it shows the page content
+/// under it, exactly as exporting one does (`figcraft_engine::cmd::file::drawn_layers`): without
+/// this a slice's preview is a blank checkerboard next to a correct export.
+pub(crate) fn thumbnail_pixmap(doc: &Document, id: NodeId, px: f32) -> Option<figcraft_render::Pixmap> {
+    let slice = doc.node(id).is_some_and(|n| matches!(n.kind, NodeKind::Slice));
+    let b = if slice { doc.world_bounds(id)? } else { figcraft_render::export_bounds(doc, id)? };
     let side = b.width().max(b.height());
     if !(side.is_finite() && side > 0.0) {
         return None;
     }
     let scale = (f64::from(px) / side).min(2.0);
-    let pix = figcraft_render::render_node(doc, id, scale)?;
-    let img = crate::render_worker::screen_image(&pix, doc.color_profile);
-    Some(ctx.load_texture(format!("asset-thumb-{}", id.0), img, egui::TextureOptions::LINEAR))
+    if slice {
+        let layers = doc.page_of(id).and_then(|p| doc.node(p)).map(|p| p.children.clone()).unwrap_or_default();
+        return figcraft_render::render_area(doc, &layers, b, scale);
+    }
+    figcraft_render::render_node(doc, id, scale)
 }
 
 fn matches(name: &str, q: &str) -> bool {

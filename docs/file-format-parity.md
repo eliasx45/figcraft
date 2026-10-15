@@ -202,7 +202,8 @@ is in `plan/link/normal-copy/verification/behavior-results.json` and `right-clic
 same directory, alongside the source/target PNGs. The earlier nested and pixel reports remain in
 `plan/link/verification/`.
 
-The version 2 native macOS pass exercised all 529 frames of a private real-world document
+The prior fork validation at `d188c5b` exercised all 529 frames of a private real-world document
+on native macOS
 through ordinary Copy → native Paste → Undo: all passed, including the nine selections that
 previously exceeded the limits. None of the targets were blank (51 previously were blank because
 image fills were omitted). The largest measured carrier was 52,243,066 bytes, with 21,853,186 bytes

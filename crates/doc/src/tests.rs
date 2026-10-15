@@ -336,6 +336,16 @@ fn next_name_increments() {
 }
 
 #[test]
+fn next_name_never_overflows() {
+    let mut d = Document::new("x");
+    let p = page(&d);
+    d.create(p, NodeKind::Frame, "Frame 18446744073709551615", 0.0, 0.0, 1.0, 1.0).unwrap();
+    assert_eq!(d.next_name("Frame"), "Frame 1", "the counter can't step past u64::MAX");
+    d.create(p, NodeKind::Frame, "Frame 1", 0.0, 0.0, 1.0, 1.0).unwrap();
+    assert_eq!(d.next_name("Frame"), "Frame 2");
+}
+
+#[test]
 fn custom_easings() {
     use crate::proto::Easing;
     // cubic-bezier(0.25, 0.1, 0.25, 1) is CSS `ease`: 0.8024 at half time.

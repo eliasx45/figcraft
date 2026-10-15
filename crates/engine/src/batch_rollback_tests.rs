@@ -61,3 +61,25 @@ fn failed_plugin_run_restores_each_document_without_restoring_unrelated_state() 
     assert_eq!(s.journal, before_journal);
     assert_eq!(s.message, before_message);
 }
+
+#[test]
+fn failed_group_keeps_the_redo_steps() {
+    let mut s = Session::new();
+    s.execute("shape.rectangle", &json!({"x": 0, "y": 0, "width": 10, "height": 10})).unwrap();
+    assert!(s.undo().unwrap());
+    assert_eq!(s.undo_depth().1, 1);
+
+    let result = s.execute(
+        "command.batch",
+        &json!({
+            "commands": [
+                {"command": "shape.rectangle", "params": {"x": 20, "y": 20, "width": 10, "height": 10}},
+                {"command": "node.set", "params": {"id": 999999, "props": {"name": "must fail"}}}
+            ]
+        }),
+    );
+
+    assert!(result.is_err());
+    assert_eq!(s.undo_depth().1, 1, "the redo step survives the failed batch");
+    assert!(s.redo().unwrap());
+}

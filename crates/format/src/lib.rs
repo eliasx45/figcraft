@@ -654,14 +654,53 @@ fn read_branches<R: Read + Seek>(z: &mut zip::ZipArchive<R>, images: &BTreeMap<S
     out
 }
 
-/// Save atomically: write a temp file next to `path`, then rename over it.
+/// Save atomically: write a staging file next to `path`, then rename over it.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn save_file(doc: &Document, path: &std::path::Path, thumbnail_png: Option<&[u8]>) -> Result<(), FormatError> {
     let bytes = save_bytes(doc, thumbnail_png)?;
-    let tmp = path.with_extension("figcraft.tmp");
-    std::fs::write(&tmp, &bytes).map_err(|e| FormatError::Io(format!("{}: {e}", tmp.display())))?;
-    std::fs::rename(&tmp, path).map_err(|e| FormatError::Io(format!("{}: {e}", path.display())))?;
-    Ok(())
+    write_file_atomic(path, &bytes).map_err(|e| FormatError::Io(format!("{}: {e}", path.display())))
+}
+
+/// Write `bytes` to `path` through a staging file and one atomic rename, so a reader of `path`
+/// sees either the previous file or the complete new one, never a partial write. The staging file
+/// is a uniquely named sibling (`<path>.tmp-figcraft-<process id>-<counter>`) created exclusively
+/// (`create_new`) and written through its own handle: a file or symlink that already exists at a
+/// staging name is never truncated or followed, and separate writers (also of separate processes)
+/// never share a staging file. On failure only the staging file this call created is removed, and
+/// `path` is replaced only on success. The rename replaces an existing destination on every
+/// platform (`std::fs::rename` uses `MoveFileEx` with `MOVEFILE_REPLACE_EXISTING` on Windows).
+/// (No `sync_all` yet: nothing around here promises durability across a power cut.)
+#[cfg(not(target_arch = "wasm32"))]
+pub fn write_file_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+    static STAGING: AtomicU64 = AtomicU64::new(0);
+    // Three tries at a fresh name: the counter is unique within this process, so only a leftover
+    // of a dead process that now shares our process id can collide, and the next counter won't.
+    for _ in 0..3 {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(format!(".tmp-figcraft-{}-{}", std::process::id(), STAGING.fetch_add(1, Relaxed)));
+        let tmp = std::path::PathBuf::from(name);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp) {
+            Ok(mut file) => {
+                if let Err(e) = file.write_all(bytes) {
+                    let _ = std::fs::remove_file(&tmp);
+                    return Err(e);
+                }
+                return match std::fs::rename(&tmp, path) {
+                    Ok(()) => Ok(()),
+                    // Leave nothing behind when the file can't take its place.
+                    Err(e) => {
+                        let _ = std::fs::remove_file(&tmp);
+                        Err(e)
+                    }
+                };
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "no free staging name next to the file"))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -676,6 +715,8 @@ mod branch_tests;
 mod image_tests;
 #[cfg(test)]
 mod large_tests;
+#[cfg(test)]
+mod staging_tests;
 #[cfg(test)]
 mod thumbnail_tests;
 #[cfg(test)]
