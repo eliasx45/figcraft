@@ -110,7 +110,10 @@ fn drag_into_a_nested_auto_layout_frame_takes_the_slot_there() {
     // A goes between x and y: just left of y's centre.
     let to = Point::new(bounds(&s, n.y).x0 + 5.0, bounds(&s, n.y).center().y);
     let from = bounds(&s, n.a).center();
-    drag_to(&mut s, from, to);
+    s.pointer(&ev(PointerKind::Down, from)).unwrap();
+    s.pointer(&ev(PointerKind::Move, to)).unwrap();
+    assert_eq!(parent(&s, n.a), n.outer, "nested frames require Command");
+    s.pointer(&PointerEvent { cmd: true, ..ev(PointerKind::Move, to) }).unwrap();
     let ov = &s.tool.overlay;
     assert_eq!(ov.drop_target, Some(n.inner), "the receiving frame is outlined");
     let line = ov.insert_line.expect("insertion line");
@@ -118,7 +121,7 @@ fn drag_into_a_nested_auto_layout_frame_takes_the_slot_there() {
     // The preview shows a in its slot already; the line marks it there, mid-gap (gap 10).
     assert_eq!(line[0], bounds(&s, n.a).x0 - 5.0);
     assert!(ov.guides.is_empty());
-    release(&mut s, to);
+    s.pointer(&PointerEvent { cmd: true, ..ev(PointerKind::Up, to) }).unwrap();
     assert_eq!(parent(&s, n.a), n.inner);
     assert_eq!(kids(&s, n.inner), vec![n.x, n.a, n.y]);
     assert_eq!(kids(&s, n.outer), vec![n.b, n.inner]);
@@ -317,4 +320,93 @@ fn fill_text_in_a_hugging_card_sets_the_height_in_one_step() {
     assert_eq!(tb.width(), 140.0);
     // Whatever the fonts, the card hugs the wrapped text exactly.
     assert!((cb.height() - (tb.height() + 20.0)).abs() < 1e-6, "card {cb:?} text {tb:?}");
+}
+
+#[test]
+fn drag_parenting_modifiers_and_size_gate() {
+    for (width, space, ignore_layout, cmd, enters) in [
+        (40.0, false, false, false, true),
+        (240.0, false, false, false, false),
+        (240.0, false, false, true, true),
+        (40.0, true, false, false, false),
+        (40.0, false, true, false, true),
+    ] {
+        let mut s = Session::new();
+        let page = s.page().unwrap();
+        let f = frame(&mut s, None, 300.0, 0.0, 200.0, 200.0);
+        s.execute("layout.add", &json!({"ids": [f], "direction": "vertical"})).unwrap();
+        set(&mut s, f, json!({"sizingH": "fixed", "sizingV": "fixed", "width": 200, "height": 200}));
+        let r = rect(&mut s, Some(page), 0.0, 0.0, width, 40.0);
+        select(&mut s, r);
+        let from = bounds(&s, r).center();
+        let to = Point::new(360.0, 60.0);
+        s.pointer(&ev(PointerKind::Down, from)).unwrap();
+        let event = PointerEvent { space, ignore_layout, cmd, ..ev(PointerKind::Move, to) };
+        s.pointer(&event).unwrap();
+        assert_eq!(parent(&s, r), if enters { f } else { page }, "{event:?}");
+        assert_eq!(s.doc().unwrap().node(r).unwrap().child_layout.absolute, ignore_layout);
+        if ignore_layout {
+            assert_eq!(bounds(&s, r).center(), to);
+        }
+        s.pointer(&PointerEvent { kind: PointerKind::Up, ..event }).unwrap();
+        assert_eq!(parent(&s, r), if enters { f } else { page });
+        s.undo().unwrap();
+        assert_eq!(parent(&s, r), page);
+        assert_eq!(bounds(&s, r).center(), from);
+    }
+}
+
+#[test]
+fn two_layers_cross_clipped_frames_live_and_cancel_or_undo_together() {
+    for auto in [false, true] {
+        let mut s = Session::new();
+        let page = s.page().unwrap();
+        let a = frame(&mut s, None, 0.0, 0.0, 200.0, 200.0);
+        let b = frame(&mut s, None, 300.0, 0.0, 200.0, 200.0);
+        set(&mut s, a, json!({"clip": true}));
+        let r = rect(&mut s, Some(a), 20.0, 20.0, 40.0, 40.0);
+        let t = rect(&mut s, Some(a), 20.0, 80.0, 40.0, 40.0);
+        if auto {
+            s.execute("layout.add", &json!({"ids": [a], "direction": "vertical"})).unwrap();
+            set(&mut s, a, json!({"sizingH": "fixed", "sizingV": "fixed", "width": 200, "height": 200}));
+        }
+        let from = bounds(&s, r).center();
+        let offset = bounds(&s, t).center() - from;
+        s.execute("select.set", &json!({"ids": [r, t]})).unwrap();
+        s.ds_mut().unwrap().view.snap_objects = false;
+        let original = s.doc().unwrap().clone();
+        let depth = s.ds().unwrap().history.undo.len();
+        for cancel in [true, false] {
+            s.pointer(&ev(PointerKind::Down, from)).unwrap();
+            for (x, want) in [(250.0, page), (350.0, b), (250.0, page), (350.0, b)] {
+                s.pointer(&ev(PointerKind::Move, Point::new(x, 40.0))).unwrap();
+                assert_eq!((parent(&s, r), parent(&s, t)), (want, want));
+                assert_eq!(bounds(&s, r).center(), Point::new(x, 40.0));
+                assert_eq!(bounds(&s, t).center(), Point::new(x, 40.0) + offset);
+            }
+            if cancel {
+                s.escape().unwrap();
+            } else {
+                release(&mut s, Point::new(350.0, 40.0));
+                assert_eq!(s.ds().unwrap().history.undo.len(), depth + 1);
+                s.undo().unwrap();
+            }
+            assert_eq!(s.doc().unwrap(), &original);
+            assert_eq!(s.ds().unwrap().history.undo.len(), depth);
+        }
+    }
+}
+
+#[test]
+fn home_edge_tolerance_is_measured_in_screen_pixels() {
+    let mut s = Session::new();
+    let n = nest(&mut s);
+    let doc = s.doc().unwrap();
+    let b = bounds(&s, n.outer);
+    for zoom in [0.05, 1.0, 4.0] {
+        for (pixels, want) in [(7.0, n.outer), (9.0, s.page().unwrap())] {
+            let p = Point::new(b.x1 + pixels / zoom, b.center().y);
+            assert_eq!(crate::drop::drag_parent(doc, s.page().unwrap(), p, &[n.a], zoom, false), want);
+        }
+    }
 }

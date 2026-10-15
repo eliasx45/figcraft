@@ -168,6 +168,10 @@ pub struct PointerEvent {
     /// Cmd on macOS, Ctrl elsewhere.
     pub cmd: bool,
     pub ctrl: bool,
+    /// Preserve the source parent during a move (Space).
+    pub space: bool,
+    /// Place freely inside an auto layout frame (Control on macOS, S elsewhere).
+    pub ignore_layout: bool,
     /// Screen pixels per page unit.
     pub zoom: f64,
     /// Pen pressure, 0..1, where the device reports it (`None`: a mouse, or a platform that doesn't).
@@ -181,7 +185,21 @@ fn within_slop(ev: &PointerEvent, start: Point) -> bool {
 
 impl PointerEvent {
     pub fn at(kind: PointerKind, x: f64, y: f64, zoom: f64) -> Self {
-        Self { kind, x, y, sx: x * zoom, sy: y * zoom, shift: false, alt: false, cmd: false, ctrl: false, zoom, pressure: None }
+        Self {
+            kind,
+            x,
+            y,
+            sx: x * zoom,
+            sy: y * zoom,
+            shift: false,
+            alt: false,
+            cmd: false,
+            ctrl: false,
+            space: false,
+            ignore_layout: false,
+            zoom,
+            pressure: None,
+        }
     }
     pub(crate) fn p(&self) -> Point {
         Point::new(self.x, self.y)
@@ -1289,14 +1307,15 @@ impl Session {
                     }
                     let p = ev.p();
                     let home = moving.first().and_then(|i| doc.node(*i)).and_then(|n| n.parent);
-                    // Absolute children of an auto layout frame stay in it, and so do the layers of
-                    // groups, boolean groups and instances ([`crate::drop::keeps_layers`]); the
-                    // rest may change parent.
-                    let flow = moving.iter().all(|i| doc.node(*i).is_some_and(|n| !n.child_layout.absolute))
-                        && !home.is_some_and(|h| crate::drop::keeps_layers(doc, h));
-                    let target = if flow { crate::drop::drag_parent(doc, page, p, &moving) } else { home.unwrap_or(page) };
+                    let can_reparent =
+                        !ev.space && !moving.iter().any(|m| doc.node(*m).and_then(|n| n.parent).is_some_and(|h| crate::drop::keeps_layers(doc, h)));
+                    let target = if can_reparent { crate::drop::drag_parent(doc, page, p, &moving, ev.zoom, ev.cmd) } else { home.unwrap_or(page) };
                     let mode = doc.node(target).and_then(|n| n.layout.as_ref()).map(|l| l.mode);
-                    if let (true, Some(mode)) = (flow, mode) {
+                    let absolute =
+                        ev.ignore_layout || (Some(target) == home && moving.iter().any(|m| doc.node(*m).is_some_and(|n| n.child_layout.absolute)));
+                    if let Some(mode) =
+                        mode.filter(|_| !absolute && (can_reparent || moving.iter().all(|m| doc.node(*m).is_some_and(|n| n.parent == Some(target)))))
+                    {
                         // Into (or within) an auto layout frame: the layers take the slot (a grid: the
                         // cell) under the pointer, as the frame shows it now. A frame other than the
                         // one they come from is outlined too.
@@ -1307,6 +1326,7 @@ impl Session {
                             if doc.get(*m)?.parent != Some(target) {
                                 doc.reparent(*m, target, None)?;
                             }
+                            doc.get_mut(*m)?.child_layout.absolute = false;
                         }
                         if let (Some(first), Some((col, row, rect))) = (moving.first().copied(), cell) {
                             let cl = &mut doc.get_mut(first)?.child_layout;
@@ -1326,16 +1346,18 @@ impl Session {
                         in_flow = true;
                         return Ok(());
                     }
-                    // A free move. Layers dragged out of an auto layout flow leave it (onto the page
-                    // while dragging; the drop puts them in the frame under the pointer).
+                    // Preview the real parent now, so crossing a clipping frame never hides
+                    // the dragged layers until release. Reparent preserves world transforms.
                     for m in &moving {
-                        let in_al = doc.node(*m).and_then(|n| n.parent).and_then(|p| doc.node(p)).is_some_and(|p| p.layout.is_some());
-                        if flow && in_al {
-                            doc.reparent(*m, page, None)?;
+                        if can_reparent && doc.get(*m)?.parent != Some(target) {
+                            doc.reparent(*m, target, None)?;
+                        }
+                        if mode.is_some() && ev.ignore_layout {
+                            doc.get_mut(*m)?.child_layout.absolute = true;
                         }
                         move_world(doc, *m, d.x, d.y)?;
                     }
-                    drop_target = (flow && target != page).then_some(target);
+                    drop_target = (can_reparent && target != page && Some(target) != home).then_some(target);
                     Ok(())
                 })?;
                 let placed = if dup { self.selection() } else { ids };
@@ -1711,6 +1733,10 @@ impl Session {
     }
 
     fn up(&mut self, ev: &PointerEvent) -> Result<()> {
+        // Release can carry a new position or modifier without an intervening move event.
+        if matches!(self.tool.gesture, Gesture::Move { moved: true, .. }) {
+            self.drag(ev)?;
+        }
         let g = std::mem::take(&mut self.tool.gesture);
         self.tool.overlay.marquee = None;
         self.tool.overlay.guides.clear();
@@ -1720,36 +1746,19 @@ impl Session {
         self.tool.overlay.measure_box = None;
         self.tool.overlay.insert_line = None;
         self.tool.overlay.drop_cell = None;
-        let drop_target = self.tool.overlay.drop_target.take();
+        self.tool.overlay.drop_target = None;
         match g {
             Gesture::Move { ids, moved, duplicate, start, .. } => {
                 if moved {
-                    // A free move lands in the frame under the pointer (or the page) where it was
-                    // dropped; layers in an auto layout frame already sit in their slot.
-                    let page = self.page()?;
+                    // Both free and auto-layout previews already have their final parent.
                     let sel = self.selection();
                     let sources = if duplicate { ids.clone() } else { Vec::new() };
                     let moving = if duplicate { sel } else { ids };
-                    let doc = self.doc()?.clone();
-                    let in_al =
-                        moving.iter().any(|m| doc.node(*m).and_then(|n| n.parent).and_then(|p| doc.node(p)).is_some_and(|p| p.layout.is_some()));
-                    let target = drop_target.unwrap_or(page);
-                    let current = moving.first().and_then(|m| doc.node(*m)).and_then(|n| n.parent);
-                    if !in_al && current != Some(target) {
-                        let ds = self.ds_mut()?;
-                        let before = ds.doc.clone();
-                        let d = ds.doc_mut();
-                        for m in &moving {
-                            // Group, boolean group and instance layers stay put: they only move.
-                            let from = d.node(*m).and_then(|n| n.parent);
-                            if from.is_some_and(|f| crate::drop::keeps_layers(d, f)) || crate::components::structure_locked(d, target) {
-                                continue;
-                            }
-                            // A layer can't go into itself; it stays where it is.
-                            let _ = d.reparent(*m, target, None);
-                        }
-                        crate::normalize(ds.doc_mut(), &before);
-                    }
+                    let doc = self.doc()?;
+                    let in_al = moving.iter().any(|m| {
+                        doc.node(*m)
+                            .is_some_and(|n| !n.child_layout.absolute && n.parent.and_then(|p| doc.node(p)).is_some_and(|p| p.layout.is_some()))
+                    });
                     // Reordering or dragging layers out of an instance (outside its slots), or
                     // moving layers inside one, are edits only its main can make: the gesture is
                     // undone.

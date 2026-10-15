@@ -83,6 +83,8 @@ impl Headless {
             alt: b(p, "alt"),
             cmd: b(p, "cmd"),
             ctrl: b(p, "ctrl"),
+            space: b(p, "space"),
+            ignore_layout: b(p, "ignoreLayout") || (cfg!(target_os = "macos") && b(p, "ctrl")),
             zoom,
             pressure: pressure(p, "pressure"),
         };

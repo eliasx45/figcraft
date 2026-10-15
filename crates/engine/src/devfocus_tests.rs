@@ -16,7 +16,7 @@ fn focused(s: &Session) -> Option<NodeId> {
 
 fn click(s: &mut Session, x: f64, y: f64) {
     for kind in [PointerKind::Down, PointerKind::Up] {
-        let ev = PointerEvent { kind, x, y, sx: 0.0, sy: 0.0, shift: false, alt: false, cmd: false, ctrl: false, zoom: 1.0, pressure: None };
+        let ev = PointerEvent::at(kind, x, y, 1.0);
         s.pointer(&ev).unwrap();
     }
 }

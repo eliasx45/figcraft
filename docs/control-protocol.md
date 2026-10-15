@@ -136,7 +136,7 @@ confirmed or renamed (`confirmRemove`, `rename`; Escape closes them); the list i
 them: `[{name, live}]`, `live` being `"shared"` (in a live session others get into), `"private"`
 (a file of yours on a server, open only to you) or null.
 
-### `ui.pointer {kind, x, y | sx, sy, to?, steps?, shift?, alt?, cmd?, ctrl?, pressure?, pressureTo?}`
+### `ui.pointer {kind, x, y | sx, sy, to?, steps?, shift?, alt?, cmd?, ctrl?, space?, ignoreLayout?, pressure?, pressureTo?}`
 
 A mouse gesture with the current tool. `kind`: `down`, `move`, `up`, `click`, `double`, `hover`,
 `drag` (needs `to: [x, y]`; `steps` intermediate moves, default 8). Position in page coordinates
@@ -149,6 +149,10 @@ frame's top edge) selects and drags that frame.
 {"id":4,"method":"engine.execute","params":{"command":"tool.set","params":{"tool":"ellipse"}}}
 {"id":5,"method":"ui.pointer","params":{"kind":"drag","x":200,"y":200,"to":[300,260],"shift":true}}
 ```
+
+A move with `space: true` keeps its source parent. `ignoreLayout: true` places it freely inside
+auto layout (native Control-drag on macOS, S-drag elsewhere). `cmd: true` permits oversized
+objects and explicit nesting. Parenting is previewed during the drag and committed on release.
 
 ### `ui.key {key, shift?, alt?, cmd?, ctrl?}`
 

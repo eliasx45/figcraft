@@ -154,6 +154,14 @@ pub fn run_binding(app: &mut FigApp, id: &str) {
 }
 
 fn key_event(app: &mut FigApp, key: Key, physical: Option<Key>, m: Modifiers, repeat: bool, now: f64, ctx: &Context) -> bool {
+    if key == Key::S
+        && platform() == Platform::Other
+        && m.is_none()
+        && app.session.tool.busy()
+        && matches!(app.session.tool.tool, figcraft_engine::ToolId::Move | figcraft_engine::ToolId::Scale)
+    {
+        return true;
+    }
     if key_box(app, key, m) {
         return true;
     }

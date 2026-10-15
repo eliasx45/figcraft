@@ -145,8 +145,13 @@ pub fn grid_cell_at(doc: &Document, parent: NodeId, p: Point) -> Option<(u32, u3
 /// Inside an instance only its slots (and what's in them) take drops; a slot always does. Sections
 /// being dragged only go into sections.
 pub fn drop_parent(doc: &Document, page: NodeId, p: Point, exclude: &[NodeId]) -> Option<NodeId> {
+    drop_parent_inner(doc, page, p, exclude, false)
+}
+
+fn drop_parent_inner(doc: &Document, page: NodeId, p: Point, exclude: &[NodeId], force: bool) -> Option<NodeId> {
     /// `locked`: inside an instance, outside its slots.
-    fn rec(doc: &Document, id: NodeId, p: Point, exclude: &[NodeId], in_al: bool, locked: bool, depth: usize) -> Option<NodeId> {
+    fn rec(doc: &Document, id: NodeId, p: Point, exclude: &[NodeId], state: (bool, bool, usize), force: bool) -> Option<NodeId> {
+        let (in_al, locked, depth) = state;
         if depth > 128 || exclude.contains(&id) {
             return None;
         }
@@ -158,17 +163,17 @@ pub fn drop_parent(doc: &Document, page: NodeId, p: Point, exclude: &[NodeId]) -
         let kids_locked = crate::components::locks_children(doc, id, locked);
         if !container {
             // Groups: frames inside them can still take the drop.
-            return n.children.iter().rev().find_map(|c| rec(doc, *c, p, exclude, in_al, kids_locked, depth + 1));
+            return n.children.iter().rev().find_map(|c| rec(doc, *c, p, exclude, (in_al, kids_locked, depth + 1), force));
         }
         let inside = doc.world_bounds(id).is_some_and(|b| b.contains(p)) && n.local_rect().contains(doc.world_transform(id).inverse() * p);
         if !inside {
             return None;
         }
         let auto_layout = n.layout.is_some();
-        let deeper = n.children.iter().rev().find_map(|c| rec(doc, *c, p, exclude, in_al || auto_layout, kids_locked, depth + 1));
-        deeper.or((!kids_locked && (auto_layout || !in_al || crate::components::is_slot(doc, id))).then_some(id))
+        let deeper = n.children.iter().rev().find_map(|c| rec(doc, *c, p, exclude, (in_al || auto_layout, kids_locked, depth + 1), force));
+        deeper.or((!kids_locked && (force || auto_layout || !in_al || crate::components::is_slot(doc, id))).then_some(id))
     }
-    let hit = doc.node(page)?.children.iter().rev().find_map(|c| rec(doc, *c, p, exclude, false, false, 0));
+    let hit = doc.node(page)?.children.iter().rev().find_map(|c| rec(doc, *c, p, exclude, (false, false, 0), force));
     // Sections go on the page or in sections: a frame under the pointer gives way to the section
     // it is in.
     if exclude.iter().any(|m| doc.node(*m).is_some_and(|n| matches!(n.kind, NodeKind::Section { .. }))) {
@@ -184,22 +189,47 @@ pub fn keeps_layers(doc: &Document, parent: NodeId) -> bool {
         || crate::components::structure_locked(doc, parent)
 }
 
-/// Margin (page units) around the auto layout frame a dragged layer comes from that still keeps it.
-const HOME_MARGIN: f64 = 8.0;
+/// Margin (screen pixels) around the auto layout frame a dragged layer comes from that still keeps it.
+const HOME_MARGIN_PX: f64 = 8.0;
 
 /// Where layers being dragged (`moving`) land: [`drop_parent`], except that the frame they come
 /// from keeps them while the pointer is over it (an auto layout frame: within a few units of it)
 /// and over nothing deeper. So a layer in a plain card of an auto layout list moves within the
 /// card, and one reordered in a list doesn't fall out of it at the edge.
-pub fn drag_parent(doc: &Document, page: NodeId, p: Point, moving: &[NodeId]) -> NodeId {
-    let hit = drop_parent(doc, page, p, moving);
+pub fn drag_parent(doc: &Document, page: NodeId, p: Point, moving: &[NodeId], zoom: f64, force: bool) -> NodeId {
+    let hit = drop_parent_inner(doc, page, p, moving, force);
     let home = moving.first().and_then(|m| doc.node(*m)).and_then(|n| n.parent).filter(|h| *h != page);
+    // A nested auto-layout card is normally an item to reorder beside, not a
+    // destination. Command explicitly enters it and also permits oversized layers.
+    let hit = hit.and_then(|h| {
+        std::iter::once(h).chain(doc.ancestors(h)).find(|id| {
+            let Some(n) = doc.node(*id) else { return false };
+            if *id == page || !(n.kind.is_frame_like() || matches!(n.kind, NodeKind::Section { .. })) || crate::components::structure_locked(doc, *id)
+            {
+                return false;
+            }
+            let own = home.is_some_and(|h| h == *id || doc.is_ancestor(*id, h));
+            if force || own || crate::components::is_slot(doc, *id) {
+                return true;
+            }
+            let nested = doc.ancestors(*id).iter().any(|a| doc.node(*a).is_some_and(|n| n.layout.is_some()));
+            if nested {
+                return false;
+            }
+            moving.iter().all(|m| {
+                doc.node(*m).is_some_and(|child| {
+                    let b = figcraft_geom::transform_rect_bbox(doc.world_transform(*id).inverse() * doc.world_transform(*m), child.local_rect());
+                    b.width() <= n.width && b.height() <= n.height
+                })
+            })
+        })
+    });
     if let Some(home) = home
         && let Some(hn) = doc.node(home)
         && ((hn.kind.is_frame_like() && !matches!(hn.kind, NodeKind::Instance { .. })) || matches!(hn.kind, NodeKind::Section { .. }))
         && hit.is_none_or(|h| h != home && doc.is_ancestor(h, home))
     {
-        let margin = if hn.layout.is_some() { HOME_MARGIN } else { 0.0 };
+        let margin = if hn.layout.is_some() { HOME_MARGIN_PX / zoom.max(1e-6) } else { 0.0 };
         if doc.world_bounds(home).is_some_and(|b| b.inflate(margin, margin).contains(p)) {
             return home;
         }

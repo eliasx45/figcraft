@@ -272,6 +272,8 @@ pub fn tool_definitions() -> Vec<Value> {
                     "alt": boolean("Alt/Option held"),
                     "cmd": boolean("Cmd (macOS) / Ctrl held"),
                     "pressure": num("Pen pressure 0-1 (the Pencil records it as the stroke's width profile; a drag starts with it)"),
+                    "space": boolean("Keep the source parent while moving"),
+                    "ignoreLayout": boolean("Place freely inside auto layout"),
                     "pressureTo": num("Pen pressure 0-1 at a drag's end (interpolated along it)"),
                 }),
                 &["x", "y"],
@@ -696,7 +698,7 @@ fn save_file(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<ToolResult, 
 }
 
 fn mods(a: &Map<String, Value>, out: &mut Map<String, Value>) -> Result<(), String> {
-    for k in ["shift", "alt", "cmd", "ctrl"] {
+    for k in ["shift", "alt", "cmd", "ctrl", "space", "ignoreLayout"] {
         match a.get(k) {
             None | Some(Value::Null) => {}
             Some(Value::Bool(x)) => {

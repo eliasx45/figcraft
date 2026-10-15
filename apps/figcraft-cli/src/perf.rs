@@ -188,6 +188,8 @@ fn measure(table: &mut Table, col: usize, layers: usize) -> CliResult<()> {
                 alt: false,
                 cmd: false,
                 ctrl: false,
+                space: false,
+                ignore_layout: false,
                 zoom,
                 pressure: None,
             };

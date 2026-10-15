@@ -199,3 +199,35 @@ fn a_layers_row_that_takes_no_drop_shows_not_allowed() {
     u.frame(vec![Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }]);
     u.button(o, false);
 }
+
+#[test]
+fn space_during_a_canvas_drag_keeps_parent_and_release_outside_finishes() {
+    for gone in [false, true] {
+        let mut s = Session::new();
+        let f = id(s.execute("frame.create", &json!({"x": 0, "y": 0, "width": 300, "height": 200})).unwrap());
+        let r = id(s.execute("shape.rectangle", &json!({"parent": f, "x": 30, "y": 30, "width": 40, "height": 40})).unwrap());
+        s.execute("select.set", &json!({"ids": [r]})).unwrap();
+        let mut u = Ui::new(s);
+        let from = u.app.to_screen(50.0, 50.0);
+        u.button(from, true);
+        let view = u.app.session.ds().unwrap().view.clone();
+        u.frame(vec![Event::Key { key: Key::Space, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }]);
+        let outside = pos2(u.app.canvas.rect.right() + 30.0, from.y);
+        u.frame(vec![Event::PointerMoved(outside)]);
+        assert_eq!(u.app.session.doc().unwrap().node(r).unwrap().parent, Some(f));
+        assert_eq!(u.app.session.ds().unwrap().view.cx, view.cx, "Space during drag must not pan");
+        assert_eq!(u.app.session.ds().unwrap().view.cy, view.cy);
+        if gone {
+            u.frame(vec![
+                Event::PointerButton { pos: outside, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE },
+                Event::PointerGone,
+            ]);
+        } else {
+            u.button(outside, false);
+        }
+        assert!(!u.app.session.tool.busy(), "release must reach the canvas gesture");
+        assert!(u.app.session.ds().unwrap().interaction.is_none());
+        u.app.session.undo().unwrap();
+        assert_eq!(u.app.session.doc().unwrap().world_bounds(r).unwrap().x0, 30.0);
+    }
+}

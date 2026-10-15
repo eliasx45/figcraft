@@ -129,7 +129,7 @@ impl FigApp {
     }
 }
 
-fn pointer_event(app: &FigApp, kind: PointerKind, pos: Pos2, m: &egui::Modifiers) -> PointerEvent {
+fn pointer_event(app: &FigApp, kind: PointerKind, pos: Pos2, m: &egui::Modifiers, ctx: &egui::Context) -> PointerEvent {
     let p = app.to_page(pos);
     let zoom = app.session.ds().map(|d| d.view.zoom).unwrap_or(1.0);
     PointerEvent {
@@ -142,6 +142,12 @@ fn pointer_event(app: &FigApp, kind: PointerKind, pos: Pos2, m: &egui::Modifiers
         alt: m.alt,
         cmd: m.command,
         ctrl: m.ctrl,
+        space: ctx.input(|i| i.key_down(egui::Key::Space)),
+        ignore_layout: if crate::shortcuts::platform() == figcraft_engine::keymap::Platform::Mac {
+            m.ctrl
+        } else {
+            ctx.input(|i| i.key_down(egui::Key::S))
+        },
         zoom,
         pressure: app.canvas.pressure,
     }
@@ -355,7 +361,7 @@ fn input(app: &mut FigApp, ui: &mut Ui, resp: &egui::Response) -> bool {
         ctx.input(|i| (i.modifiers, i.smooth_scroll_delta, i.zoom_delta(), i.pointer.hover_pos(), i.key_down(egui::Key::Space)));
     let editing_text = app.session.ds().map(|d| d.text_edit.is_some()).unwrap_or(false);
     let typing_elsewhere = crate::a11y::field_focused(&ctx);
-    app.canvas.space_pan = space && !editing_text && !typing_elsewhere;
+    app.canvas.space_pan = space && !editing_text && !typing_elsewhere && !app.canvas.dragging;
     // Dropped files import onto the canvas.
     let dropped = ctx.input(|i| i.raw.dropped_files.clone());
     for f in dropped {
@@ -370,7 +376,10 @@ fn input(app: &mut FigApp, ui: &mut Ui, resp: &egui::Response) -> bool {
             app.run("file.import", json!({"data": b64, "name": name, "x": pt.x, "y": pt.y}));
         }
     }
-    let Some(pos) = hover_pos.filter(|p| app.canvas.rect.contains(*p)) else {
+    // A canvas press owns its release, even over a panel or after PointerGone.
+    let captured = app.canvas.dragging || app.canvas.middle_pan.is_some();
+    let pos = hover_pos.or_else(|| captured.then(|| app.canvas.last_pointer.map(|p| app.to_screen(p.x, p.y))).flatten());
+    let Some(pos) = pos.filter(|p| captured || app.canvas.rect.contains(*p)) else {
         // Leaving the canvas: nothing is hovered there any more.
         if !app.canvas.dragging && std::mem::take(&mut app.canvas.hovering) {
             app.session.vector_pointer_left();
@@ -441,7 +450,7 @@ fn input(app: &mut FigApp, ui: &mut Ui, resp: &egui::Response) -> bool {
         && app.session.ds().is_ok_and(|d| d.vector_edit.is_none())
         && matches!(app.session.tool.tool, ToolId::Move | ToolId::Scale);
     if resp.double_clicked() || keep_drilling {
-        let ev = pointer_event(app, PointerKind::DoubleClick, pos, &mods);
+        let ev = pointer_event(app, PointerKind::DoubleClick, pos, &mods, &ctx);
         if let Err(e) = app.session.pointer(&ev) {
             app.toast(e.to_string());
         }
@@ -462,7 +471,7 @@ fn input(app: &mut FigApp, ui: &mut Ui, resp: &egui::Response) -> bool {
             }
         });
         Some(PointerKind::Down)
-    } else if app.canvas.dragging && primary_released {
+    } else if app.canvas.dragging && (primary_released || !primary_down) {
         app.canvas.dragging = false;
         Some(PointerKind::Up)
     } else if app.canvas.dragging && primary_down {
@@ -489,7 +498,7 @@ fn input(app: &mut FigApp, ui: &mut Ui, resp: &egui::Response) -> bool {
         app.canvas.pressure = force;
     }
     if let Some(k) = kind {
-        let ev = pointer_event(app, k, pos, &mods);
+        let ev = pointer_event(app, k, pos, &mods, &ctx);
         if k == PointerKind::Up {
             app.canvas.pressure = None;
         }
