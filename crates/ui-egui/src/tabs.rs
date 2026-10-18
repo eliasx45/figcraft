@@ -209,30 +209,72 @@ pub fn tab_bar(app: &mut FigApp, ui: &mut Ui) {
                 app.toast(e);
             }
         }
-        if let Some(i) = close {
+        if let Some(d) = close.and_then(|i| app.session.docs.get(i)) {
             // A branch tab's edits live on in its main file: closing it loses nothing.
-            let dirty = app.session.docs.get(i).is_some_and(|d| d.is_dirty() && d.branch_of.is_none());
-            if dirty {
+            let (uid, dirty) = (d.uid, d.is_dirty() && d.branch_of.is_none());
+            if dirty && !ui.input(|inp| inp.modifiers.alt) {
                 app.ui.find = None;
-                app.toast(trf(
-                    "Unsaved changes: save first, or close again with {key} to discard",
-                    &[("key", &crate::toolbar::pretty_shortcut("Alt"))],
-                ));
-                if ui.input(|inp| inp.modifiers.alt) {
-                    app.run("file.close", json!({"index": i, "force": true}));
-                }
+                app.ui.confirm_close_tab = Some(uid);
             } else {
-                app.run("file.close", json!({"index": i}));
-            }
-            if app.ui.present_uid.is_some_and(|uid| !app.session.docs.iter().any(|d| d.uid == uid)) {
-                app.ui.present = None;
-                app.ui.paused_present = None;
-                app.ui.present_uid = None;
+                close_tab(app, uid, dirty);
             }
         }
         let _ = Color32::TRANSPARENT;
         let _ = Align2::LEFT_TOP;
     });
+}
+
+/// Close the open file `uid` (`force`: discarding unsaved changes), and its presentation with it.
+fn close_tab(app: &mut FigApp, uid: u64, force: bool) {
+    if let Some(i) = app.session.docs.iter().position(|d| d.uid == uid) {
+        app.run("file.close", json!({"index": i, "force": force}));
+    }
+    if app.ui.present_uid.is_some_and(|uid| !app.session.docs.iter().any(|d| d.uid == uid)) {
+        app.ui.present = None;
+        app.ui.paused_present = None;
+        app.ui.present_uid = None;
+    }
+}
+
+/// The unsaved-changes question when a file closes (its tab's close button, File ▸ Close): save
+/// it first (a file never saved asks where), close it without saving, or keep it open.
+pub(crate) fn confirm_close_tab(app: &mut FigApp, ctx: &egui::Context) {
+    let Some(uid) = app.ui.confirm_close_tab else { return };
+    let Some(name) = app.session.docs.iter().find(|d| d.uid == uid).map(|d| d.doc.name.clone()) else {
+        app.ui.confirm_close_tab = None;
+        return;
+    };
+    let t = Tokens::get(ctx);
+    let (mut open, mut save, mut discard, mut cancel) = (true, false, false, false);
+    crate::dialogs::window(tr("Unsaved changes"), ctx).order(egui::Order::Foreground).open(&mut open).show(ctx, |ui| {
+        ui.set_width(340.0);
+        crate::widgets::label(ui, &trf("Save the changes to {name} before closing it?", &[("name", &name)]), t.text);
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            save = crate::widgets::button(ui, tr("Save"), true, true).clicked();
+            discard = crate::widgets::button(ui, tr("Don't save"), false, true).clicked();
+            cancel = crate::widgets::button(ui, tr("Cancel"), false, true).clicked();
+        });
+    });
+    app.ui.confirm_close_tab = (open && !save && !discard && !cancel).then_some(uid);
+    if save || discard {
+        finish_close_tab(app, uid, save);
+    }
+}
+
+/// The answer to [`confirm_close_tab`]: `save` saves file `uid` and closes it once saved (a save
+/// dialog that's cancelled keeps it open), else it closes discarding the changes.
+pub(crate) fn finish_close_tab(app: &mut FigApp, uid: u64, save: bool) {
+    if !save {
+        close_tab(app, uid, true);
+        return;
+    }
+    // Saving works on the file in front (and a save dialog is for it).
+    if let Some(i) = app.session.docs.iter().position(|d| d.uid == uid) {
+        app.run("doc.switch", json!({"index": i}));
+        app.ui.home = false;
+    }
+    app.save_then(move |app| close_tab(app, uid, false));
 }
 
 fn resume_presentation(app: &mut FigApp) {

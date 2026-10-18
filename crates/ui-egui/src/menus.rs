@@ -266,11 +266,7 @@ pub fn invoke(app: &mut FigApp, id: &str) {
         }
         "edit.paste" | "edit.pasteFigma" => paste(app, None, None),
         "file.close" if app.session.ds().is_ok_and(|d| d.is_dirty() && d.branch_of.is_none()) => {
-            let save = pretty_shortcut(crate::shortcuts::shortcut("file.save").unwrap_or(""));
-            app.toast(trf(
-                "Unsaved changes: save first ({save}), or close the tab with {alt}-click to discard",
-                &[("save", &save), ("alt", &pretty_shortcut("Alt"))],
-            ));
+            app.ui.confirm_close_tab = app.session.ds().ok().map(|d| d.uid);
         }
         _ => {
             app.run(id, json!({}));

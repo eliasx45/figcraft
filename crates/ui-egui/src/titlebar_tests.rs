@@ -165,3 +165,41 @@ fn a_system_title_bar_leaves_the_window_alone() {
     assert!(u.drag(EMPTY, vec2(40.0, 10.0)).is_empty());
     assert!(u.drag(pos2(SIZE.x - 2.0, SIZE.y - 2.0), vec2(-30.0, -30.0)).iter().all(|c| !matches!(c, ViewportCommand::BeginResize(_))));
 }
+
+/// The middle of the first tab's close button with the macOS inset title bar ("Untitled" is
+/// 121.6 wide, after the traffic lights and Home).
+const FIRST_TAB_CLOSE: Pos2 = pos2(76.0 + 44.0 + 121.6 - 16.0, crate::tabs::HEIGHT / 2.0);
+
+#[test]
+fn a_tabs_close_button_closes_it_and_asks_first_when_it_has_unsaved_changes() {
+    let mut u = Ui::new(TitleBar::Inset);
+    u.app.session.execute("file.new", &json!({})).unwrap();
+    u.app.session.active = 0;
+    u.app.ui.home = false;
+    u.frame(vec![]);
+    let first = u.app.session.docs[0].uid;
+    u.click(FIRST_TAB_CLOSE);
+    assert!(u.app.session.docs.iter().all(|d| d.uid != first), "a saved tab closes at once");
+    assert_eq!(u.app.ui.confirm_close_tab, None);
+
+    // Unsaved changes: the question shows and the tab stays until it's answered.
+    u.app.session.execute("file.new", &json!({})).unwrap();
+    u.app.session.active = 0;
+    u.app.session.execute("node.create", &json!({"type": "frame", "width": 10, "height": 10})).unwrap();
+    u.frame(vec![]);
+    let dirty = u.app.session.docs[0].uid;
+    u.click(FIRST_TAB_CLOSE);
+    assert_eq!(u.app.ui.confirm_close_tab, Some(dirty));
+    assert!(u.app.session.docs.iter().any(|d| d.uid == dirty));
+    u.frame(vec![]);
+    assert!(u.ctx.memory(|m| m.area_rect(egui::Id::new(Some(crate::i18n::tr("Unsaved changes")))).is_some()), "the question is on screen");
+    // Escape keeps the tab open.
+    u.frame(vec![Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }]);
+    assert_eq!(u.app.ui.confirm_close_tab, None);
+    assert!(u.app.session.docs.iter().any(|d| d.uid == dirty));
+
+    // A close from anywhere else (Cmd+W, an agent) asks the same question.
+    let _ = u.app.session.execute("file.close", &json!({"index": 0}));
+    u.app.handle_ui_requests();
+    assert_eq!(u.app.ui.confirm_close_tab, Some(dirty));
+}

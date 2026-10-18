@@ -153,6 +153,7 @@ pub fn keys(app: &mut FigApp, ctx: &Context) {
         || u.import_report.is_some()
         || u.missing_fonts.is_some()
         || u.confirm_close
+        || u.confirm_close_tab.is_some()
         || u.export_preview
         || u.shortcuts_panel
         || u.preferences
@@ -166,6 +167,7 @@ pub fn keys(app: &mut FigApp, ctx: &Context) {
         || u.batch_rename.take().is_some()
         || u.import_report.take().is_some()
         || u.missing_fonts.take().is_some()
+        || u.confirm_close_tab.take().is_some()
     {
         return;
     }
@@ -369,6 +371,7 @@ pub fn show(app: &mut FigApp, ctx: &Context) {
     crate::live::publish_dialog(app, ctx);
     crate::online::dialogs(app, ctx);
     crate::windows::confirm_close(app, ctx);
+    crate::tabs::confirm_close_tab(app, ctx);
 }
 
 /// Menus and Actions cannot pass a value themselves. Gather it here, then run the regular

@@ -90,3 +90,34 @@ fn a_dialog_whose_file_closed_meanwhile_does_nothing() {
     assert!(app.pending_dialog.is_none());
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn closing_an_unsaved_tab_asks_and_save_closes_it_once_saved() {
+    let (mut app, dir, path) = two_files("close");
+    app.session.execute("node.create", &serde_json::json!({"type": "frame", "width": 10, "height": 10})).unwrap();
+    let uid = app.session.docs[0].uid;
+    // File ▸ Close (and the tab's close button) asks instead of doing nothing.
+    crate::menus::invoke(&mut app, "file.close");
+    assert_eq!(app.ui.confirm_close_tab, Some(uid));
+    assert_eq!(app.session.docs.len(), 2, "nothing closes before the answer");
+    // Save: the never-saved file asks where, saves there, then closes.
+    app.ui.confirm_close_tab = None;
+    crate::tabs::finish_close_tab(&mut app, uid, true);
+    assert_eq!(app.session.docs.len(), 2, "still open while the save dialog is up");
+    app.poll_dialog(&egui::Context::default());
+    assert!(path.exists(), "saved where the user picked");
+    assert!(app.session.docs.iter().all(|d| d.uid != uid), "closed once saved");
+    assert_eq!(app.session.docs.len(), 1);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn dont_save_closes_the_tab_and_drops_its_changes() {
+    let (mut app, dir, _) = two_files("discard");
+    app.session.execute("node.create", &serde_json::json!({"type": "frame", "width": 10, "height": 10})).unwrap();
+    let uid = app.session.docs[0].uid;
+    crate::tabs::finish_close_tab(&mut app, uid, false);
+    assert!(app.session.docs.iter().all(|d| d.uid != uid));
+    assert_eq!(app.session.docs.len(), 1);
+    let _ = std::fs::remove_dir_all(dir);
+}

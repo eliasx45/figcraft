@@ -592,6 +592,8 @@ pub struct UiState {
     pub online: online::OnlineUi,
     /// The window was asked to close with unsaved changes: the question shows.
     pub confirm_close: bool,
+    /// The open file (uid) whose close was asked with unsaved changes: the question shows.
+    pub confirm_close_tab: Option<u64>,
 }
 
 impl Default for UiState {
@@ -690,6 +692,7 @@ impl Default for UiState {
             live: live::LiveUi::default(),
             online: online::OnlineUi::default(),
             confirm_close: false,
+            confirm_close_tab: None,
         }
     }
 }
@@ -1010,7 +1013,10 @@ impl FigApp {
                     let y = r.data.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
                     comments::start_draft(self, x, y);
                 }
-                "dialog.unsaved" => self.toast(i18n::tr("This file has unsaved changes")),
+                "dialog.unsaved" => {
+                    let index = r.data.get("index").and_then(Value::as_u64).and_then(|i| usize::try_from(i).ok());
+                    self.ui.confirm_close_tab = index.and_then(|i| self.session.docs.get(i)).map(|d| d.uid);
+                }
                 "dialog.plugins" => self.ui.plugins_window = true,
                 "dialog.cursorChat" => live::open_chat(self),
                 "window.new" | "window.focus" | "window.fullscreen" => self.window_requests.push(r),
@@ -1059,6 +1065,11 @@ impl FigApp {
     }
 
     pub fn save_as_dialog(&mut self) {
+        self.save_as_then(|_| {});
+    }
+
+    /// [`save_as_dialog`](Self::save_as_dialog), then `after` once the file is saved.
+    fn save_as_then(&mut self, after: impl FnOnce(&mut FigApp) + 'static) {
         let Ok(name) = self.session.doc().map(|d| d.name.clone()) else { return };
         self.pick_save(i18n::tr("Save as"), &format!("{name}.figcraft"), &["figcraft", "fig"], |app, mut p| {
             if p.extension().is_none_or(|e| e.is_empty()) {
@@ -1084,11 +1095,18 @@ impl FigApp {
             }
             if let Some(r) = app.run("file.saveAs", json!({"path": p.to_string_lossy()})) {
                 dialogs::file_saved(app, &r);
+                after(app);
             }
         });
     }
 
     pub fn save(&mut self) {
+        self.save_then(|_| {});
+    }
+
+    /// [`save`](Self::save), then `after` once the file is saved (not when it fails or the save
+    /// dialog is cancelled).
+    pub fn save_then(&mut self, after: impl FnOnce(&mut FigApp) + 'static) {
         // A branch tab saves its main file.
         let tab = figcraft_engine::branches::file_tab(&self.session);
         // A path ending in .fig is never saved over silently: a .fig destination is an export copy.
@@ -1101,9 +1119,10 @@ impl FigApp {
         if native_path {
             if self.run("file.save", json!({})).is_some() {
                 self.toast(i18n::tr("Saved"));
+                after(self);
             }
         } else {
-            self.save_as_dialog();
+            self.save_as_then(after);
         }
     }
 
