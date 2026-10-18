@@ -234,7 +234,8 @@ fn run_script_returns_results_errors_with_edit_ids_and_screenshots() {
     let fixed = c.ok("run_script", json!({"editId": failed["editId"], "edits": [{"find": "throw new Error('nope')", "replace": "return 'ok'"}]}));
     assert_eq!(fixed["result"], "ok");
     // With a screenshot: the JSON first, then the image of what was made.
-    let r = c.call("run_script", json!({"source": "fc.createFrame({x: 300, width: 80, height: 60, props: {fills: ['#3366FF']}})", "screenshot": true}));
+    let r =
+        c.call("run_script", json!({"source": "fc.createFrame({x: 300, width: 80, height: 60, props: {fills: ['#3366FF']}})", "screenshot": true}));
     let content = r["content"].as_array().unwrap();
     assert!(content.iter().any(|b| b["type"] == "image"), "{r}");
     assert!(content[0]["text"].as_str().unwrap().contains("\"ok\": true"));
