@@ -8,6 +8,7 @@
 //! live in higher crates.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+pub mod audio;
 pub mod colors;
 pub mod comments;
 pub mod geometry;
@@ -23,6 +24,7 @@ pub mod vector;
 pub mod vector_faces;
 pub mod vector_regions;
 
+pub use audio::{AudioClip, AudioData, AudioMarker, Peaks};
 pub use colors::*;
 pub use comments::*;
 pub use figcraft_color as color;
@@ -171,6 +173,10 @@ pub struct Document {
     /// Images by content hash; serialized separately by the format crate.
     #[serde(skip)]
     pub images: BTreeMap<String, ImageData>,
+    /// Sounds by content hash (what layers' [`AudioClip`]s play); serialized separately by the
+    /// format crate.
+    #[serde(skip)]
+    pub audio: BTreeMap<String, AudioData>,
     /// The page shown when the file opens.
     #[serde(default)]
     pub current_page: Option<NodeId>,
@@ -228,6 +234,7 @@ impl Document {
             styles: Vec::new(),
             variables: Variables::default(),
             images: BTreeMap::new(),
+            audio: BTreeMap::new(),
             current_page: None,
             document_colors: Vec::new(),
             comments: Vec::new(),

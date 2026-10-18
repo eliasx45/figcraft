@@ -12,6 +12,7 @@
 pub mod al_keys;
 pub mod annotations;
 pub mod arc_handles;
+pub mod audio;
 pub mod background;
 pub mod booleans;
 pub mod branches;
@@ -774,6 +775,8 @@ pub struct Session {
     pub live: live::Lives,
     /// Commands the UI runs without waiting on a server ([`Session::start_background`]).
     pub background: background::Background,
+    /// The audio playhead (see [`audio::Transport`]).
+    pub audio: audio::Transport,
 }
 
 impl Default for Session {
@@ -822,6 +825,7 @@ impl Session {
             scripts: scripts::Scripts::default(),
             live: live::Lives::default(),
             background: background::Background::default(),
+            audio: audio::Transport::default(),
         }
     }
 
@@ -1548,6 +1552,8 @@ mod annotations_tests;
 mod arc_fields_tests;
 #[cfg(test)]
 mod arc_handles_tests;
+#[cfg(test)]
+mod audio_tests;
 #[cfg(test)]
 mod autosave_tests;
 #[cfg(test)]

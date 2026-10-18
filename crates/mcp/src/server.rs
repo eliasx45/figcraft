@@ -39,6 +39,9 @@ and run them with run_command, or several as one undo step with batch. Commands 
 on the selection; new layers become the selection. Colours are \"#RRGGBB\" or \"#RRGGBBAA\". Verify your work: \
 inspect_document / get_node return the layer tree as JSON (check sizes, fills, layout, overrides), and \
 screenshot returns a PNG of the page or of given layers to look at. undo/redo step through history. \
+Audio: run_command audio.place {path} puts a sound (WAV, MP3, M4A…) on the canvas as a waveform strip and \
+returns its duration; audio.info reads clips, audio.set their range (seconds or ruler frames, fps, offset), \
+audio.addMarker / audio.setMarkers label times, audio.play / audio.seek / audio.transport drive the playhead. \
 Resources: figcraft://document, figcraft://node/{id}, figcraft://command/{id}. prompts/list has workflows.";
 
 /// An MCP server bound to one backend.

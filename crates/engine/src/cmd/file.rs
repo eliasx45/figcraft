@@ -86,7 +86,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "file.import",
             "Import",
-            "{path | data (base64) + name, x?, y?, center? (SVG: centre it on x, y), variables? (REST: the local variables JSON as an object, JSON text or a path)}  SVG becomes an editable frame (shapes, text, gradients, masks, effects; with `warnings` for what it left out), images become image layers, .figcraft, REST API file JSON and .fig pages are appended with their variables and flows (REST and .fig: with `warnings`; those return `summary` {name, pages, layers, images} of the file read)",
+            "{path | data (base64) + name, x?, y?, center? (SVG: centre it on x, y), variables? (REST: the local variables JSON as an object, JSON text or a path)}  SVG becomes an editable frame (shapes, text, gradients, masks, effects; with `warnings` for what it left out), images become image layers, sounds (WAV, MP3, M4A…) become audio layers (see audio.place), .figcraft, REST API file JSON and .fig pages are appended with their variables and flows (REST and .fig: with `warnings`; those return `summary` {name, pages, layers, images} of the file read)",
             true,
             import
         ),
@@ -1287,6 +1287,10 @@ fn import(s: &mut Session, p: &Value) -> Result<Value> {
             }
             Ok(out)
         }
+        _ if figcraft_audio::is_audio_name(&name) => {
+            let file = std::path::Path::new(&name).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_else(|| name.clone());
+            super::audio::place_bytes(s, bytes, &file, &json!({"x": x.unwrap_or(center.0), "y": y.unwrap_or(center.1)}))
+        }
         _ => {
             let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
             super::create::place_image(s, &json!({"data": b64, "x": x.unwrap_or(center.0), "y": y.unwrap_or(center.1), "name": file_stem(&name)}))
@@ -1301,6 +1305,9 @@ fn import(s: &mut Session, p: &Value) -> Result<Value> {
 fn append_pages(doc: &mut Document, other: &Document) -> Result<Vec<NodeId>> {
     for (k, v) in &other.images {
         doc.images.entry(k.clone()).or_insert_with(|| v.clone());
+    }
+    for (k, v) in &other.audio {
+        doc.audio.entry(k.clone()).or_insert_with(|| v.clone());
     }
     for st in &other.styles {
         if !doc.styles.iter().any(|s| s.id == st.id) {

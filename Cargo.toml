@@ -32,6 +32,13 @@ figcraft-mcp = { path = "crates/mcp" }
 figcraft-collab-net = { path = "crates/collab-net" }
 figcraft-plugin = { path = "crates/plugin" }
 figcraft-script = { path = "crates/script" }
+figcraft-audio = { path = "crates/audio" }
+
+# Audio decoding: FilmCraft's pure-Rust codecs (the same pin as EffectCraft's).
+filmcraft-codecs = { git = "https://github.com/storytold/filmcraft", rev = "2c5ba7a72619935f0481f99d59409e0d1844b234" }
+filmcraft-media = { git = "https://github.com/storytold/filmcraft", rev = "2c5ba7a72619935f0481f99d59409e0d1844b234" }
+# Audio output (the desktop app's playback).
+cpal = "0.16"
 
 # Which paths stored in a document may be followed (craft-libs).
 craft-docpath = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "82a24b006eefa036b43c09a67fb9a3fbd17ffe63" }

@@ -254,6 +254,7 @@ pub fn show(app: &mut FigApp, ui: &mut Ui, worker: &mut Worker) {
     painter.rect_filled(rect, CornerRadius::ZERO, bg);
     draw_canvas_image(app, &painter, ppp, shown, tiled);
     app.session.tool.labels = overlays(app, &painter, &t);
+    crate::audio_ui::overlay(app, &painter);
     crate::frame_labels::rename_field(app, ui);
     // The zoom tool's area.
     if let (Some(start), Some(p)) = (app.canvas.zoom_drag, ctx.input(|i| i.pointer.hover_pos())) {
@@ -749,6 +750,10 @@ fn input(app: &mut FigApp, ui: &mut Ui, resp: &egui::Response) -> bool {
             app.toast(e.to_string());
         }
         app.canvas.dragging = false;
+        return true;
+    }
+    // Audio strips: their play button and ruler (scrubbing) take the press.
+    if !app.canvas.dragging && crate::audio_ui::input(app, &ctx, pos, resp.hovered()) {
         return true;
     }
     let primary_pressed = ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary));

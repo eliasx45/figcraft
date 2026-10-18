@@ -7,6 +7,7 @@
 
 pub mod a11y;
 pub mod assets_panel;
+pub mod audio_ui;
 pub mod bidi;
 pub mod branch_ui;
 pub mod canvas;
@@ -736,6 +737,8 @@ pub struct FigApp {
     /// The automation roots the app was started with: every frame and control request runs
     /// confined to them ([`windows::guard`]).
     pub automation_roots: Option<Arc<figcraft_engine::file_access::Roots>>,
+    /// Audio playback and the playhead scrub ([`audio_ui`]).
+    pub(crate) audio: audio_ui::Player,
 }
 
 /// What to do with the result of a command run in the background.
@@ -768,6 +771,7 @@ impl FigApp {
             pending_dialog: None,
             ui_context: None,
             automation_roots: None,
+            audio: Default::default(),
         }
     }
 
@@ -1428,6 +1432,7 @@ impl FigApp {
         windows::begin(self, &ctx);
         let (files, prefs) = (self.session.docs.len(), self.session.prefs.clone());
         self.frame(ui);
+        self.audio_sync(&ctx);
         windows::settle(self, &ctx, files);
         if self.session.prefs != prefs {
             windows::repaint_others(self, &ctx);

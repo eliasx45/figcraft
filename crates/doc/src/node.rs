@@ -518,6 +518,9 @@ pub struct Node {
     /// Dev resources: links for developers (docs, code, tickets…), in the order they were added.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dev_resources: Vec<DevResource>,
+    /// An audio clip this layer shows as a waveform strip (see [`crate::audio`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<Box<crate::audio::AudioClip>>,
 }
 
 pub(crate) fn yes() -> bool {
@@ -628,6 +631,7 @@ impl Node {
             annotations: Vec::new(),
             code_links: Vec::new(),
             dev_resources: Vec::new(),
+            audio: None,
         }
     }
 

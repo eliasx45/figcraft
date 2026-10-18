@@ -756,6 +756,9 @@ fn draw_content(ctx: &Ctx, pix: &mut Pixmap, n: &Node, xf: Affine, depth: usize,
             if let Some(f) = over_fills {
                 f(pix);
             }
+            if let Some(a) = &n.audio {
+                crate::audio::draw(pix, n, a, xf, ctx.scale);
+            }
             if !matches!(n.kind, NodeKind::BooleanOp { .. }) && !n.children.is_empty() && !n.hides_contents() {
                 if clips {
                     draw_children_clipped(ctx, pix, n, xf, depth, outline.as_ref().map(|(p, _)| p));

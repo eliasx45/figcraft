@@ -135,6 +135,15 @@ pub fn node_json(doc: &Document, id: NodeId, depth: usize) -> Value {
         if !n.exports.is_empty() {
             o.insert("exports".into(), serde_json::to_value(&n.exports).unwrap_or(Value::Null));
         }
+        if let Some(a) = n.audio.as_deref() {
+            // The peak envelope is left out (audio.info has the rest).
+            o.insert(
+                "audio".into(),
+                json!({"file": a.file_name, "duration": a.duration, "start": a.start, "end": a.end, "fps": a.fps, "offset": a.offset,
+                    "startFrame": a.frame_of(a.start), "endFrame": a.frame_of(a.end),
+                    "markers": a.markers.iter().map(|m| json!({"time": m.time, "frame": a.frame_of(m.time), "label": m.label})).collect::<Vec<_>>()}),
+            );
+        }
         if !n.annotations.is_empty() {
             o.insert("annotations".into(), serde_json::to_value(&n.annotations).unwrap_or(Value::Null));
         }

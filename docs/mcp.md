@@ -113,6 +113,30 @@ image paints reference those assets and carry their pixel-to-node transform. Ver
 accepted by the updated receiver. Repeated pastes are independent. Text metrics can differ; limits and omitted features are documented in
 [file-format-parity.md](file-format-parity.md#copy-to-effectcraft). This is a copy, with no live link.
 
+## Audio on the canvas
+
+A layer can carry a sound, drawn as a waveform strip with a frame ruler, markers and (in the app) a
+playhead with a play button. Sounds are decoded with FilmCraft's pure-Rust codecs: WAV, MP3, AAC,
+M4A/MP4/MOV audio, FLAC, Ogg Vorbis, AIFF. The file keeps each sound once (`audio/<sha256>` in the
+`.figcraft` archive) and every clip keeps a 200-per-second peak envelope, so waveforms draw (and
+export) without decoding.
+
+- `audio.place {path, x?, y?, fps?, offset?, start?, end?, markers?}` → `{id, duration, sampleRate,
+  channels, codec, …}`. The strip is 100 units per second shown, 96 tall. `file.import` and dropping
+  a sound file onto the canvas do the same.
+- Times are media seconds; anything that takes `time` also takes `frame`: a ruler frame at `fps`,
+  counted from `offset` (the timeline second of the sound's first sample). So a clip that starts 42 s
+  into a 29.97 fps edit (`offset: 42`) shows frame 1259 at its left edge, and `{frame: 1281}` is the
+  same moment as in the edit.
+- `audio.info` → `{clips: [{id, file, duration, start, end, fps, offset, startFrame, endFrame,
+  markers: [{index, time, frame, label}]}]}`; `audio.set` changes the range shown (`start`/`end` or
+  `startFrame`/`endFrame`), `fps`, `offset`, colours, `ruler`, `pxPerSecond`.
+- Markers: `audio.addMarker {time | frame, label?, color?}` (default: the playhead),
+  `audio.setMarkers {markers: [...]}` (replace all), `audio.removeMarker {index | label | all}`.
+- Transport: `audio.play {id?, time? | frame?}`, `audio.pause`, `audio.togglePlay`, `audio.seek
+  {time | frame | x}`, `audio.transport` → `{id, playing, time, frame}`. The playhead runs on the
+  wall clock, so headless sessions report it too; the desktop app sounds it on macOS and Windows.
+
 ## Configure a client
 
 Build the CLI first (`cargo build --release -p figcraft-cli`) and use the absolute path to

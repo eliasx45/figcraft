@@ -1,0 +1,19 @@
+[package]
+name = "figcraft-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "FigCraft audio: decoding sound files (WAV, MP3, AAC, M4A, FLAC, Ogg) with FilmCraft's pure-Rust codecs, peak envelopes for waveforms, PCM for playback"
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+
+# Decoding is desktop-only for now: FilmCraft's codec hub carries its video decoders too, which
+# would push the browser build past its size cap. Files saved with audio still draw everywhere
+# (the waveform comes from the saved peak envelope).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+filmcraft-codecs = { workspace = true }
+filmcraft-media = { workspace = true }

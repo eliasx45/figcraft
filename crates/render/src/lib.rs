@@ -5,6 +5,7 @@
 //! runs identically on desktop, in tests and in the browser.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+pub mod audio;
 pub mod backdrop;
 pub mod blur;
 pub mod boolean;
@@ -430,6 +431,8 @@ pub fn png_insert_chunk(png: Vec<u8>, kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
     out
 }
 
+#[cfg(test)]
+mod audio_tests;
 #[cfg(test)]
 mod backdrop_shadow_tests;
 #[cfg(test)]

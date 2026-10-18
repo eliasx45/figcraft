@@ -2,7 +2,8 @@
 //!
 //! A zip archive holding `document.json` (the [`Document`] as JSON, with a `format`/`version`
 //! header; layer fields at their default values are left out and read back as those defaults),
-//! `images/<sha256>` for every image the document (or a saved version) uses, an optional
+//! `images/<sha256>` for every image the document (or a saved version) uses, `audio/<sha256>` for
+//! every sound a layer of the document plays (its encoded file as imported), an optional
 //! `thumbnail.png` and an optional version history: `versions/index.json` (`{"versions": [{id,
 //! name, description, time, images}]}`, oldest first) plus one `versions/<id>.json` snapshot per
 //! version (a `document.json` of its own). Branches are kept the same way: `branches/index.json`
@@ -28,7 +29,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Seek, Write};
 use std::sync::Arc;
 
-use figcraft_doc::{Document, ImageData};
+use figcraft_doc::{AudioData, Document, ImageData};
 use serde::de::{Deserializer, IgnoredAny, MapAccess, Visitor};
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::{Value, json};
@@ -58,6 +59,8 @@ const MAX_VERSION_INDEX: u64 = 16 * 1024 * 1024;
 const MAX_VERSION_BYTES: u64 = 1024 * 1024 * 1024;
 /// Most images, and image bytes together, read from one file (members past it are left out).
 const IMAGE_BUDGET: ImageBudget = ImageBudget { images: 20_000, bytes: 4 * 1024 * 1024 * 1024 };
+/// How many sounds, and how many bytes of them together, one file may give.
+const AUDIO_BUDGET: (usize, u64) = (2_000, 4 * 1024 * 1024 * 1024);
 const BRANCH_INDEX: &str = "branches/index.json";
 /// Most branches a file keeps: making more is refused, extra entries in a file are skipped.
 pub const MAX_BRANCHES: usize = 100;
@@ -214,6 +217,18 @@ pub fn add_image(doc: &mut Document, bytes: Vec<u8>) -> Result<(String, u32, u32
     let hash = image_hash(&bytes);
     doc.images.insert(hash.clone(), ImageData { bytes: Arc::new(bytes), width: w, height: h });
     Ok((hash, w, h))
+}
+
+/// Register encoded sound bytes (a WAV, MP3, M4A… file) with the document; returns their hash.
+pub fn add_audio(doc: &mut Document, bytes: Vec<u8>) -> String {
+    let hash = image_hash(&bytes);
+    doc.audio.insert(hash.clone(), AudioData { bytes: Arc::new(bytes) });
+    hash
+}
+
+/// The sounds `doc`'s layers play (hashes), in order.
+pub fn used_audio(doc: &Document) -> BTreeSet<&str> {
+    doc.nodes().filter_map(|n| n.audio.as_deref()).map(|a| a.asset.as_str()).collect()
 }
 
 /// Image bytes with their pixel size (0×0 when they can't be decoded).
@@ -388,6 +403,12 @@ pub fn save_bytes_with_history(
                 put(&mut z, &format!("images/{hash}"), stored, &img.bytes)?;
             }
         }
+        // The sounds the layers play (a deleted layer's sound stays out of the file).
+        for hash in used_audio(doc) {
+            if let Some(a) = doc.audio.get(hash) {
+                put(&mut z, &format!("audio/{hash}"), stored, &a.bytes)?;
+            }
+        }
         if let Some(t) = thumbnail_png {
             put(&mut z, "thumbnail.png", stored, t)?;
         }
@@ -496,6 +517,11 @@ pub(crate) fn load_within(bytes: &[u8], budget: ImageBudget) -> Result<Loaded, F
     let (mut doc, mut issues, own_images) = parse_json(&text)?;
     let (images, unread) = read_images(&mut z, own_images.as_ref(), budget);
     report_lost_images(&mut issues, &unread, own_images.as_ref(), &images);
+    doc.audio = read_audio(&mut z, &mut issues);
+    let lost: BTreeSet<String> = used_audio(&doc).into_iter().filter(|h| !doc.audio.contains_key(*h)).map(str::to_string).collect();
+    for hash in lost.iter().take(MAX_IMAGE_ISSUES) {
+        issues.push(format!("sound {hash} is used by the file but its data is missing: its waveform still shows, it can't play"));
+    }
     match library::read(&mut z, &images, u64::MAX) {
         Ok(lib) => doc.published = lib.map(Arc::new),
         Err(e) => issues.push(format!("the published library was skipped: {e}")),
@@ -549,6 +575,24 @@ fn read_images<R: Read + Seek>(
         }
     }
     (images, unread)
+}
+
+/// The archive's `audio/` members by hash, within [`AUDIO_BUDGET`]; what can't be read is
+/// reported in `issues` and left out.
+fn read_audio<R: Read + Seek>(z: &mut zip::ZipArchive<R>, issues: &mut Vec<String>) -> BTreeMap<String, AudioData> {
+    let hashes: Vec<String> = z.file_names().filter_map(|n| n.strip_prefix("audio/")).filter(|h| !h.is_empty()).map(str::to_string).collect();
+    let (max, mut left) = AUDIO_BUDGET;
+    let mut out = BTreeMap::new();
+    for hash in hashes.into_iter().take(max) {
+        match read_member(z, &format!("audio/{hash}"), left.min(MAX_MEMBER)) {
+            Ok(data) => {
+                left = left.saturating_sub(data.len() as u64);
+                out.insert(hash, AudioData { bytes: Arc::new(data) });
+            }
+            Err(e) => issues.push(format!("sound {hash} couldn't be read ({e}): it is left out, and saving this file again drops it")),
+        }
+    }
+    out
 }
 
 /// Most lost images reported one by one (the rest as a count).
@@ -763,6 +807,8 @@ pub fn load_file(path: &std::path::Path) -> Result<(Document, Vec<String>), Form
     load_bytes(&bytes)
 }
 
+#[cfg(test)]
+mod audio_tests;
 #[cfg(test)]
 mod branch_tests;
 #[cfg(test)]
