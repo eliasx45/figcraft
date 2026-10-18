@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use figcraft_doc::{Document, NodeId, NodeKind};
 use figcraft_geom::Rect;
-use figcraft_render::tiles::{CpuTilePainter, Painted, TILE_PX, TileKey, TilePainter};
+use figcraft_render::tiles::{CpuTilePainter, NativeTile, Painted, TILE_PX, TileKey, TilePainter};
 use figcraft_render::{Options, Pixmap, View};
 pub use scene::{Builder, Fallback, Images};
 use vello::{AaConfig, AaSupport, RenderParams, Renderer, RendererOptions, Scene, wgpu};
@@ -163,6 +163,65 @@ impl Gpu {
     }
 }
 
+impl Gpu {
+    /// Render `scene` (in device pixels) over `base` as `cols`×`rows` tiles, each copied into a
+    /// texture of its own that stays on the GPU (row by row; not waited for: the queue keeps the
+    /// order, so whatever samples them later sees them painted).
+    fn render_native(&mut self, scene: &Scene, cols: u32, rows: u32, base: figcraft_color::Color, counts: &mut Counts) -> Result<Vec<wgpu::Texture>, Fallback> {
+        let started = std::time::Instant::now();
+        let (cols, rows) = (cols.clamp(1, BLOCK as u32), rows.clamp(1, BLOCK as u32));
+        let params = RenderParams {
+            base_color: vello::peniko::Color::new([base.r, base.g, base.b, base.a]),
+            width: cols * TILE_PX,
+            height: rows * TILE_PX,
+            antialiasing_method: AaConfig::Area,
+        };
+        self.target();
+        let Some(t) = &self.target else { return Err("no render target") };
+        let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let r = self.renderer.render_to_texture(&self.device, &self.queue, scene, &t.view, &params);
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("figcraft-gpu-tiles-split") });
+        let mut out = Vec::with_capacity((cols * rows) as usize);
+        for row in 0..rows {
+            for col in 0..cols {
+                let tile = self.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("figcraft-gpu-tile"),
+                    size: wgpu::Extent3d { width: TILE_PX, height: TILE_PX, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    // egui samples Rgba8Unorm textures as gamma-encoded colours, which is what vello writes.
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                });
+                enc.copy_texture_to_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &t.texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d { x: col * TILE_PX, y: row * TILE_PX, z: 0 },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::TexelCopyTextureInfo { texture: &tile, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                    wgpu::Extent3d { width: TILE_PX, height: TILE_PX, depth_or_array_layers: 1 },
+                );
+                out.push(tile);
+            }
+        }
+        self.queue.submit([enc.finish()]);
+        counts.submit_ms += ms(started);
+        if let Some(e) = pollster::block_on(scope.pop()) {
+            log::warn!("gpu tiles: {e}");
+            return Err("GPU error");
+        }
+        r.map_err(|e| {
+            log::warn!("gpu tiles: {e}");
+            "GPU render failed"
+        })?;
+        Ok(out)
+    }
+}
+
 /// Tile (`col`, `row`) of mapped target rows as a premultiplied pixmap (vello writes straight
 /// alpha).
 fn cut(data: &[u8], col: u32, row: u32) -> Option<Pixmap> {
@@ -190,8 +249,9 @@ fn cut(data: &[u8], col: u32, row: u32) -> Option<Pixmap> {
     Some(pix)
 }
 
-/// A top-level layer's scene and the page area it paints (`None`: anywhere).
-type Part = Result<(Scene, Option<Rect>), Fallback>;
+/// A top-level layer's scene, the page area it paints (`None`: anywhere) and whether it holds
+/// pixels made for the scale it was built at ([`Builder::sampled`]).
+type Part = Result<(Scene, Option<Rect>, bool), Fallback>;
 
 /// What the kept scene was built from.
 struct Kept {
@@ -199,6 +259,8 @@ struct Kept {
     page: NodeId,
     skip: Vec<NodeId>,
     fonts: u64,
+    /// The scale (a tile level's) the sampled parts were built at.
+    scale: f64,
     /// Each top-level layer's scene (or why it can't be drawn), in page order.
     parts: Vec<(NodeId, Part)>,
 }
@@ -227,49 +289,61 @@ pub struct GpuTilePainter {
     /// Why the last tile painted on the CPU was (`None`: none was).
     pub last_fallback: Option<Fallback>,
     pub counts: Counts,
+    /// Tiles stay on the GPU where they can ([`Painted::Native`]).
+    native: bool,
 }
 
 impl GpuTilePainter {
     pub fn new(gpu: Gpu) -> Self {
-        Self { gpu, images: Images::default(), kept: None, frame: Scene::new(), last_fallback: None, counts: Counts::default() }
+        Self { gpu, images: Images::default(), kept: None, frame: Scene::new(), last_fallback: None, counts: Counts::default(), native: false }
     }
 
     pub fn adapter(&self) -> &str {
         &self.gpu.adapter
     }
 
-    /// The kept page scene brought up to date with `doc`.
-    fn update(&mut self, doc: &Arc<Document>, page: NodeId, skip: &[NodeId]) {
+    /// Block until the GPU has done what was submitted (benchmarks).
+    pub fn wait(&self) {
+        let _ = self.gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+
+    /// The kept page scene brought up to date with `doc`, its sampled parts drawn for `scale`.
+    fn update(&mut self, doc: &Arc<Document>, page: NodeId, skip: &[NodeId], scale: f64) {
         let fonts = figcraft_text::layout_generation();
         let old = self.kept.take().filter(|k| k.page == page && k.skip == skip && k.fonts == fonts && k.doc.color_profile == doc.color_profile);
-        let kept = match old {
-            Some(k) if Arc::ptr_eq(&k.doc, doc) => k,
-            old => {
-                // Top-level layers to rebuild; `None`: all of them.
-                let dirty = old.as_ref().and_then(|k| dirty_tops(&k.doc, doc, page));
-                let mut reuse: HashMap<NodeId, Part> = match (old, &dirty) {
-                    (Some(k), Some(_)) => k.parts.into_iter().collect(),
-                    _ => HashMap::new(),
-                };
-                let mut b = Builder { doc, skip, images: &mut self.images };
-                let kids = doc.node(page).map(|p| p.children.as_slice()).unwrap_or_default();
-                let parts = kids
-                    .iter()
-                    .map(|c| {
-                        let cached = if dirty.as_ref().is_some_and(|d| !d.contains(c)) { reuse.remove(c) } else { None };
-                        let part = cached.unwrap_or_else(|| {
-                            let mut sc = Scene::new();
-                            b.node(&mut sc, *c, figcraft_geom::Affine::IDENTITY, 0)
-                                // A page unit of margin for anti-aliasing.
-                                .map(|()| (sc, figcraft_render::paint_bounds(doc, *c).map(|r| r.inflate(1.0, 1.0))))
-                        });
-                        (*c, part)
-                    })
-                    .collect();
-                Kept { doc: doc.clone(), page, skip: skip.to_vec(), fonts, parts }
-            }
+        if let Some(k) = old.as_ref()
+            && Arc::ptr_eq(&k.doc, doc)
+            && k.scale.to_bits() == scale.to_bits()
+        {
+            self.kept = old;
+            return;
+        }
+        // Top-level layers to rebuild; `None`: all of them.
+        let dirty = old.as_ref().and_then(|k| if Arc::ptr_eq(&k.doc, doc) { Some(HashSet::new()) } else { dirty_tops(&k.doc, doc, page) });
+        let rescaled = old.as_ref().is_some_and(|k| k.scale.to_bits() != scale.to_bits());
+        let mut reuse: HashMap<NodeId, Part> = match (old, &dirty) {
+            (Some(k), Some(_)) => k.parts.into_iter().collect(),
+            _ => HashMap::new(),
         };
-        self.kept = Some(kept);
+        let images = &mut self.images;
+        let kids = doc.node(page).map(|p| p.children.as_slice()).unwrap_or_default();
+        let parts = kids
+            .iter()
+            .map(|c| {
+                let cached = if dirty.as_ref().is_some_and(|d| !d.contains(c)) { reuse.remove(c) } else { None };
+                // Pixels made for another scale are made again.
+                let cached = cached.filter(|p| !(rescaled && matches!(p, Ok((_, _, true)))));
+                let part = cached.unwrap_or_else(|| {
+                    let mut b = Builder { doc, skip, images, scale, sampled: false };
+                    let mut sc = Scene::new();
+                    b.node(&mut sc, *c, figcraft_geom::Affine::IDENTITY, 0)
+                        // A page unit of margin for anti-aliasing.
+                        .map(|()| (sc, figcraft_render::paint_bounds(doc, *c).map(|r| r.inflate(1.0, 1.0)), b.sampled))
+                });
+                (*c, part)
+            })
+            .collect();
+        self.kept = Some(Kept { doc: doc.clone(), page, skip: skip.to_vec(), fonts, scale, parts });
     }
 
     /// What tile `key` needs: `Ok(false)` nothing is over it (only the background), `Ok(true)`
@@ -280,7 +354,7 @@ impl GpuTilePainter {
         let mut any = false;
         for (id, part) in self.kept.iter().flat_map(|k| k.parts.iter()) {
             match part {
-                Ok((_, at)) => any |= at.is_none_or(|r| overlaps(&r, &shown)),
+                Ok((_, at, _)) => any |= at.is_none_or(|r| overlaps(&r, &shown)),
                 Err(why) => {
                     let reach = figcraft_render::paint_bounds(doc, *id).map(|r| r.inflate(2.0 / key.scale(), 2.0 / key.scale()));
                     if reach.is_none_or(|r| overlaps(&r, &shown)) {
@@ -299,7 +373,7 @@ impl GpuTilePainter {
         let xf = view.transform();
         let shown = view.page_rect();
         for (_, part) in self.kept.iter().flat_map(|k| k.parts.iter()) {
-            if let Ok((sc, at)) = part
+            if let Ok((sc, at, _)) = part
                 && at.is_none_or(|r| overlaps(&r, &shown))
             {
                 self.frame.append(sc, Some(xf));
@@ -309,7 +383,7 @@ impl GpuTilePainter {
 
     /// Paint the tiles of one block (`level`, block column and row) on the GPU; `None` when the
     /// GPU failed (they go to the CPU).
-    fn block(&mut self, level: i32, keys: &[TileKey], base: figcraft_color::Color) -> Option<Vec<(TileKey, Pixmap)>> {
+    fn block(&mut self, level: i32, keys: &[TileKey], base: figcraft_color::Color, native: bool) -> Option<Vec<(TileKey, Painted)>> {
         let x0 = keys.iter().map(|k| k.x).min()?;
         let y0 = keys.iter().map(|k| k.y).min()?;
         let cols = (keys.iter().map(|k| k.x).max()? - x0 + 1).clamp(1, BLOCK) as u32;
@@ -320,9 +394,15 @@ impl GpuTilePainter {
         self.compose(&view);
         self.counts.compose_ms += ms(t);
         let frame = std::mem::take(&mut self.frame);
-        let r = self.gpu.render(&frame, cols, rows, base, &mut self.counts);
+        let r: Result<Vec<Painted>, Fallback> = if native {
+            self.gpu
+                .render_native(&frame, cols, rows, base, &mut self.counts)
+                .map(|t| t.into_iter().map(|t| Painted::Native(NativeTile(Arc::new(t)))).collect())
+        } else {
+            self.gpu.render(&frame, cols, rows, base, &mut self.counts).map(|p| p.into_iter().map(Painted::Pixels).collect())
+        };
         self.frame = frame;
-        let pix = match r {
+        let tiles = match r {
             Ok(p) => p,
             Err(why) => {
                 self.last_fallback = Some(why);
@@ -330,8 +410,8 @@ impl GpuTilePainter {
             }
         };
         let at = |k: &TileKey| ((k.y - y0) as usize) * cols as usize + (k.x - x0) as usize;
-        let mut pix: Vec<Option<Pixmap>> = pix.into_iter().map(Some).collect();
-        Some(keys.iter().filter_map(|k| Some((*k, pix.get_mut(at(k))?.take()?))).collect())
+        let mut tiles: Vec<Option<Painted>> = tiles.into_iter().map(Some).collect();
+        Some(keys.iter().filter_map(|k| Some((*k, tiles.get_mut(at(k))?.take()?))).collect())
     }
 
     fn base(doc: &Document, page: NodeId, opts: &Options) -> figcraft_color::Color {
@@ -367,11 +447,16 @@ impl TilePainter for GpuTilePainter {
         if cpu_only {
             self.last_fallback = Some("outline or focus view");
         } else {
+            // Bounds don't depend on the scale: keep the one the scene has.
+            let scale = self.kept.as_ref().map(|k| k.scale).or(tiles.first().map(TileKey::scale)).unwrap_or(1.0);
             let t = std::time::Instant::now();
-            self.update(doc, page, &opts.skip);
+            self.update(doc, page, &opts.skip, scale);
             self.counts.scene_ms = ms(t);
         }
         let base = Self::base(doc, page, opts);
+        // On the GPU as they are: when the app shows them so, the page is opaque (vello writes
+        // straight alpha, the window wants it premultiplied) and in sRGB (the screen's).
+        let native = self.native && base.a >= 1.0 && doc.color_profile.is_srgb();
         let mut out = Vec::with_capacity(tiles.len());
         let mut cpu = Vec::new();
         // The GPU's tiles by block, in the order they were asked for.
@@ -395,15 +480,20 @@ impl TilePainter for GpuTilePainter {
                 }
             }
         }
+        // A level at a time (the scene's pixels are made for one), finest first.
+        blocks.sort_by_key(|((level, ..), _)| std::cmp::Reverse(*level));
         for ((level, ..), keys) in blocks {
             if stop() {
                 return out;
             }
-            match self.block(level, &keys, base) {
+            let t = std::time::Instant::now();
+            self.update(doc, page, &opts.skip, figcraft_render::tiles::level_scale(level));
+            self.counts.scene_ms += ms(t);
+            match self.block(level, &keys, base, native) {
                 Some(done) => {
                     self.counts.gpu += done.len();
                     let painted: HashSet<TileKey> = done.iter().map(|(k, _)| *k).collect();
-                    out.extend(done.into_iter().map(|(k, p)| (k, Some(Painted::Pixels(p)))));
+                    out.extend(done.into_iter().map(|(k, p)| (k, Some(p))));
                     cpu.extend(keys.into_iter().filter(|k| !painted.contains(k)));
                 }
                 None => cpu.extend(keys),
@@ -414,6 +504,10 @@ impl TilePainter for GpuTilePainter {
         self.counts.cpu += rest.len();
         out.extend(rest);
         out
+    }
+
+    fn keep_on_gpu(&mut self, on: bool) {
+        self.native = on;
     }
 
     fn report(&self) -> String {

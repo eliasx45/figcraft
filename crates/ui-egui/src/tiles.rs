@@ -26,8 +26,21 @@ pub fn budget() -> usize {
 /// Most tiles kept in all (empty ones have no texture).
 const MAX_ENTRIES: usize = 8192;
 
+/// A tile's texture on the GPU already (the window's: see [`crate::render_worker::NativeTextures`]),
+/// freed with the entry.
+struct Native(egui::TextureId);
+
+impl Drop for Native {
+    fn drop(&mut self) {
+        if let Some(t) = crate::render_worker::native_textures() {
+            t.free(self.0);
+        }
+    }
+}
+
 struct Entry {
     tex: Option<egui::TextureHandle>,
+    native: Option<Native>,
     stale: bool,
     /// The frame it was last drawn in.
     used: u64,
@@ -40,6 +53,12 @@ struct Asked {
     doc: usize,
     level: i32,
     cell: (i64, i64),
+}
+
+impl Entry {
+    fn has_texture(&self) -> bool {
+        self.tex.is_some() || self.native.is_some()
+    }
 }
 
 #[derive(Default)]
@@ -135,6 +154,13 @@ impl TileCache {
         }
         self.resolve();
         let stale = !self.fresh(&d.doc, &d.key);
+        if let Some(n) = d.native {
+            // A tile left on the GPU: the window shows its texture.
+            let Some(id) = crate::render_worker::native_textures().and_then(|t| t.register(&n)) else { return };
+            self.tiles.insert(d.key, Entry { tex: None, native: Some(Native(id)), stale, used: self.frame });
+            self.evict();
+            return;
+        }
         let tex = d.image.map(|image| {
             let name = format!("figcraft-tile-{}-{}-{}", d.key.level, d.key.x, d.key.y);
             match self.tiles.remove(&d.key).and_then(|e| e.tex) {
@@ -145,7 +171,7 @@ impl TileCache {
                 None => ctx.load_texture(name, image, egui::TextureOptions::LINEAR),
             }
         });
-        self.tiles.insert(d.key, Entry { tex, stale, used: self.frame });
+        self.tiles.insert(d.key, Entry { tex, native: None, stale, used: self.frame });
         self.evict();
     }
 
@@ -159,7 +185,7 @@ impl TileCache {
         let frame = self.frame;
         let e = self.tiles.get_mut(&key)?;
         e.used = frame;
-        e.tex.as_ref().map(egui::TextureHandle::id)
+        e.tex.as_ref().map(egui::TextureHandle::id).or(e.native.as_ref().map(|n| n.0))
     }
 
     /// A new frame: tiles drawn from now on count as used in it.
@@ -177,7 +203,7 @@ impl TileCache {
     }
 
     pub fn textures(&self) -> usize {
-        self.tiles.values().filter(|e| e.tex.is_some()).count()
+        self.tiles.values().filter(|e| e.has_texture()).count()
     }
 
     /// Tiles known to be stale (an edit not yet worked out isn't counted: see [`Self::resolve`]).
@@ -195,7 +221,7 @@ impl TileCache {
         }
         let frame = self.frame;
         let mut old: Vec<(u64, bool, TileKey)> =
-            self.tiles.iter().filter(|(_, e)| e.used < frame).map(|(k, e)| (e.used, e.tex.is_some(), *k)).collect();
+            self.tiles.iter().filter(|(_, e)| e.used < frame).map(|(k, e)| (e.used, e.has_texture(), *k)).collect();
         old.sort_by_key(|(used, ..)| *used);
         let (mut tex_left, mut all_left) = (over_tex, over_all);
         for (_, has_tex, k) in old {

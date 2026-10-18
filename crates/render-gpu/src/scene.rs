@@ -55,6 +55,11 @@ pub struct Builder<'a> {
     /// Layers not to draw (text being edited).
     pub skip: &'a [NodeId],
     pub images: &'a mut Images,
+    /// Device pixels per page unit the scene is drawn at, for paints the CPU renderer turns into
+    /// pixels first (images at the matching level of their pyramid, diamond gradients).
+    pub scale: f64,
+    /// Whether a paint was turned into pixels at `scale` (the scene then belongs to that scale).
+    pub sampled: bool,
 }
 
 fn pc(c: Color) -> peniko::Color {
@@ -109,6 +114,12 @@ fn ts_affine(t: tiny_skia::Transform) -> Affine {
 }
 
 impl Builder<'_> {
+    /// A paint as the CPU renderer's pixels at `scale` (the scene now belongs to it).
+    fn sample(&mut self, p: &Paint, w: f64, h: f64, scale: f64) -> Option<Prepared> {
+        self.sampled = true;
+        prepare_at(p, w, h, scale, self.doc, 0.0)
+    }
+
     /// The page's layers (or only `solo`, where it is).
     pub fn page(&mut self, sc: &mut Scene, page: NodeId, solo: Option<NodeId>) -> Result<(), Fallback> {
         let doc = self.doc;
@@ -223,7 +234,7 @@ impl Builder<'_> {
     }
 
     fn fills(&mut self, sc: &mut Scene, path: &BezPath, rule: FillRule, paints: &[Paint], w: f64, h: f64, xf: Affine) -> Result<(), Fallback> {
-        let scale = xf.determinant().abs().sqrt();
+        let scale = xf.determinant().abs().sqrt() * self.scale;
         let style = fill_rule(rule);
         for p in paints {
             let Some((brush, brush_xf)) = self.brush(p, w, h, scale, xf)? else { continue };
@@ -283,7 +294,7 @@ impl Builder<'_> {
             // Pattern cells are drawn at the zoom they show at: not in a zoom-independent scene.
             PaintKind::Pattern(_) => Err("pattern fills"),
             // Images and diamond gradients: the CPU renderer's pixmap, sampled on the GPU.
-            _ => match prepare_at(p, w, h, scale, self.doc, 0.0) {
+            _ => match self.sample(p, w, h, scale) {
                 Some(Prepared::Pattern { pixmap, mode, quality, opacity, transform }) => {
                     let extend = match mode {
                         tiny_skia::SpreadMode::Pad => Extend::Pad,

@@ -168,6 +168,7 @@ fn diff(a: &Pixmap, b: &Pixmap) -> (f64, u8, f64) {
 fn pixels(p: Option<Painted>, doc: &Document, page: NodeId) -> Pixmap {
     match p.expect("painted") {
         Painted::Pixels(p) => p,
+        Painted::Native(_) => panic!("asked for pixels"),
         Painted::Empty => {
             let mut pix = Pixmap::new(TILE_PX, TILE_PX).unwrap();
             if let Some(NodeKind::Page { background, .. }) = doc.node(page).map(|n| &n.kind) {

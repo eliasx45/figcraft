@@ -128,7 +128,7 @@ fn the_texture_budget_holds() {
     // Generation 1: the one `sync` started.
     for i in 0..(budget() as i64 + 40) {
         cache.begin_frame();
-        cache.insert(&ctx, TileDone { key: TileKey { level: 0, x: i, y: 0 }, image: Some(image.clone()), doc: ds.doc.clone(), generation: 1 });
+        cache.insert(&ctx, TileDone { key: TileKey { level: 0, x: i, y: 0 }, image: Some(image.clone()), native: None, doc: ds.doc.clone(), generation: 1 });
     }
     assert_eq!(cache.textures(), budget());
     // The newest stay.

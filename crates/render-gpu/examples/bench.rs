@@ -74,11 +74,23 @@ fn main() {
         let (cold, _) = time(&mut fresh, &doc, page, &keys);
         let (warm, _) = time(&mut gpu, &doc, page, &keys);
         let (warm2, _) = time(&mut gpu, &doc, page, &keys);
+        // Left on the GPU (what the app shows): until the GPU has finished them.
+        gpu.keep_on_gpu(true);
+        let mut kept = f64::MAX;
+        for _ in 0..3 {
+            let t = Instant::now();
+            let _ = gpu.paint(&doc, page, &keys, &Options { lod: true, ..Options::default() }, &|| false);
+            gpu.wait();
+            kept = kept.min(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        let kept_counts = gpu.counts;
+        gpu.keep_on_gpu(false);
         println!(
-            "{label}: {} tiles ({n} with pixels) | CPU cold {cpu_cold:.1} ms, warm {cpu:.1} ms | GPU cold {cold:.1} ms, warm {:.1} ms | {:?} {}",
+            "{label}: {} tiles ({n} with pixels) | CPU cold {cpu_cold:.1} ms, warm {cpu:.1} ms | GPU cold {cold:.1} ms, warm {:.1} ms, left on the GPU {kept:.1} ms | {:?} | kept {:?} {}",
             keys.len(),
             warm.min(warm2),
             gpu.counts,
+            kept_counts,
             gpu.last_fallback.unwrap_or("")
         );
     }

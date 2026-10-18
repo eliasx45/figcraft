@@ -37,7 +37,7 @@ fn scene() -> (Arc<Document>, NodeId, NodeId) {
 fn pixels(p: &Painted) -> &Pixmap {
     match p {
         Painted::Pixels(p) => p,
-        Painted::Empty => panic!("expected pixels"),
+        Painted::Empty | Painted::Native(_) => panic!("expected pixels"),
     }
 }
 
@@ -59,6 +59,7 @@ fn stitched_matches_render(doc: &Document, page: NodeId, level: i32, (x0, x1): (
             let key = TileKey { level, x, y };
             match render_tile(doc, page, &key, opts).unwrap() {
                 Painted::Empty => empty += 1,
+                Painted::Native(_) => panic!("the CPU leaves nothing on the GPU"),
                 Painted::Pixels(p) => stitched.draw_pixmap(
                     ((x - x0) as u32 * t) as i32,
                     ((y - y0) as u32 * t) as i32,

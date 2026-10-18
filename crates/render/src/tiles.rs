@@ -320,9 +320,22 @@ pub fn compose(visible: Rect, scale: f64, exact: Option<Exact>, have: impl Fn(Ti
 /// A painted tile.
 #[derive(Clone, Debug)]
 pub enum Painted {
-    /// Only the page's background: nothing to keep but the fact.
+    /// Only the page's background.
     Empty,
     Pixels(Pixmap),
+    /// Left on the GPU by the painter, for the app to show as it is (see [`NativeTile`]).
+    Native(NativeTile),
+}
+
+/// A tile a GPU painter left on the GPU: a handle only the painter and the app that installed it
+/// know the type of (a `wgpu::Texture` for `figcraft-render-gpu`); this crate knows no graphics API.
+#[derive(Clone)]
+pub struct NativeTile(pub Arc<dyn std::any::Any + Send + Sync>);
+
+impl std::fmt::Debug for NativeTile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("NativeTile")
+    }
 }
 
 /// Paints tiles: [`CpuTilePainter`], or a GPU painter behind the same calls.
@@ -343,6 +356,10 @@ pub trait TilePainter: Send {
     fn report(&self) -> String {
         "cpu".into()
     }
+
+    /// Whether tiles may stay on the GPU ([`Painted::Native`]): the app can show them as they
+    /// are. Painters that only make pixels ignore it.
+    fn keep_on_gpu(&mut self, _on: bool) {}
 }
 
 /// The CPU painter: tiny-skia, tiles in parallel on desktop.

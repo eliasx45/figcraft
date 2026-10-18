@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use figcraft_color::ColorProfile;
 use figcraft_doc::{Document, NodeId};
-use figcraft_render::tiles::{CpuTilePainter, Painted, TileKey, TilePainter};
+use figcraft_render::tiles::{CpuTilePainter, NativeTile, Painted, TileKey, TilePainter};
 use figcraft_render::{Pixmap, Retained, View, Work};
 // A monotonic clock in the browser too: preview decisions rest on how long renders take there.
 use web_time::Instant;
@@ -92,8 +92,10 @@ pub struct TileBatch {
 
 pub struct TileDone {
     pub key: TileKey,
-    /// `None`: only the page's background.
+    /// `None` (and no `native`): only the page's background.
     pub image: Option<egui::ColorImage>,
+    /// Painted on the GPU and left there, for [`NativeTextures`].
+    pub native: Option<NativeTile>,
     /// The document it shows (it may have changed since).
     pub doc: Arc<Document>,
     pub generation: u64,
@@ -174,6 +176,25 @@ pub fn set_tile_painter(factory: PainterFactory) {
 
 fn new_tile_painter() -> Box<dyn TilePainter> {
     TILE_PAINTER.get().and_then(|f| f()).unwrap_or_else(|| Box::new(CpuTilePainter))
+}
+
+/// The app's way to show tiles a GPU painter left on the GPU ([`Painted::Native`]) as the
+/// window's own textures, without a copy through the CPU.
+pub trait NativeTextures: Send + Sync {
+    /// The texture showing `tile`; `None` when it isn't one this app knows.
+    fn register(&self, tile: &NativeTile) -> Option<egui::TextureId>;
+    fn free(&self, id: egui::TextureId);
+}
+
+static NATIVE_TEXTURES: std::sync::OnceLock<Box<dyn NativeTextures>> = std::sync::OnceLock::new();
+
+/// Show GPU tiles through `textures` (once per process; later calls are ignored).
+pub fn set_native_textures(textures: Box<dyn NativeTextures>) {
+    let _ = NATIVE_TEXTURES.set(textures);
+}
+
+pub(crate) fn native_textures() -> Option<&'static dyn NativeTextures> {
+    NATIVE_TEXTURES.get().map(|b| b.as_ref())
 }
 
 /// How tiles have been painted (`ui.inspect` canvas.tiles.painting).
@@ -277,6 +298,8 @@ impl Renders {
             ..Default::default()
         };
         let painter = self.painter.get_or_insert_with(new_tile_painter);
+        // A soft proof marks pixels: those tiles come back as pixels.
+        painter.keep_on_gpu(native_textures().is_some() && !o.proof);
         let t0 = web_time::Instant::now();
         let Ok(painted) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| painter.paint(&batch.doc, batch.page, keys, &opts, stop))) else {
             return (vec![], vec![]);
@@ -294,17 +317,18 @@ impl Renders {
         let done = painted
             .into_iter()
             .filter_map(|(key, p)| {
-                let image = match p? {
-                    Painted::Empty => None,
+                let (image, native) = match p? {
+                    Painted::Empty => (None, None),
+                    Painted::Native(n) => (None, Some(n)),
                     Painted::Pixels(pix) => {
                         let mut image = screen_image(&pix, batch.doc.color_profile);
                         if o.proof {
                             mark_outside_srgb(&mut image, &pix, batch.doc.color_profile);
                         }
-                        Some(image)
+                        (Some(image), None)
                     }
                 };
-                Some(TileDone { key, image, doc: batch.doc.clone(), generation: batch.generation })
+                Some(TileDone { key, image, native, doc: batch.doc.clone(), generation: batch.generation })
             })
             .collect();
         (done, later)
