@@ -16,6 +16,8 @@ figcraft-ui-egui = { workspace = true }
 figcraft-collab-net = { workspace = true }
 figcraft-format = { workspace = true }
 figcraft-text = { workspace = true }
+figcraft-render = { workspace = true }
+figcraft-render-gpu = { workspace = true }
 egui = { workspace = true }
 eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit", "wayland", "x11"] }
 serde_json = { workspace = true }

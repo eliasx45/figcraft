@@ -161,6 +161,42 @@ pub fn coarse_view(view: &View) -> View {
     View { origin: view.origin, scale: view.scale / PREVIEW_FACTOR, width: shrink(view.width), height: shrink(view.height) }
 }
 
+/// Makes a tile painter for each render thread (the app's GPU painter); `None` from it: the CPU's.
+type PainterFactory = Box<dyn Fn() -> Option<Box<dyn TilePainter>> + Send + Sync>;
+
+static TILE_PAINTER: std::sync::OnceLock<PainterFactory> = std::sync::OnceLock::new();
+
+/// Paint canvas tiles with what `factory` makes (once per process, before the first window
+/// renders; later calls are ignored).
+pub fn set_tile_painter(factory: PainterFactory) {
+    let _ = TILE_PAINTER.set(factory);
+}
+
+fn new_tile_painter() -> Box<dyn TilePainter> {
+    TILE_PAINTER.get().and_then(|f| f()).unwrap_or_else(|| Box::new(CpuTilePainter))
+}
+
+/// How tiles have been painted (`ui.inspect` canvas.tiles.painting).
+#[derive(Clone, Debug, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TileStats {
+    /// The painter and how its last chunk went.
+    pub painter: String,
+    /// Tiles in the last chunk and how long they took.
+    pub last_tiles: usize,
+    pub last_ms: f64,
+    /// Since the app started.
+    pub tiles: u64,
+    pub ms: f64,
+}
+
+static TILE_STATS: std::sync::Mutex<TileStats> =
+    std::sync::Mutex::new(TileStats { painter: String::new(), last_tiles: 0, last_ms: 0.0, tiles: 0, ms: 0.0 });
+
+pub fn tile_stats() -> TileStats {
+    TILE_STATS.lock().map(|s| s.clone()).unwrap_or_default()
+}
+
 /// What the render thread keeps between jobs: the canvas image, the previews standing in for it
 /// while the zoom changes, and what the last full render drew and took.
 pub struct Renders {
@@ -172,8 +208,9 @@ pub struct Renders {
     full_ms: f64,
     /// Previews come first only when renders from scratch take at least this long.
     preview_after_ms: f64,
-    /// Paints canvas tiles: on the CPU today.
-    painter: Box<dyn TilePainter>,
+    /// Paints canvas tiles: on the CPU, or the GPU where the app installed a painter for it
+    /// ([`set_tile_painter`]); made for the first batch (a GPU one compiles its shaders then).
+    painter: Option<Box<dyn TilePainter>>,
 }
 
 impl Default for Renders {
@@ -191,7 +228,7 @@ impl Renders {
             last: None,
             full_ms: 0.0,
             preview_after_ms: ms,
-            painter: Box::new(CpuTilePainter),
+            painter: None,
         }
     }
 
@@ -239,10 +276,19 @@ impl Renders {
             lod: true,
             ..Default::default()
         };
-        let painter = &mut self.painter;
+        let painter = self.painter.get_or_insert_with(new_tile_painter);
+        let t0 = web_time::Instant::now();
         let Ok(painted) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| painter.paint(&batch.doc, batch.page, keys, &opts, stop))) else {
             return (vec![], vec![]);
         };
+        let ms = t0.elapsed().as_secs_f64() * 1000.0;
+        if let Ok(mut s) = TILE_STATS.lock() {
+            s.painter = painter.report();
+            s.last_tiles = painted.len();
+            s.last_ms = ms;
+            s.tiles += painted.len() as u64;
+            s.ms += ms;
+        }
         let started: std::collections::HashSet<TileKey> = painted.iter().map(|(k, _)| *k).collect();
         let later = keys.iter().filter(|k| !started.contains(k)).copied().collect();
         let done = painted

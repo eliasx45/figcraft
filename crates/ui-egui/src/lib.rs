@@ -1667,6 +1667,7 @@ impl FigApp {
             "textures": self.canvas.tiles.textures(),
             "stale": self.canvas.tiles.stale(),
             "drawn": self.canvas.tiles.drawn,
+            "painting": render_worker::tile_stats(),
         });
         let mut state = json!({
             "rightTab": self.ui.right_tab,

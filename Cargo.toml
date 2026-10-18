@@ -21,6 +21,7 @@ figcraft-layout = { path = "crates/layout" }
 figcraft-text = { path = "crates/text" }
 figcraft-pathops = { path = "crates/pathops" }
 figcraft-render = { path = "crates/render" }
+figcraft-render-gpu = { path = "crates/render-gpu" }
 figcraft-svg = { path = "crates/svg" }
 figcraft-pdf = { path = "crates/pdf" }
 figcraft-format = { path = "crates/format" }

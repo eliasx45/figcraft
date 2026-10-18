@@ -20,6 +20,8 @@ const TABLE: &[(&str, u8)] = &[
     ("format", 3),
     ("svg", 4),
     ("pdf", 4),
+    // GPU canvas tiles (vello on wgpu): above the CPU renderer they fall back to.
+    ("render-gpu", 4),
     ("engine", 5),
     ("ui-egui", 6),
     ("mcp", 6),

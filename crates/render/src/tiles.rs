@@ -325,19 +325,24 @@ pub enum Painted {
     Pixels(Pixmap),
 }
 
-/// Paints tiles. [`CpuTilePainter`] today; a GPU painter later, behind the same calls.
+/// Paints tiles: [`CpuTilePainter`], or a GPU painter behind the same calls.
 pub trait TilePainter: Send {
     /// Paint `tiles` of `page`; `None` for a tile that couldn't be painted. Once `stop` says so
     /// (a canvas render is waiting), tiles not started yet are left out of the result: the caller
     /// paints them later.
     fn paint(
         &mut self,
-        doc: &Document,
+        doc: &Arc<Document>,
         page: NodeId,
         tiles: &[TileKey],
         opts: &Options,
         stop: &(dyn Fn() -> bool + Sync),
     ) -> Vec<(TileKey, Option<Painted>)>;
+
+    /// What paints and how the last batch went (`ui.inspect`).
+    fn report(&self) -> String {
+        "cpu".into()
+    }
 }
 
 /// The CPU painter: tiny-skia, tiles in parallel on desktop.
@@ -347,7 +352,7 @@ pub struct CpuTilePainter;
 impl TilePainter for CpuTilePainter {
     fn paint(
         &mut self,
-        doc: &Document,
+        doc: &Arc<Document>,
         page: NodeId,
         tiles: &[TileKey],
         opts: &Options,

@@ -20,6 +20,7 @@ mod args;
 mod clipboard;
 mod control_server;
 mod gamepad;
+mod gpu_tiles;
 mod graphics;
 #[cfg(target_os = "linux")]
 mod linux_window;
@@ -242,6 +243,7 @@ fn main() -> eframe::Result {
                 let _ = with_app(|fig| fig.ui.title_bar = figcraft_ui_egui::TitleBar::Native);
                 _cc.egui_ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
             }
+            gpu_tiles::install(_cc);
             Ok(Box::new(App {
                 queue,
                 ctx_slot,

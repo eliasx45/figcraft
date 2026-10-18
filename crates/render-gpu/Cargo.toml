@@ -1,0 +1,26 @@
+[package]
+name = "figcraft-render-gpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "FigCraft GPU canvas tiles (vello on wgpu); the CPU renderer stays the reference and the fallback"
+
+[lints]
+workspace = true
+
+[dependencies]
+figcraft-geom = { workspace = true }
+figcraft-color = { workspace = true }
+figcraft-doc = { workspace = true }
+figcraft-text = { workspace = true }
+figcraft-pathops = { workspace = true }
+figcraft-render = { workspace = true }
+tiny-skia = { workspace = true }
+log = { workspace = true }
+# vello 0.11 is on wgpu 30, the version eframe 0.36 uses; peniko/kurbo 0.13 are already in the tree.
+vello = "0.11"
+pollster = "0.4"
+
+[dev-dependencies]
+figcraft-engine = { workspace = true }
