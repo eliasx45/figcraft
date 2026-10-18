@@ -28,7 +28,7 @@ const MAX_ENTRIES: usize = 8192;
 
 /// A tile's texture on the GPU already (the window's: see [`crate::render_worker::NativeTextures`]),
 /// freed with the entry.
-struct Native(egui::TextureId);
+pub(crate) struct Native(pub(crate) egui::TextureId);
 
 impl Drop for Native {
     fn drop(&mut self) {

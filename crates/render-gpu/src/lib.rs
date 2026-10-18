@@ -11,7 +11,6 @@
 pub mod scene;
 
 use std::collections::{HashMap, HashSet};
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use figcraft_doc::{Document, NodeId, NodeKind};
@@ -74,7 +73,8 @@ impl Gpu {
             RendererOptions {
                 use_cpu: false,
                 antialiasing_support: AaSupport::area_only(),
-                num_init_threads: NonZeroUsize::new(1),
+                // Every core compiles shaders (on its own thread: see `shared_in_background`).
+                num_init_threads: None,
                 pipeline_cache: None,
             },
         )
@@ -164,10 +164,63 @@ impl Gpu {
 }
 
 impl Gpu {
+    /// Render `scene` (in device pixels) over `base` into a `width`×`height` texture of its own that
+    /// stays on the GPU. Waits for the GPU to finish it: one canvas image at a time, so a zoom that
+    /// asks for a new one every frame never queues up work ahead of the window's own frames.
+    fn render_view(
+        &mut self,
+        scene: &Scene,
+        width: u32,
+        height: u32,
+        base: figcraft_color::Color,
+        counts: &mut Counts,
+    ) -> Result<wgpu::Texture, Fallback> {
+        let started = std::time::Instant::now();
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("figcraft-gpu-canvas"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let params = RenderParams {
+            base_color: vello::peniko::Color::new([base.r, base.g, base.b, base.a]),
+            width,
+            height,
+            antialiasing_method: AaConfig::Area,
+        };
+        let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let r = self.renderer.render_to_texture(&self.device, &self.queue, scene, &view, &params);
+        counts.submit_ms += ms(started);
+        if let Some(e) = pollster::block_on(scope.pop()) {
+            log::warn!("gpu canvas: {e}");
+            return Err("GPU error");
+        }
+        let waited = std::time::Instant::now();
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        counts.wait_ms += ms(waited);
+        r.map_err(|e| {
+            log::warn!("gpu canvas: {e}");
+            "GPU render failed"
+        })?;
+        Ok(texture)
+    }
+
     /// Render `scene` (in device pixels) over `base` as `cols`×`rows` tiles, each copied into a
     /// texture of its own that stays on the GPU (row by row; not waited for: the queue keeps the
     /// order, so whatever samples them later sees them painted).
-    fn render_native(&mut self, scene: &Scene, cols: u32, rows: u32, base: figcraft_color::Color, counts: &mut Counts) -> Result<Vec<wgpu::Texture>, Fallback> {
+    fn render_native(
+        &mut self,
+        scene: &Scene,
+        cols: u32,
+        rows: u32,
+        base: figcraft_color::Color,
+        counts: &mut Counts,
+    ) -> Result<Vec<wgpu::Texture>, Fallback> {
         let started = std::time::Instant::now();
         let (cols, rows) = (cols.clamp(1, BLOCK as u32), rows.clamp(1, BLOCK as u32));
         let params = RenderParams {
@@ -282,9 +335,12 @@ pub struct Counts {
 
 /// Paints canvas tiles on the GPU, and on the CPU where it can't.
 pub struct GpuTilePainter {
-    gpu: Gpu,
+    gpu: SharedGpu,
     images: Images,
     kept: Option<Kept>,
+    /// The scene of the canvas's whole-view renders ([`TilePainter::paint_view`]), kept apart:
+    /// its pixels are made for the view's scale, the tiles' for theirs.
+    view_kept: Option<Kept>,
     frame: Scene,
     /// Why the last tile painted on the CPU was (`None`: none was).
     pub last_fallback: Option<Fallback>,
@@ -293,18 +349,67 @@ pub struct GpuTilePainter {
     native: bool,
 }
 
+/// A GPU every window's painter shares; `None` until its shaders are ready (painters paint on
+/// the CPU meanwhile).
+pub type SharedGpu = Arc<std::sync::Mutex<Option<Gpu>>>;
+
+/// A [`SharedGpu`] on `device`, made on a thread of its own: vello compiles its shaders then,
+/// which takes seconds on some backends (Direct3D 12), and no render waits for that.
+pub fn shared_in_background(device: wgpu::Device, queue: wgpu::Queue, adapter: String) -> SharedGpu {
+    let slot: SharedGpu = Arc::new(std::sync::Mutex::new(None));
+    let fill = slot.clone();
+    let spawned = std::thread::Builder::new().name("figcraft-gpu-shaders".into()).spawn(move || {
+        let t = std::time::Instant::now();
+        match Gpu::shared(device, queue, adapter) {
+            Ok(gpu) => {
+                log::info!("gpu canvas: {} ready in {:.0} ms", gpu.adapter, ms(t));
+                if let Ok(mut s) = fill.lock() {
+                    *s = Some(gpu);
+                }
+            }
+            Err(e) => log::warn!("gpu canvas: {e}; painting on the CPU"),
+        }
+    });
+    if let Err(e) = spawned {
+        log::warn!("gpu canvas: {e}");
+    }
+    slot
+}
+
 impl GpuTilePainter {
     pub fn new(gpu: Gpu) -> Self {
-        Self { gpu, images: Images::default(), kept: None, frame: Scene::new(), last_fallback: None, counts: Counts::default(), native: false }
+        Self::with_shared(Arc::new(std::sync::Mutex::new(Some(gpu))))
     }
 
-    pub fn adapter(&self) -> &str {
-        &self.gpu.adapter
+    pub fn with_shared(gpu: SharedGpu) -> Self {
+        Self {
+            gpu,
+            images: Images::default(),
+            kept: None,
+            view_kept: None,
+            frame: Scene::new(),
+            last_fallback: None,
+            counts: Counts::default(),
+            native: false,
+        }
+    }
+
+    /// The adapter's name and backend (empty while the shaders aren't ready).
+    pub fn adapter(&self) -> String {
+        self.gpu.lock().ok().and_then(|g| g.as_ref().map(|g| g.adapter.clone())).unwrap_or_default()
+    }
+
+    fn ready(&self) -> bool {
+        self.gpu.lock().is_ok_and(|g| g.is_some())
     }
 
     /// Block until the GPU has done what was submitted (benchmarks).
     pub fn wait(&self) {
-        let _ = self.gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        if let Ok(g) = self.gpu.lock()
+            && let Some(g) = g.as_ref()
+        {
+            let _ = g.device.poll(wgpu::PollType::wait_indefinitely());
+        }
     }
 
     /// The kept page scene brought up to date with `doc`, its sampled parts drawn for `scale`.
@@ -396,12 +501,12 @@ impl GpuTilePainter {
         self.compose(&view);
         self.counts.compose_ms += ms(t);
         let frame = std::mem::take(&mut self.frame);
-        let r: Result<Vec<Painted>, Fallback> = if native {
-            self.gpu
+        let r: Result<Vec<Painted>, Fallback> = match self.gpu.lock().as_deref_mut() {
+            Ok(Some(gpu)) if native => gpu
                 .render_native(&frame, cols, rows, base, &mut self.counts)
-                .map(|t| t.into_iter().map(|t| Painted::Native(NativeTile(Arc::new(t)))).collect())
-        } else {
-            self.gpu.render(&frame, cols, rows, base, &mut self.counts).map(|p| p.into_iter().map(Painted::Pixels).collect())
+                .map(|t| t.into_iter().map(|t| Painted::Native(NativeTile(Arc::new(t)))).collect()),
+            Ok(Some(gpu)) => gpu.render(&frame, cols, rows, base, &mut self.counts).map(|p| p.into_iter().map(Painted::Pixels).collect()),
+            _ => Err("GPU not ready"),
         };
         self.frame = frame;
         let tiles = match r {
@@ -414,6 +519,50 @@ impl GpuTilePainter {
         let at = |k: &TileKey| ((k.y - y0) as usize) * cols as usize + (k.x - x0) as usize;
         let mut tiles: Vec<Option<Painted>> = tiles.into_iter().map(Some).collect();
         Some(keys.iter().filter_map(|k| Some((*k, tiles.get_mut(at(k))?.take()?))).collect())
+    }
+
+    /// [`TilePainter::paint_view`] on the scene in `self.kept`.
+    fn view(&mut self, doc: &Arc<Document>, page: NodeId, view: &View, opts: &Options) -> Option<Painted> {
+        let base = Self::base(doc, page, opts);
+        if !self.native || opts.outline_mode || !opts.outlined.is_empty() || opts.solo.is_some() || base.a < 1.0 || !doc.color_profile.is_srgb() {
+            return None;
+        }
+        let max = self.gpu.lock().ok().and_then(|g| g.as_ref().map(|g| g.device.limits().max_texture_dimension_2d))?;
+        if view.width == 0 || view.height == 0 || view.width > max || view.height > max {
+            return None;
+        }
+        // Pixels the scene makes (images, greeked text) for the tile level at or above the view's
+        // scale: zooming within a level keeps the scene.
+        let scale = figcraft_render::tiles::level_at_least(view.scale).map_or(view.scale, figcraft_render::tiles::level_scale);
+        let t = std::time::Instant::now();
+        self.update(doc, page, &opts.skip, scale, opts.lod);
+        self.counts.scene_ms = ms(t);
+        let shown = view.page_rect();
+        for (id, part) in self.kept.iter().flat_map(|k| k.parts.iter()) {
+            if let Err(why) = part {
+                let reach = figcraft_render::paint_bounds(doc, *id).map(|r| r.inflate(2.0 / view.scale, 2.0 / view.scale));
+                if reach.is_none_or(|r| overlaps(&r, &shown)) {
+                    self.last_fallback = Some(why);
+                    return None;
+                }
+            }
+        }
+        let t = std::time::Instant::now();
+        self.compose(view);
+        self.counts.compose_ms = ms(t);
+        let frame = std::mem::take(&mut self.frame);
+        let r = match self.gpu.lock().as_deref_mut() {
+            Ok(Some(gpu)) => gpu.render_view(&frame, view.width, view.height, base, &mut self.counts),
+            _ => Err("GPU not ready"),
+        };
+        self.frame = frame;
+        match r {
+            Ok(tex) => Some(Painted::Native(NativeTile(Arc::new(tex)))),
+            Err(why) => {
+                self.last_fallback = Some(why);
+                None
+            }
+        }
     }
 
     fn base(doc: &Document, page: NodeId, opts: &Options) -> figcraft_color::Color {
@@ -444,6 +593,10 @@ impl TilePainter for GpuTilePainter {
         stop: &(dyn Fn() -> bool + Sync),
     ) -> Vec<(TileKey, Option<Painted>)> {
         self.counts = Counts::default();
+        if !self.ready() {
+            self.last_fallback = Some("GPU not ready");
+            return CpuTilePainter.paint(doc, page, tiles, opts, stop);
+        }
         // Views the GPU doesn't draw: every tile on the CPU.
         let cpu_only = opts.outline_mode || !opts.outlined.is_empty() || opts.solo.is_some();
         if cpu_only {
@@ -512,10 +665,26 @@ impl TilePainter for GpuTilePainter {
         self.native = on;
     }
 
+    fn paint_view(&mut self, doc: &Arc<Document>, page: NodeId, view: &View, opts: &Options) -> Option<Painted> {
+        std::mem::swap(&mut self.kept, &mut self.view_kept);
+        let out = self.view(doc, page, view, opts);
+        std::mem::swap(&mut self.kept, &mut self.view_kept);
+        out
+    }
+
     fn report(&self) -> String {
         let c = self.counts;
         let why = self.last_fallback.map(|w| format!(", last CPU: {w}")).unwrap_or_default();
-        format!("gpu {}: {} on the GPU, {} on the CPU, {} empty{why}", self.gpu.adapter, c.gpu, c.cpu, c.empty)
+        format!(
+            "gpu {}: {} on the GPU, {} on the CPU, {} empty{why}; scene {:.1} ms, compose {:.1} ms, submit {:.1} ms",
+            self.adapter(),
+            c.gpu,
+            c.cpu,
+            c.empty,
+            c.scene_ms,
+            c.compose_ms,
+            c.submit_ms
+        )
     }
 }
 

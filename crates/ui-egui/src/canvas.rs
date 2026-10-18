@@ -17,6 +17,8 @@ use crate::theme::{ACCENT, COMPONENT, Tokens, doc_c32, regular, semibold};
 pub struct CanvasState {
     pub rect: Rect,
     texture: Option<egui::TextureHandle>,
+    /// The canvas image when the GPU rendered it (shown instead of `texture`).
+    native: Option<crate::tiles::Native>,
     pub(crate) tex_view: Option<figcraft_render::View>,
     /// The file ([`figcraft_engine::DocState::uid`]) and page the texture shows: it is drawn only
     /// on them.
@@ -57,6 +59,7 @@ impl Default for CanvasState {
         Self {
             rect: Rect::NOTHING,
             texture: None,
+            native: None,
             tex_view: None,
             tex_of: None,
             tex_coarse: false,
@@ -225,9 +228,15 @@ pub fn show(app: &mut FigApp, ui: &mut Ui, worker: &mut Worker) {
         } else {
             egui::TextureOptions::LINEAR
         };
-        match &mut app.canvas.texture {
-            Some(t) => t.set(done.image, filter),
-            None => app.canvas.texture = Some(ctx.load_texture("figcraft-canvas", done.image, filter)),
+        match done.native.as_ref().and_then(|n| crate::render_worker::native_textures()?.register(n)) {
+            Some(id) => app.canvas.native = Some(crate::tiles::Native(id)),
+            None => {
+                app.canvas.native = None;
+                match &mut app.canvas.texture {
+                    Some(t) => t.set(done.image, filter),
+                    None => app.canvas.texture = Some(ctx.load_texture("figcraft-canvas", done.image, filter)),
+                }
+            }
         }
         let latency = Some(done.at.elapsed().as_secs_f64() * 1000.0);
         if done.coarse {
@@ -351,8 +360,9 @@ fn tiles_cover(tiles: &crate::tiles::TileCache, ds: &figcraft_engine::DocState, 
 fn draw_canvas_image(app: &mut FigApp, painter: &egui::Painter, ppp: f32, shown: Option<(u64, NodeId)>, tiled: bool) {
     use figcraft_render::tiles::{Exact, Pick, compose};
     let zoom = app.session.ds().map(|d| d.view.zoom).unwrap_or(1.0);
-    let exact = match (&app.canvas.texture, &app.canvas.tex_view, shown.is_some() && app.canvas.tex_of == shown) {
-        (Some(tex), Some(v), true) => Some((tex.id(), v.clone())),
+    let id = app.canvas.native.as_ref().map(|n| n.0).or(app.canvas.texture.as_ref().map(egui::TextureHandle::id));
+    let exact = match (id, &app.canvas.tex_view, shown.is_some() && app.canvas.tex_of == shown) {
+        (Some(id), Some(v), true) => Some((id, v.clone())),
         _ => None,
     };
     let whole = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));

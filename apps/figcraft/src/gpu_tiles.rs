@@ -49,14 +49,10 @@ pub fn install(cc: &eframe::CreationContext<'_>) {
     }
     let info = rs.adapter.get_info();
     let adapter = format!("{} ({:?})", info.name, info.backend);
+    // Shaders compile now, in the background; the CPU paints until they're ready.
+    let gpu = figcraft_render_gpu::shared_in_background(device, queue, adapter);
     figcraft_ui_egui::render_worker::set_tile_painter(Box::new(move || -> Option<Box<dyn TilePainter>> {
-        match figcraft_render_gpu::Gpu::shared(device.clone(), queue.clone(), adapter.clone()) {
-            Ok(gpu) => Some(Box::new(figcraft_render_gpu::GpuTilePainter::new(gpu))),
-            Err(e) => {
-                log::warn!("GPU tiles: {e}; painting on the CPU");
-                None
-            }
-        }
+        Some(Box::new(figcraft_render_gpu::GpuTilePainter::with_shared(gpu.clone())))
     }));
 }
 

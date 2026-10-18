@@ -360,6 +360,12 @@ pub trait TilePainter: Send {
     /// Whether tiles may stay on the GPU ([`Painted::Native`]): the app can show them as they
     /// are. Painters that only make pixels ignore it.
     fn keep_on_gpu(&mut self, _on: bool) {}
+
+    /// The whole of `view` in one piece, left on the GPU ([`Painted::Native`]), when this painter
+    /// keeps tiles there and can draw everything in the view; `None`: the CPU renders it.
+    fn paint_view(&mut self, _doc: &Arc<Document>, _page: NodeId, _view: &View, _opts: &Options) -> Option<Painted> {
+        None
+    }
 }
 
 /// The CPU painter: tiny-skia, tiles in parallel on desktop.

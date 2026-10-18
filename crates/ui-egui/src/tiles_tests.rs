@@ -128,7 +128,10 @@ fn the_texture_budget_holds() {
     // Generation 1: the one `sync` started.
     for i in 0..(budget() as i64 + 40) {
         cache.begin_frame();
-        cache.insert(&ctx, TileDone { key: TileKey { level: 0, x: i, y: 0 }, image: Some(image.clone()), native: None, doc: ds.doc.clone(), generation: 1 });
+        cache.insert(
+            &ctx,
+            TileDone { key: TileKey { level: 0, x: i, y: 0 }, image: Some(image.clone()), native: None, doc: ds.doc.clone(), generation: 1 },
+        );
     }
     assert_eq!(cache.textures(), budget());
     // The newest stay.
@@ -160,4 +163,54 @@ fn tiles_a_canvas_render_interrupts_are_painted_later_not_lost() {
     let mut want = all;
     want.sort();
     assert_eq!(got, want);
+}
+
+/// The app's GPU textures, faked: ids handed out and ids freed.
+struct FakeNative {
+    freed: std::sync::Mutex<Vec<egui::TextureId>>,
+}
+
+impl crate::render_worker::NativeTextures for FakeNative {
+    fn register(&self, tile: &figcraft_render::tiles::NativeTile) -> Option<egui::TextureId> {
+        tile.0.downcast_ref::<u64>().map(|n| egui::TextureId::User(*n))
+    }
+    fn free(&self, id: egui::TextureId) {
+        self.freed.lock().unwrap().push(id);
+    }
+}
+
+static FAKE: std::sync::LazyLock<&'static FakeNative> =
+    std::sync::LazyLock::new(|| Box::leak(Box::new(FakeNative { freed: std::sync::Mutex::new(vec![]) })));
+
+struct Shared(&'static FakeNative);
+
+impl crate::render_worker::NativeTextures for Shared {
+    fn register(&self, tile: &figcraft_render::tiles::NativeTile) -> Option<egui::TextureId> {
+        self.0.register(tile)
+    }
+    fn free(&self, id: egui::TextureId) {
+        self.0.free(id);
+    }
+}
+
+#[test]
+fn tiles_left_on_the_gpu_are_shown_as_they_are_and_freed_with_their_entry() {
+    crate::render_worker::set_native_textures(Box::new(Shared(*FAKE)));
+    let ctx = egui::Context::default();
+    let (s, _) = session();
+    let ds = s.ds().unwrap();
+    let mut cache = TileCache::default();
+    cache.sync(ds.uid, ds.page, &opts(), &ds.doc);
+    let key = TileKey { level: 0, x: 0, y: 0 };
+    let native = |n: u64| Some(figcraft_render::tiles::NativeTile(Arc::new(n)));
+    cache.insert(&ctx, TileDone { key, image: None, native: native(7001), doc: ds.doc.clone(), generation: 1 });
+    assert_eq!(cache.texture(key), Some(egui::TextureId::User(7001)));
+    assert_eq!(cache.textures(), 1);
+    // Painted again: the old texture goes.
+    cache.insert(&ctx, TileDone { key, image: None, native: native(7002), doc: ds.doc.clone(), generation: 1 });
+    assert_eq!(cache.texture(key), Some(egui::TextureId::User(7002)));
+    assert!(FAKE.freed.lock().unwrap().contains(&egui::TextureId::User(7001)));
+    // Another page drops the tiles, and their textures with them.
+    cache.clear();
+    assert!(FAKE.freed.lock().unwrap().contains(&egui::TextureId::User(7002)));
 }

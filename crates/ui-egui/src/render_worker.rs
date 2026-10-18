@@ -50,8 +50,10 @@ pub struct Job {
 }
 
 pub struct Done {
-    /// The image, ready for a texture (converted off the UI thread).
+    /// The image, ready for a texture (converted off the UI thread); empty when `native` holds it.
     pub image: egui::ColorImage,
+    /// Rendered on the GPU and left there, for [`NativeTextures`].
+    pub native: Option<NativeTile>,
     /// The view the image shows (the requested one snapped outwards to whole device pixels).
     pub view: View,
     pub ms: f64,
@@ -154,7 +156,7 @@ fn run(job: &Job, view: &View, retained: &mut Retained, coarse: bool) -> Option<
         mark_outside_srgb(&mut image, pix, job.doc.color_profile);
     }
     let ms = t0.elapsed().as_secs_f64() * 1000.0;
-    Some(Done { image, view, ms, work, uid: job.uid, page: job.page, coarse, at: job.at })
+    Some(Done { image, native: None, view, ms, work, uid: job.uid, page: job.page, coarse, at: job.at })
 }
 
 /// `view` with [`PREVIEW_FACTOR`] times fewer pixels each way, showing at least the same area.
@@ -209,10 +211,25 @@ pub struct TileStats {
     /// Since the app started.
     pub tiles: u64,
     pub ms: f64,
+    /// Canvas images rendered on the GPU since the app started, and the time spent sending them.
+    pub views: u64,
+    pub view_ms: f64,
+    /// The last one: how long and how it went.
+    pub last_view_ms: f64,
+    pub view_report: String,
 }
 
-static TILE_STATS: std::sync::Mutex<TileStats> =
-    std::sync::Mutex::new(TileStats { painter: String::new(), last_tiles: 0, last_ms: 0.0, tiles: 0, ms: 0.0 });
+static TILE_STATS: std::sync::Mutex<TileStats> = std::sync::Mutex::new(TileStats {
+    painter: String::new(),
+    last_tiles: 0,
+    last_ms: 0.0,
+    tiles: 0,
+    ms: 0.0,
+    views: 0,
+    view_ms: 0.0,
+    last_view_ms: 0.0,
+    view_report: String::new(),
+});
 
 pub fn tile_stats() -> TileStats {
     TILE_STATS.lock().map(|s| s.clone()).unwrap_or_default()
@@ -243,14 +260,7 @@ impl Default for Renders {
 impl Renders {
     /// Previews when renders from scratch take at least `ms` (tests: 0, always).
     pub fn with_threshold(ms: f64) -> Self {
-        Self {
-            full: Retained::default(),
-            preview: Retained::default(),
-            last: None,
-            full_ms: 0.0,
-            preview_after_ms: ms,
-            painter: None,
-        }
+        Self { full: Retained::default(), preview: Retained::default(), last: None, full_ms: 0.0, preview_after_ms: ms, painter: None }
     }
 
     /// Whether `job` gets a preview first: the kept image is of another zoom, page or file (so the
@@ -273,6 +283,13 @@ impl Renders {
 
     /// The image of `job`'s view, built on the kept one where it can be.
     pub fn refine(&mut self, job: &Job) -> Option<Done> {
+        if let Some(d) = self.on_gpu(job) {
+            self.last = Some((job.uid, job.page, job.view.scale));
+            self.full_ms = d.ms;
+            // The CPU's kept image no longer shows what's on screen: its next render starts over.
+            self.full.clear();
+            return Some(d);
+        }
         let done = guarded(&mut self.full, |r| run(job, &job.view, r, false));
         if let Some(d) = &done {
             self.last = Some((job.uid, job.page, job.view.scale));
@@ -281,6 +298,48 @@ impl Renders {
             }
         }
         done
+    }
+}
+
+impl Renders {
+    /// `job`'s image rendered on the GPU and left there, where the app shows such images and the
+    /// painter can draw everything in the view.
+    fn on_gpu(&mut self, job: &Job) -> Option<Done> {
+        if job.proof || native_textures().is_none() {
+            return None;
+        }
+        let opts = figcraft_render::Options {
+            outline_mode: job.outline,
+            outline: job.outline_extras,
+            outlined: job.outlined.clone(),
+            skip: job.skip.clone(),
+            solo: job.solo,
+            lod: true,
+            ..Default::default()
+        };
+        let t0 = Instant::now();
+        let painter = self.painter.get_or_insert_with(new_tile_painter);
+        painter.keep_on_gpu(true);
+        let painted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| painter.paint_view(&job.doc, job.page, &job.view, &opts))).ok()??;
+        let Painted::Native(native) = painted else { return None };
+        let ms = t0.elapsed().as_secs_f64() * 1000.0;
+        if let Ok(mut s) = TILE_STATS.lock() {
+            s.views += 1;
+            s.view_ms += ms;
+            s.last_view_ms = ms;
+            s.view_report = painter.report();
+        }
+        Some(Done {
+            image: egui::ColorImage::default(),
+            native: Some(native),
+            view: job.view.clone(),
+            ms,
+            work: Work::Full,
+            uid: job.uid,
+            page: job.page,
+            coarse: false,
+            at: job.at,
+        })
     }
 }
 
