@@ -1244,7 +1244,8 @@ pub fn adopt_pasted(doc: &mut Document, src: &Document, src_path: Option<&str>, 
 /// which bring their copies along).
 pub fn check_read_only(cmd: &str, before: &Document, after: &Document) -> std::result::Result<(), String> {
     // Pastes from other files bring the library copies their instances use.
-    if cmd.starts_with("library.") || cmd == "file.import" || cmd.starts_with("edit.paste") {
+    // Filling in missing images also fills the library copies a paste brought along.
+    if cmd.starts_with("library.") || cmd == "file.import" || cmd.starts_with("edit.paste") || cmd == "image.relinkMissing" {
         return Ok(());
     }
     if !variables_unchanged(before, after) {

@@ -97,7 +97,10 @@ No alpha blockers: the alpha gate in [`roadmap.md`](roadmap.md#alpha-gate) passe
   `.fig` data names by key, lost their binding and showed light-mode values in dark-mode frames
   (also in `.fig` files). Wrapped rows that a float rounding overshoot made wrap early (three
   posts per row came out as two) no longer do. Checked on that clipboard's design data offline;
-  a fresh paste with images in the app is still to do. The export was checked in other software
+  then (2026-10-18) the same paste in the app: the layers now paste at once and their linked
+  images fill in as they download (all of them loaded); before, the paste waited for every
+  image and was cancelled by any change meanwhile, or pasted without images.
+  The export was checked in other software
   on our example documents and small test files only.
 - **Evidence:** fixtures generated in code (`crates/format/src/fig/tests.rs` and `tail_tests.rs`: kiwi
   round trips, every mapped feature, vector network blobs, truncation, bit flips and junk never panic); `crates/engine/src/fig_import_tests.rs`.

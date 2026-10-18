@@ -38,7 +38,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "edit.pasteFigma",
             "Paste Figma layers",
-            "{html, images?: {hash: base64}, imageFailures?: {hash: reason}, parent?, x?, y?} → {ids, warnings, missingImages: [{hash, reason}], summary}",
+            "{html, images?: {hash: base64}, imageFailures?: {hash: reason}, imagesPending? (the images arrive later through image.relinkMissing: no missing-image note), parent?, x?, y?} → {ids, warnings, missingImages: [{hash, reason}], summary}",
             true,
             paste_figma::run
         ),

@@ -78,6 +78,8 @@ pub(super) fn run(s: &mut Session, p: &Value) -> Result<Value> {
     // Only the images the pasted layers show (the mains brought along may hold others).
     missing.retain(|h| used.contains(h));
     let loaded = used.len().saturating_sub(missing.len());
+    // The platform downloads the images after the paste and fills them in (`image.relinkMissing`).
+    let pending = p.get("imagesPending").and_then(Value::as_bool).unwrap_or(false);
     let missing_list: Vec<Value> = missing
         .iter()
         .take(MAX_LISTED)
@@ -85,7 +87,7 @@ pub(super) fn run(s: &mut Session, p: &Value) -> Result<Value> {
         .collect();
     // The headline goes first: how much of the copy came across.
     let mut notes = Vec::new();
-    if !missing.is_empty() {
+    if !missing.is_empty() && !pending {
         let mut why: BTreeMap<&str, usize> = BTreeMap::new();
         for h in &missing {
             *why.entry(failures.get(h).map_or("not on the clipboard", String::as_str)).or_default() += 1;

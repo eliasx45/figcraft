@@ -38,8 +38,13 @@ image resolver the file importer uses. Image data is embedded when the design is
   instances that use them, which stay instances; colours bound to library variables keep their
   binding (referenced by the variable's key) and the frame's variable mode, so a dark-mode
   frame pastes dark.
-- Switching designs/pages/selections or editing while images load cancels that pending paste.
-  Each window keeps its own pending operation. A second paste waits until the current one ends.
+- The layers paste at once, each image as a missing-image placeholder under its own hash; the
+  images download in the background and fill those placeholders in when they arrive (`image.relinkMissing
+  {images}`, its own undo step), then a toast says so, or the import report lists what didn't
+  load and why. Editing, switching pages or tabs meanwhile is fine: the images wait for their
+  document to be in front again, and are dropped if it closes. (Until 2026-10-18 the paste waited
+  for every image and was cancelled when anything changed in the meantime, so a page of 376
+  images, a minute or more of downloads, often never pasted.)
 - Fidelity is the existing best-effort `.fig` import's fidelity, not a separate guarantee.
   Outlined text remains editable vector geometry. Components without their main in the imported
   selection become editable frames with a warning; prototype destinations outside the copy are

@@ -37,7 +37,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "image.relinkMissing",
             "Relink missing images",
-            "{path? (a .fig file, or a folder of image files named by their hash or matching it), data? (base64 of a .fig file)} → {relinked, missing}  fills in images a paste or an import couldn't load (shown as missing-image placeholders); the others stay as they are",
+            "{path? (a .fig file, or a folder of image files named by their hash or matching it), data? (base64 of a .fig file), images? ({hash: base64 image bytes})} → {relinked, missing}  fills in images a paste or an import couldn't load (shown as missing-image placeholders); the others stay as they are",
             true,
             relink_missing
         ),
@@ -190,12 +190,25 @@ const MAX_RELINK_FILES: usize = 5_000;
 fn relink_sources(p: &Value, missing: &[String]) -> Result<std::collections::BTreeMap<String, Vec<u8>>> {
     const CMD: &str = "image.relinkMissing";
     let fig = |bytes: &[u8]| figcraft_format::fig::archive_images(bytes, missing.iter().map(String::as_str)).map_err(|e| bad(CMD, e.to_string()));
+    // Image bytes by hash, as a paste's downloads deliver them.
+    if let Some(images) = p.get("images").and_then(Value::as_object) {
+        use base64::Engine as _;
+        let mut found = std::collections::BTreeMap::new();
+        for (hash, b64) in images.iter().take(figcraft_format::fig::clipboard::MAX_IMAGES) {
+            let Some(h) = missing.iter().find(|m| m.eq_ignore_ascii_case(hash)) else { continue };
+            let bytes = b64.as_str().and_then(|b| base64::engine::general_purpose::STANDARD.decode(b).ok());
+            if let Some(bytes) = bytes {
+                found.insert(h.clone(), bytes);
+            }
+        }
+        return Ok(found);
+    }
     if let Some(data) = string(p, "data") {
         use base64::Engine as _;
         let bytes = base64::engine::general_purpose::STANDARD.decode(data.trim()).map_err(|_| bad(CMD, "`data` is not base64"))?;
         return fig(&bytes);
     }
-    let path = string(p, "path").ok_or_else(|| bad(CMD, "pass `path` (a .fig file or a folder) or `data`"))?;
+    let path = string(p, "path").ok_or_else(|| bad(CMD, "pass `path` (a .fig file or a folder), `data` or `images`"))?;
     if !crate::file_access::is_dir(&path) {
         return fig(&crate::file_access::read_capped(&path, MAX_RELINK_FILE)?);
     }
