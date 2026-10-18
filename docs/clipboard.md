@@ -20,9 +20,12 @@ image resolver the file importer uses. Image data is embedded when the design is
 
 - Only HTTPS image URLs on `s3-alpha-sig.figma.com` and `s3-alpha.figma.com`, with the matching
   `/img/` hash path, are fetched. Redirects are not followed. No Figma credentials are used.
-- Limits: 64 MiB of HTML, 1 MiB of metadata, 256 images and 512 MiB of downloaded image bytes
-  in total (64 MiB for one image). Six images download at a time; each request times out after
-  30 seconds and no new request starts after two minutes. (Until 2026-10-18 images came one at a
+- Limits: 256 MiB of HTML, 16 MiB of metadata, 4,096 images (links past that are left out and
+  counted, never the whole copy) and 1 GiB of downloaded image bytes in total (64 MiB for one
+  image). Eight images download at a time; each request times out after 30 seconds and no new
+  request starts after five minutes. (A storyboard page of about 40 frames named 376 images; at
+  the old cap of 256 the whole copy was refused and fell back to the plain design-layer paste,
+  which loads no images.) (Until 2026-10-18 images came one at a
   time within 30 seconds and 64 MiB, so a page of photos pasted mostly as grey boxes.)
   The shared `.fig` decoder also enforces its decompression, nesting and node limits.
 - Missing, expired or unavailable images keep their own hash and show a hatched missing-image
@@ -31,6 +34,10 @@ image resolver the file importer uses. Image data is embedded when the design is
   fills them in from a `.fig` copy of the source file or from a folder of the images (files named
   by their hash, or whose bytes' SHA-1 is the hash). Copy again in Figma to refresh expired links. Invalid clipboard data produces an error, never an
   accidental paste of an older internal selection.
+- Main components the copy carries on its hidden page (library copies) come along with the
+  instances that use them, which stay instances; colours bound to library variables keep their
+  binding (referenced by the variable's key) and the frame's variable mode, so a dark-mode
+  frame pastes dark.
 - Switching designs/pages/selections or editing while images load cancels that pending paste.
   Each window keeps its own pending operation. A second paste waits until the current one ends.
 - Fidelity is the existing best-effort `.fig` import's fidelity, not a separate guarantee.

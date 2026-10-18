@@ -7,14 +7,14 @@ use std::time::{Duration, Instant};
 
 use figcraft_ui_egui::clipboard::Fetched;
 
-/// All images of one paste together. A storyboard of phone screenshots easily passes 100 MB.
-const MAX_BYTES: u64 = 512 * 1024 * 1024;
+/// All images of one paste together. A storyboard page of phone screenshots named 376 images.
+const MAX_BYTES: u64 = 1024 * 1024 * 1024;
 /// One image (the `.fig` import's own cap).
 const MAX_IMAGE: u64 = 64 * 1024 * 1024;
 /// Downloads at a time: a page of photos one after another took longer than any sane wait.
-const WORKERS: usize = 6;
+const WORKERS: usize = 8;
 const PER_IMAGE: Duration = Duration::from_secs(30);
-const OVERALL: Duration = Duration::from_secs(120);
+const OVERALL: Duration = Duration::from_secs(300);
 
 fn allowed(raw: &str, hash: &str) -> bool {
     let Ok(url) = url::Url::parse(raw) else { return false };
@@ -38,7 +38,7 @@ fn get(agent: &ureq::Agent, url: &str, budget: &AtomicU64) -> Result<Vec<u8>, St
     })?;
     let left = budget.load(Ordering::Relaxed);
     if left == 0 {
-        return Err("over the 512 MB limit for one paste".into());
+        return Err("over the 1 GB limit for one paste".into());
     }
     let bytes = response.body_mut().with_config().limit(left.min(MAX_IMAGE)).read_to_vec().map_err(|e| match e {
         ureq::Error::BodyExceedsLimit(_) => "too large".to_string(),
@@ -46,7 +46,7 @@ fn get(agent: &ureq::Agent, url: &str, budget: &AtomicU64) -> Result<Vec<u8>, St
         _ => "the download broke off".into(),
     })?;
     let len = bytes.len() as u64;
-    budget.try_update(Ordering::Relaxed, Ordering::Relaxed, |b| b.checked_sub(len)).map_err(|_| "over the 512 MB limit for one paste".to_string())?;
+    budget.try_update(Ordering::Relaxed, Ordering::Relaxed, |b| b.checked_sub(len)).map_err(|_| "over the 1 GB limit for one paste".to_string())?;
     Ok(bytes)
 }
 
@@ -60,7 +60,7 @@ pub fn fetch(images: BTreeMap<String, String>) -> Option<Receiver<Fetched>> {
             let budget = Arc::new(AtomicU64::new(MAX_BYTES));
             let out = Arc::new(Mutex::new(Fetched::default()));
             let mut queue = VecDeque::new();
-            for (hash, url) in images.into_iter().take(256) {
+            for (hash, url) in images.into_iter().take(figcraft_format::fig::clipboard::MAX_IMAGES) {
                 if allowed(&url, &hash) {
                     queue.push_back((hash, url));
                 } else if let Ok(mut o) = out.lock() {
@@ -76,7 +76,7 @@ pub fn fetch(images: BTreeMap<String, String>) -> Option<Receiver<Fetched>> {
                         .spawn(move || {
                             while let Some((hash, url)) = queue.lock().ok().and_then(|mut q| q.pop_front()) {
                                 let result = if started.elapsed() >= OVERALL {
-                                    Err("not started within two minutes".into())
+                                    Err("not started within five minutes".into())
                                 } else {
                                     get(&agent, &url, &budget)
                                 };

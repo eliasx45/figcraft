@@ -34,6 +34,7 @@ const MAX_ASSET_PART: usize = 256;
 /// vector networks its layers name by `vectorNetworkRef` (for [`crate::rest::import_with_networks`]).
 pub(super) fn to_rest(msg: &Kv, name: &str, max_nodes: usize) -> (Value, Vec<String>, Vec<Option<VectorNetwork>>) {
     let mut m = Mapper::new(msg, max_nodes);
+    let _assets = AssetScope::set(Rc::clone(&m.assets));
     let doc = m.document();
     // Large values are moved in, never passed through `json!`, which serialises its arguments:
     // a deep copy of the whole tree, briefly holding it twice.
@@ -117,8 +118,45 @@ fn normalize_override_segment(path: &mut [String], index: usize, scope: &Overrid
 mod connector_snapshot_budget_tests;
 
 /// A `GUID`-holding reference (`StyleId`, `VariableID`, …): its `guid`.
+/// The node a reference names: its `guid`, else the node of the asset `key` and `version` it
+/// names (library variables and styles are referenced as assets; the file carries their copies
+/// under the same key). See [`Mapper::resource_id`].
 fn ref_guid(v: &Kv) -> Option<String> {
-    v.get("guid").and_then(guid).filter(|g| g != NO_STYLE)
+    v.get("guid").and_then(guid).filter(|g| g != NO_STYLE).or_else(|| ASSETS.with(|a| asset_node(a.borrow().as_deref()?, v)))
+}
+
+/// The asset index of the file being mapped (asset key → version → node id), for the free
+/// functions that resolve references; set for the length of [`to_rest`].
+type Assets = BTreeMap<String, BTreeMap<String, String>>;
+thread_local! {
+    static ASSETS: std::cell::RefCell<Option<Rc<Assets>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Clears [`ASSETS`] when the mapping ends, however it ends.
+struct AssetScope;
+impl AssetScope {
+    fn set(assets: Rc<Assets>) -> Self {
+        ASSETS.with(|a| *a.borrow_mut() = Some(assets));
+        AssetScope
+    }
+}
+impl Drop for AssetScope {
+    fn drop(&mut self) {
+        ASSETS.with(|a| *a.borrow_mut() = None);
+    }
+}
+
+/// The node of the asset reference `v` names (`assetRef {key, version}`) in `assets`.
+fn asset_node(assets: &Assets, v: &Kv) -> Option<String> {
+    let asset = v.get("assetRef")?;
+    let versions = assets.get(asset.get("key").and_then(Kv::str)?)?;
+    match asset.get("version").and_then(Kv::str) {
+        // A version the file doesn't carry still names the file's only copy of that asset.
+        Some(ver) => versions.get(ver).or_else(|| (versions.len() == 1).then(|| versions.values().next()).flatten()),
+        // Without a version: an unversioned record, else the file's only one.
+        None => versions.get("").or_else(|| (versions.len() == 1).then(|| versions.values().next()).flatten()),
+    }
+    .cloned()
 }
 
 /// The style a layer links in `key`, or in the older `legacy` field when `key` names none. An
@@ -373,7 +411,7 @@ struct Mapper<'a> {
     /// File nodes by asset `key` and `version`: references can name a collection, variable or
     /// style as the asset instead of the guid, and the file carries the resources to resolve
     /// them (the collection node itself says the same `key`).
-    assets: BTreeMap<String, BTreeMap<String, String>>,
+    assets: Rc<Assets>,
     styles: Obj,
     /// Descriptions of components and component sets (REST `components` / `componentSets`).
     components: Obj,
@@ -452,7 +490,7 @@ impl<'a> Mapper<'a> {
             kids,
             blobs,
             prop_defs,
-            assets,
+            assets: Rc::new(assets),
             styles: Obj::new(),
             components: Obj::new(),
             sets: Obj::new(),
@@ -477,16 +515,7 @@ impl<'a> Mapper<'a> {
         if let Some(g) = v.get("guid").and_then(guid).filter(|g| *g != NO_STYLE) {
             return Some(g);
         }
-        let asset = v.get("assetRef")?;
-        let key = asset.get("key").and_then(Kv::str)?;
-        let versions = self.assets.get(key)?;
-        let version = asset.get("version").and_then(Kv::str);
-        match version {
-            Some(v) => versions.get(v),
-            // Without a version: an unversioned record, else the file's only one.
-            None => versions.get("").or_else(|| (versions.len() == 1).then(|| versions.values().next()).flatten()),
-        }
-        .cloned()
+        asset_node(&self.assets, v)
     }
 
     fn warn(&mut self, w: impl Into<String>) {

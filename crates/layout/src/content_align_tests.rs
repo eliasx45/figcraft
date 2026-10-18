@@ -192,3 +192,22 @@ fn non_finite_and_tiny_frames_place_finitely() {
         assert!(got.iter().all(|r| r.0.is_finite() && r.1.is_finite()), "{w} × {h}, gap {gap}: {got:?}");
     }
 }
+
+/// Three posts and two gaps that fill a row exactly, written as 32-bit floats, overshoot it by
+/// 0.0001 px: they stay on one line (a real three-column post grid wrapped after two).
+#[test]
+fn a_row_filled_up_to_float_rounding_does_not_wrap() {
+    let mut d = Document::new("t");
+    let page = d.first_page().unwrap();
+    let f = d.create(page, NodeKind::Frame, "My Post", 0.0, 0.0, 1773.3846435546875, 800.0).unwrap();
+    d.get_mut(f).unwrap().layout =
+        Some(AutoLayout { mode: LayoutMode::Horizontal, wrap: true, gap: 4.729025840759277, padding: [0.0; 4], ..AutoLayout::default() });
+    let kids: Vec<NodeId> = [586.3992309570312, 591.1282348632812, 586.3992309570312, 586.3992309570312]
+        .iter()
+        .map(|w| d.create(f, NodeKind::Rectangle, "Post", 0.0, 0.0, *w, 785.0).unwrap())
+        .collect();
+    layout_frame(&mut d, f, &NoMeasure);
+    let y = |k: &NodeId| d.node(*k).unwrap().transform.as_coeffs()[5];
+    assert_eq!([y(&kids[0]), y(&kids[1]), y(&kids[2])], [0.0; 3], "the first three share a row");
+    assert!(y(&kids[3]) > 700.0, "the fourth wraps");
+}

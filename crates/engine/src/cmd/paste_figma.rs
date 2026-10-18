@@ -11,7 +11,7 @@ use crate::{EngineError, Result, Session, bad};
 
 const CMD: &str = "edit.pasteFigma";
 /// All images of one paste (the platform's download cap); images past it are left out, not refused.
-const MAX_IMAGE_BYTES: usize = 512 * 1024 * 1024;
+const MAX_IMAGE_BYTES: usize = 1024 * 1024 * 1024;
 /// Missing images listed by hash in the result.
 const MAX_LISTED: usize = 200;
 
@@ -26,7 +26,7 @@ pub(super) fn run(s: &mut Session, p: &Value) -> Result<Value> {
     let mut budget = MAX_IMAGE_BYTES;
     let mut over_budget = 0usize;
     if let Some(entries) = p.get("images").and_then(Value::as_object) {
-        if entries.len() > 256 {
+        if entries.len() > figcraft_format::fig::clipboard::MAX_IMAGES {
             return Err(bad(CMD, "too many images"));
         }
         for (hash, value) in entries {
@@ -52,7 +52,7 @@ pub(super) fn run(s: &mut Session, p: &Value) -> Result<Value> {
         .and_then(Value::as_object)
         .into_iter()
         .flatten()
-        .take(256)
+        .take(figcraft_format::fig::clipboard::MAX_IMAGES)
         .filter_map(|(h, why)| Some((h.chars().take(64).collect(), why.as_str()?.chars().take(200).collect())))
         .collect();
     let (mut other, mut warnings) = figcraft_format::fig::import_with_images(&contents.canvas, "Pasted Figma layers", &|h| {
@@ -75,6 +75,8 @@ pub(super) fn run(s: &mut Session, p: &Value) -> Result<Value> {
     s.set_selection(ids.clone());
     let layers: usize = ids.iter().map(|id| s.doc().map_or(0, |d| d.subtree(*id).len())).sum();
     let used = image_keys(s.doc()?, &ids);
+    // Only the images the pasted layers show (the mains brought along may hold others).
+    missing.retain(|h| used.contains(h));
     let loaded = used.len().saturating_sub(missing.len());
     let missing_list: Vec<Value> = missing
         .iter()
@@ -96,8 +98,15 @@ pub(super) fn run(s: &mut Session, p: &Value) -> Result<Value> {
             why.join(", ")
         ));
     }
+    if contents.dropped > 0 {
+        notes.push(format!(
+            "{} image links on the clipboard were left out (more than {} images, or not readable)",
+            contents.dropped,
+            figcraft_format::fig::clipboard::MAX_IMAGES
+        ));
+    }
     if over_budget > 0 {
-        notes.push(format!("{over_budget} images were left out: the copy's images pass 512 MB"));
+        notes.push(format!("{over_budget} images were left out: the copy's images pass 1 GB"));
     }
     // The headline already covers the importer's own note about missing images.
     if !missing.is_empty() {
@@ -120,14 +129,8 @@ pub(super) fn run(s: &mut Session, p: &Value) -> Result<Value> {
 /// Image keys the paints of `roots` and their layers use.
 fn image_keys(doc: &Document, roots: &[NodeId]) -> BTreeSet<String> {
     let mut keys = BTreeSet::new();
-    for id in roots.iter().flat_map(|r| doc.subtree(*r)) {
-        if let Some(n) = doc.node(id) {
-            for paint in n.fills.iter().chain(&n.strokes) {
-                if let figcraft_color::PaintKind::Image(image) = &paint.kind {
-                    keys.insert(image.image.clone());
-                }
-            }
-        }
+    for n in roots.iter().flat_map(|r| doc.subtree(*r)).filter_map(|id| doc.node(id)) {
+        figcraft_doc::node_images(n, &mut keys);
     }
     keys
 }
@@ -170,6 +173,20 @@ fn image_paints(paints: &mut [figcraft_color::Paint], images: &BTreeMap<String, 
             image.image = id.clone();
         }
     }
+}
+
+/// Point `n` at the pasted copies of the copy's styles, variables and images.
+fn resource_refs(n: &mut Node, prefix: &str, images: &BTreeMap<String, String>) {
+    image_paints(&mut n.fills, images);
+    image_paints(&mut n.strokes, images);
+    for r in [&mut n.styles.fill, &mut n.styles.stroke, &mut n.styles.text, &mut n.styles.grid, &mut n.styles.effect] {
+        *r = r.take().map(|id| format!("{prefix}{id}"));
+    }
+    if let NodeKind::Text(text) = &mut n.kind {
+        text.map_text_styles(|id| Some(format!("{prefix}{id}")));
+    }
+    bindings(&mut n.bound, prefix);
+    n.var_modes = std::mem::take(&mut n.var_modes).into_iter().map(|(c, m)| (format!("{prefix}{c}"), m)).collect();
 }
 
 fn insert(
@@ -237,6 +254,16 @@ fn insert(
             map.entry(id).or_insert_with(|| doc.alloc_id());
         }
     }
+    // The copy's library copies (the mains its instances use, on the copy's hidden page) refer to
+    // its styles, variables and images like the layers do.
+    if let Some(store) = src.library_store() {
+        for id in src.subtree(store) {
+            if let Ok(n) = src.get_mut(id) {
+                resource_refs(n, &prefix, &images);
+            }
+        }
+    }
+    let mut library_instances = BTreeSet::new();
     let page = doc.page_of(parent).unwrap_or(parent);
     let mut result = Vec::new();
     for root in roots {
@@ -245,17 +272,12 @@ fn insert(
         let into = if section && !doc.takes_sections(parent) { page } else { parent };
         for n in &mut nodes {
             n.source = n.source.and_then(|id| map.get(&id).copied());
-            image_paints(&mut n.fills, &images);
-            image_paints(&mut n.strokes, &images);
-            for r in [&mut n.styles.fill, &mut n.styles.stroke, &mut n.styles.text, &mut n.styles.grid, &mut n.styles.effect] {
-                *r = r.take().map(|id| format!("{prefix}{id}"));
-            }
-            if let NodeKind::Text(text) = &mut n.kind {
-                text.map_text_styles(|id| Some(format!("{prefix}{id}")));
-            }
-            bindings(&mut n.bound, &prefix);
-            n.var_modes = std::mem::take(&mut n.var_modes).into_iter().map(|(c, m)| (format!("{prefix}{c}"), m)).collect();
+            resource_refs(n, &prefix, &images);
             match &mut n.kind {
+                // A main the copy carries as a library copy comes along after the layers.
+                NodeKind::Instance { component, .. } if !map.contains_key(component) && src.is_remote(*component) => {
+                    library_instances.insert(n.id);
+                }
                 NodeKind::Instance { component, .. } if !map.contains_key(component) => {
                     n.kind = NodeKind::Frame;
                     warn(warnings, format!("{}: main component not copied; kept as an editable frame", n.name));
@@ -333,6 +355,10 @@ fn insert(
             n.transform = doc.world_transform(into).inverse() * shift * src.world_transform(*root);
         }
         result.push(doc.paste_nodes(&nodes, &map, *root, into, None)?);
+    }
+    if !library_instances.is_empty() {
+        let adopt: BTreeMap<NodeId, NodeId> = map.iter().filter(|(theirs, _)| library_instances.contains(*theirs)).map(|(a, b)| (*a, *b)).collect();
+        crate::library::adopt_pasted(doc, src, None, &adopt)?;
     }
     Ok(result)
 }

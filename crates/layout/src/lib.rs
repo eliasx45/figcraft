@@ -92,6 +92,9 @@ fn outer_size(doc: &Document, id: NodeId) -> (f64, f64) {
     (b.width(), b.height())
 }
 
+/// How far a wrapped line may overshoot before its next item starts a new line (px).
+const WRAP_TOLERANCE: f64 = 0.01;
+
 fn linear(a: Affine) -> Affine {
     let c = a.as_coeffs();
     Affine::new([c[0], c[1], c[2], c[3], 0.0, 0.0])
@@ -412,7 +415,9 @@ pub fn layout_frame(doc: &mut Document, frame: NodeId, m: &dyn Measure) {
         for (i, it) in items.iter().enumerate() {
             let sz = if it.fill_main { it.min_main.unwrap_or(0.0) } else { it.main };
             let add = if cur.is_empty() { sz } else { gap.max(0.0) + sz };
-            if !cur.is_empty() && used + add > inner_main_fixed + 1e-6 {
+            // Sizes saved as 32-bit floats add up a hair past a width they exactly fill (three
+            // 586.4 px posts and two gaps in a 1773.38 px row overshoot by 0.0001 px).
+            if !cur.is_empty() && used + add > inner_main_fixed + WRAP_TOLERANCE {
                 lines.push(std::mem::take(&mut cur));
                 used = sz;
             } else {

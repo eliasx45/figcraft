@@ -7,12 +7,18 @@ use base64::Engine as _;
 
 use crate::FormatError;
 
-pub const MAX_HTML: usize = 64 * 1024 * 1024;
-const MAX_METADATA: usize = 1024 * 1024;
+/// The design data in the HTML (the plain design-layer paste reads up to the same).
+pub const MAX_HTML: usize = 256 * 1024 * 1024;
+const MAX_METADATA: usize = 16 * 1024 * 1024;
+/// Images a copy may name. A storyboard page of about 40 frames named 376; past this they are left
+/// out (counted in [`Contents::dropped`]), never the whole copy.
+pub const MAX_IMAGES: usize = 4096;
 
 pub struct Contents {
     pub canvas: Vec<u8>,
     pub images: BTreeMap<String, String>,
+    /// Image links left out: past [`MAX_IMAGES`], or not a hash and an address.
+    pub dropped: usize,
 }
 
 pub fn recognizes(html: &str) -> bool {
@@ -30,30 +36,31 @@ fn section(html: &str, start: &str, end: &str, limit: usize) -> Result<Option<Ve
 
 pub fn decode(html: &str) -> Result<Contents, FormatError> {
     if html.len() > MAX_HTML {
-        return Err(super::corrupt("clipboard exceeds 64 MiB"));
+        return Err(super::corrupt("clipboard exceeds 256 MiB"));
     }
     let canvas = section(html, "<!--(figma)", "(/figma)-->", MAX_HTML)?.ok_or_else(|| super::corrupt("no Figma clipboard data"))?;
     if !canvas.starts_with(b"fig-kiwi") {
         return Err(super::corrupt("unsupported Figma clipboard format"));
     }
     let mut images = BTreeMap::new();
+    let mut dropped = 0;
     if let Some(meta) = section(html, "<!--(figmeta)", "(/figmeta)-->", MAX_METADATA)? {
         let meta: serde_json::Value = serde_json::from_slice(&meta).map_err(|_| super::corrupt("invalid clipboard metadata"))?;
         if let Some(entries) = meta.get("imageHashes").and_then(serde_json::Value::as_object) {
-            if entries.len() > 256 {
-                return Err(super::corrupt("clipboard has more than 256 images"));
-            }
             for (hash, url) in entries {
-                if hash.len() == 40
+                if images.len() < MAX_IMAGES
+                    && hash.len() == 40
                     && hash.bytes().all(|b| b.is_ascii_hexdigit())
                     && let Some(url) = url.as_str().filter(|u| u.len() <= 16_384)
                 {
-                    images.insert(hash.clone(), url.to_string());
+                    images.insert(hash.to_ascii_lowercase(), url.to_string());
+                } else {
+                    dropped += 1;
                 }
             }
         }
     }
-    Ok(Contents { canvas, images })
+    Ok(Contents { canvas, images, dropped })
 }
 
 #[cfg(test)]
