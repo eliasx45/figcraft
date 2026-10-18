@@ -315,6 +315,9 @@ struct PendingDialog {
 }
 
 /// Wakes the main window, which hands the result on to the window it belongs to.
+/// How often a frame looks at a native file dialog that is still open (see [`FigApp::poll_dialog`]).
+const DIALOG_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
 struct RepaintWaker(egui::Context);
 impl Wake for RepaintWaker {
     fn wake(self: Arc<Self>) {
@@ -1192,7 +1195,13 @@ impl FigApp {
         let Some(d) = &mut self.pending_dialog else { return };
         if d.path.is_none() {
             let waker = Waker::from(Arc::new(RepaintWaker(ctx.clone())));
-            let Poll::Ready(path) = d.future.as_mut().poll(&mut TaskContext::from_waker(&waker)) else { return };
+            let Poll::Ready(path) = d.future.as_mut().poll(&mut TaskContext::from_waker(&waker)) else {
+                // Look again soon as well: on macOS the wake from a save or open panel that closes
+                // can be lost (it arrives while the panel's modal run loop ends), and the file
+                // then only saved or opened on the next key press or pointer move.
+                ctx.request_repaint_after(DIALOG_POLL);
+                return;
+            };
             d.path = path;
         }
         let (doc, origin, picked) = (d.doc, d.window, d.path.is_some());

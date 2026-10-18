@@ -135,3 +135,29 @@ fn the_texture_budget_holds() {
     assert!(cache.have(TileKey { level: 0, x: budget() as i64 + 39, y: 0 }).is_some());
     assert!(cache.have(TileKey { level: 0, x: 0, y: 0 }).is_none());
 }
+
+#[test]
+fn tiles_a_canvas_render_interrupts_are_painted_later_not_lost() {
+    let (s, _) = session();
+    let ds = s.ds().unwrap();
+    let mut cache = TileCache::default();
+    cache.sync(ds.uid, ds.page, &opts(), &ds.doc);
+    let batch = cache.plan(Rect::new(0.0, 0.0, 1200.0, 800.0), 2.0).expect("tiles to paint");
+    let all = batch.keys.clone();
+    let mut renders = crate::render_worker::Renders::default();
+    let mut painting: crate::render_worker::Painting = Some((batch, 0));
+    // A canvas render is waiting: nothing painted, every tile still queued.
+    let done = crate::render_worker::paint_next(&mut renders, &mut painting, &|| true).unwrap();
+    assert!(done.is_empty());
+    let (b, at) = painting.as_ref().unwrap();
+    assert_eq!((b.keys.len(), *at), (all.len(), 0));
+    // Then the rest of the batch, every tile once.
+    let mut got = Vec::new();
+    while let Some(done) = crate::render_worker::paint_next(&mut renders, &mut painting, &|| false) {
+        got.extend(done.into_iter().map(|d| d.key));
+    }
+    got.sort();
+    let mut want = all;
+    want.sort();
+    assert_eq!(got, want);
+}

@@ -327,8 +327,17 @@ pub enum Painted {
 
 /// Paints tiles. [`CpuTilePainter`] today; a GPU painter later, behind the same calls.
 pub trait TilePainter: Send {
-    /// Paint `tiles` of `page`; `None` for a tile that couldn't be painted.
-    fn paint(&mut self, doc: &Document, page: NodeId, tiles: &[TileKey], opts: &Options) -> Vec<(TileKey, Option<Painted>)>;
+    /// Paint `tiles` of `page`; `None` for a tile that couldn't be painted. Once `stop` says so
+    /// (a canvas render is waiting), tiles not started yet are left out of the result: the caller
+    /// paints them later.
+    fn paint(
+        &mut self,
+        doc: &Document,
+        page: NodeId,
+        tiles: &[TileKey],
+        opts: &Options,
+        stop: &(dyn Fn() -> bool + Sync),
+    ) -> Vec<(TileKey, Option<Painted>)>;
 }
 
 /// The CPU painter: tiny-skia, tiles in parallel on desktop.
@@ -336,24 +345,34 @@ pub trait TilePainter: Send {
 pub struct CpuTilePainter;
 
 impl TilePainter for CpuTilePainter {
-    fn paint(&mut self, doc: &Document, page: NodeId, tiles: &[TileKey], opts: &Options) -> Vec<(TileKey, Option<Painted>)> {
+    fn paint(
+        &mut self,
+        doc: &Document,
+        page: NodeId,
+        tiles: &[TileKey],
+        opts: &Options,
+        stop: &(dyn Fn() -> bool + Sync),
+    ) -> Vec<(TileKey, Option<Painted>)> {
         let content = content_bounds(doc, page);
-        let one = |k: &TileKey| -> (TileKey, Option<Painted>) {
+        let one = |k: &TileKey| -> Option<(TileKey, Option<Painted>)> {
+            if stop() {
+                return None;
+            }
             // A tile off everything on the page is only background.
             let off = content.is_none_or(|c| !overlaps(&c.inflate(2.0 / k.scale(), 2.0 / k.scale()), &k.rect()));
             if off && opts.solo.is_none() {
-                return (*k, Some(Painted::Empty));
+                return Some((*k, Some(Painted::Empty)));
             }
-            (*k, render_tile(doc, page, k, opts))
+            Some((*k, render_tile(doc, page, k, opts)))
         };
         #[cfg(not(target_arch = "wasm32"))]
         {
             use rayon::prelude::*;
-            tiles.par_iter().map(one).collect()
+            tiles.par_iter().filter_map(one).collect()
         }
         #[cfg(target_arch = "wasm32")]
         {
-            tiles.iter().map(one).collect()
+            tiles.iter().filter_map(one).collect()
         }
     }
 }

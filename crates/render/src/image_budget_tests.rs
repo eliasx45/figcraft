@@ -8,6 +8,9 @@ use figcraft_color::ColorProfile;
 use tiny_skia::Pixmap;
 
 use super::*;
+use crate::images::{cache, forget, get, get_level, halve, level_for};
+use figcraft_color::ImageFilters;
+use figcraft_doc::ImageData;
 
 fn png(w: u32, h: u32) -> Vec<u8> {
     let img = image::RgbaImage::from_pixel(w, h, image::Rgba([200, 40, 40, 255]));
@@ -122,4 +125,39 @@ fn filter_and_profile_variants_count_against_one_budget() {
             assert!(c.bytes() <= 1000, "{} bytes held", c.bytes());
         }
     }
+}
+
+#[test]
+fn halving_averages_two_by_two_pixels_and_keeps_odd_edges() {
+    let mut pm = Pixmap::new(3, 2).unwrap();
+    for (i, px) in pm.data_mut().chunks_exact_mut(4).enumerate() {
+        px.copy_from_slice(&if i % 3 == 0 { [255, 255, 255, 255] } else { [0, 0, 0, 255] });
+    }
+    let half = halve(&pm).unwrap();
+    assert_eq!((half.width(), half.height()), (2, 1));
+    assert_eq!(&half.data()[..4], &[128, 128, 128, 255]);
+    assert_eq!(&half.data()[4..], &[0, 0, 0, 255], "the odd column averages with itself");
+}
+
+#[test]
+fn zoomed_out_photos_use_a_copy_their_size_on_screen() {
+    let id = tiny_skia::Transform::identity();
+    assert_eq!(level_for(4096, 4096, &id, 1.0), 0, "1:1 is the image itself");
+    assert_eq!(level_for(4096, 4096, &id, 0.1), 3, "a tenth: an eighth-size copy, still sharper than the screen");
+    assert_eq!(level_for(4096, 4096, &tiny_skia::Transform::from_scale(0.25, 0.25), 0.5), 3);
+    assert_eq!(level_for(4096, 4096, &id, 1e-9), 8, "at most 1/256");
+    assert_eq!(level_for(16, 16, &id, 0.01), 2, "never below 4 pixels a side");
+    assert_eq!(level_for(0, 0, &id, 0.1), 0);
+    assert_eq!(level_for(4096, 4096, &id, f64::NAN), 0);
+
+    let data = ImageData { bytes: Arc::new(png(64, 32)), width: 64, height: 32 };
+    let small = get_level("level-test", Some(&data), &ImageFilters::default(), ColorProfile::Srgb, 2).unwrap();
+    assert_eq!((small.width(), small.height()), (16, 8));
+    assert_eq!(&small.data()[..4], &get("level-test", Some(&data), &ImageFilters::default(), ColorProfile::Srgb).unwrap().data()[..4]);
+    forget("level-test");
+    let key = |k: &str| (k.to_string(), [0; 7], ColorProfile::Srgb);
+    assert!(
+        cache().lock().unwrap().get(&key("level-test")).is_none() && cache().lock().unwrap().get(&key("level-test#2")).is_none(),
+        "forget drops every level"
+    );
 }

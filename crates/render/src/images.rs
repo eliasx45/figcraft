@@ -24,7 +24,7 @@ const MAX_DECODED_BYTES: u64 = 512 << 20;
 /// alone).
 const MAX_CACHED_BYTES: u64 = 512 << 20;
 /// The most entries each decoded-image cache holds.
-const MAX_CACHED_IMAGES: usize = 256;
+const MAX_CACHED_IMAGES: usize = 1024;
 
 /// Decoded pixmaps by image, filters and profile, holding at most a byte budget of pixels: adding
 /// one past the budget (or past [`MAX_CACHED_IMAGES`]) drops the least recently used first, so
@@ -73,7 +73,7 @@ impl PixmapCache {
     }
 }
 
-fn cache() -> &'static Mutex<PixmapCache> {
+pub(crate) fn cache() -> &'static Mutex<PixmapCache> {
     static C: OnceLock<Mutex<PixmapCache>> = OnceLock::new();
     C.get_or_init(|| Mutex::new(PixmapCache::default()))
 }
@@ -82,10 +82,21 @@ fn cache() -> &'static Mutex<PixmapCache> {
 /// a key's bytes are replaced in place (a missing-image placeholder relinked under its own hash).
 pub fn forget(key: &str) {
     let mut c = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let stale: Vec<Key> = c.map.keys().filter(|k| k.0 == key).cloned().collect();
+    let levels = format!("{key}#");
+    let of_key = |k: &Key| k.0 == key || k.0.starts_with(&levels);
+    let stale: Vec<Key> = c.map.keys().filter(|k| of_key(k)).cloned().collect();
     for k in stale {
         c.remove(&k);
     }
+    drop(c);
+    let mut c = padded_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let stale: Vec<Key> = c.map.keys().filter(|k| of_key(k)).cloned().collect();
+    for k in stale {
+        c.remove(&k);
+    }
+    drop(c);
+    anim_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner).retain(|k, _| k.0 != key);
+    profile_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(key);
 }
 
 fn fkey(f: &ImageFilters) -> [i32; 7] {
@@ -179,6 +190,83 @@ pub fn get(hash: &str, data: Option<&ImageData>, filters: &ImageFilters, profile
     let p = Arc::new(p);
     cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key, p.clone(), MAX_CACHED_BYTES);
     Some(p)
+}
+
+/// The most a view's image is reduced: 1/256 of its size.
+const MAX_LEVEL: u32 = 8;
+
+/// The cache key of `hash` at `level` (level 0 is the image itself).
+fn level_key(hash: &str, level: u32) -> String {
+    if level == 0 { hash.to_string() } else { format!("{hash}#{level}") }
+}
+
+/// How many times an image `iw` × `ih` drawn by `t` (image pixels → layer units) at `scale`
+/// device pixels per unit can be halved and still have at least one pixel per device pixel. A
+/// zoomed-out view of a large photo then decodes it once into a copy its size, instead of keeping
+/// (and, past the cache budget, decoding again) every full-size image on screen.
+pub fn level_for(iw: u32, ih: u32, t: &tiny_skia::Transform, scale: f64) -> u32 {
+    let stretch = f64::from(t.sx.hypot(t.ky).max(t.kx.hypot(t.sy)));
+    let density = stretch * scale;
+    if iw == 0 || ih == 0 || !density.is_finite() || density <= 0.0 || density >= 0.5 {
+        return 0;
+    }
+    let level = (1.0 / density).log2().floor().clamp(0.0, f64::from(MAX_LEVEL)) as u32;
+    // Never below a few pixels a side.
+    let fits = |l: u32| (iw.min(ih) >> l) >= 4;
+    (0..=level).rev().find(|l| fits(*l)).unwrap_or(0)
+}
+
+/// [`get`] at 1/2^`level` of the image's size (each halving averages 2 × 2 pixels), cached per
+/// level. A level the full image isn't cached for decodes it without keeping it.
+pub fn get_level(hash: &str, data: Option<&ImageData>, filters: &ImageFilters, profile: ColorProfile, level: u32) -> Option<Arc<Pixmap>> {
+    if level == 0 {
+        return get(hash, data, filters, profile);
+    }
+    let key = (level_key(hash, level), fkey(filters), profile);
+    if let Some(p) = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key) {
+        return Some(p);
+    }
+    let full_key = (hash.to_string(), fkey(filters), profile);
+    let cached = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&full_key);
+    let mut p = match cached {
+        Some(full) => halve(&full)?,
+        None => {
+            let (mut p, srgb) = decode_in(&data?.bytes, profile)?;
+            finish(&mut p, filters, if srgb { profile } else { ColorProfile::Srgb });
+            halve(&p)?
+        }
+    };
+    for _ in 1..level.min(MAX_LEVEL) {
+        p = halve(&p)?;
+    }
+    let p = Arc::new(p);
+    cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key, p.clone(), MAX_CACHED_BYTES);
+    Some(p)
+}
+
+/// `pm` at half its size (rounded up), each pixel the average of the 2 × 2 it covers (edge
+/// pixels repeat where the size is odd). Premultiplied pixels average without fringes.
+pub(crate) fn halve(pm: &Pixmap) -> Option<Pixmap> {
+    let (w, h) = (pm.width(), pm.height());
+    let (nw, nh) = (w.div_ceil(2).max(1), h.div_ceil(2).max(1));
+    let mut out = Pixmap::new(nw, nh)?;
+    let src = pm.data();
+    let (w, h) = (w as usize, h as usize);
+    let stride = w * 4;
+    for (y, row) in out.data_mut().chunks_exact_mut(nw as usize * 4).enumerate() {
+        let (y0, y1) = ((2 * y).min(h - 1), (2 * y + 1).min(h - 1));
+        for (x, px) in row.chunks_exact_mut(4).enumerate() {
+            let (x0, x1) = ((2 * x).min(w - 1), (2 * x + 1).min(w - 1));
+            for c in 0..4 {
+                let at = |xx: usize, yy: usize| u32::from(src.get(yy * stride + xx * 4 + c).copied().unwrap_or(0));
+                let sum = at(x0, y0) + at(x1, y0) + at(x0, y1) + at(x1, y1);
+                if let Some(v) = px.get_mut(c) {
+                    *v = ((sum + 2) / 4) as u8;
+                }
+            }
+        }
+    }
+    Some(out)
 }
 
 /// The filters, then the conversion into the document's colour space.
@@ -389,9 +477,9 @@ fn padded_cache() -> &'static Mutex<PixmapCache> {
     C.get_or_init(|| Mutex::new(PixmapCache::default()))
 }
 
-/// `pm` with a transparent 1-pixel border (cached).
-pub fn padded(hash: &str, filters: &ImageFilters, profile: ColorProfile, pm: &Pixmap) -> Option<Arc<Pixmap>> {
-    let key = (hash.to_string(), fkey(filters), profile);
+/// `pm` (`hash` at `level`) with a transparent 1-pixel border (cached).
+pub fn padded(hash: &str, level: u32, filters: &ImageFilters, profile: ColorProfile, pm: &Pixmap) -> Option<Arc<Pixmap>> {
+    let key = (level_key(hash, level), fkey(filters), profile);
     if let Some(p) = padded_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key) {
         return Some(p);
     }

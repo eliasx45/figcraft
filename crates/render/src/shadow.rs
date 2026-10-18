@@ -165,10 +165,12 @@ fn drop_shadows(n: &Node) -> impl Iterator<Item = &Shadow> {
 
 /// What hides node `n`'s drop shadows that don't show behind transparent areas: its [`cover`],
 /// or `None` when its pixels do that (layers that aren't one outline; effects that move the
-/// pixels past the paints) or no shadow hides.
+/// pixels past the paints; image fills, whose transparent pixels show the shadow as in Figma: a
+/// rounded icon in a square layer glows round) or no shadow hides.
 pub fn hiding_cover(doc: &Document, n: &Node) -> Option<Vec<Outline>> {
     let moved = n.effects.iter().any(|e| matches!(e.kind, EffectKind::LayerBlur(_) | EffectKind::Texture(_)) && e.reach() > 0.0);
-    if moved || !drop_shadows(n).any(|s| !s.show_behind) {
+    let image = n.fills.iter().any(|f| f.visible && matches!(f.kind, figcraft_color::PaintKind::Image(_)));
+    if moved || image || !drop_shadows(n).any(|s| !s.show_behind) {
         return None;
     }
     cover(doc, n)

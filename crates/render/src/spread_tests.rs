@@ -142,3 +142,22 @@ fn spread_bands_are_cached_and_hostile_values_are_safe() {
         let _ = render(&d, n);
     }
 }
+
+#[test]
+fn an_image_with_transparent_corners_glows_round_not_square() {
+    // A round icon in a square layer (a PNG with transparent corners) with a glow that doesn't
+    // show behind it: the corners are transparent, so the glow shows there (as in Figma).
+    let (mut d, n) = shape(NodeKind::Rectangle, vec![EffectKind::DropShadow(Shadow { radius: 40.0, show_behind: false, ..shadow(0.0) })]);
+    let mut icon = image::RgbaImage::from_pixel(8, 8, image::Rgba([255, 255, 255, 255]));
+    for (x, y) in [(0, 0), (1, 0), (0, 1), (7, 0), (6, 0), (7, 1), (0, 7), (1, 7), (0, 6), (7, 7), (6, 7), (7, 6)] {
+        icon.put_pixel(x, y, image::Rgba([0, 0, 0, 0]));
+    }
+    let mut png = std::io::Cursor::new(Vec::new());
+    icon.write_to(&mut png, image::ImageFormat::Png).unwrap();
+    let png = png.into_inner();
+    d.images.insert("icon".to_string(), figcraft_doc::ImageData { bytes: std::sync::Arc::new(png), width: 8, height: 8 });
+    d.get_mut(n).unwrap().fills = vec![Paint::image("icon".to_string(), figcraft_color::ImageScaleMode::Fill)];
+    let p = render(&d, n);
+    assert!(alpha(&p, 104.5, 104.5) > 0, "the glow shows in the icon's transparent corner");
+    assert_eq!(alpha(&p, 200.5, 200.5), 255, "the icon itself");
+}
