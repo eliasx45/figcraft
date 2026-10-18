@@ -49,6 +49,7 @@ pub mod plugins;
 pub mod proto_run;
 pub mod rename;
 pub mod rotation_origin;
+pub mod scripts;
 pub mod selection_colors;
 pub mod selection_spacing;
 pub mod shape_handles;
@@ -766,6 +767,8 @@ pub struct Session {
     pub libraries: library::Cache,
     /// Plugin modules loaded in this session and the last plugin run.
     pub plugins: plugins::Runtime,
+    /// Failed scripts kept so a fix can be sent as edits (`script.run` with `editId`).
+    pub scripts: scripts::Scripts,
     /// The live sessions (collaboration), one per document at most: status, peers, presence.
     /// [`Session::live`] is the active document's.
     pub live: live::Lives,
@@ -816,6 +819,7 @@ impl Session {
             message: None,
             libraries: library::Cache::default(),
             plugins: plugins::Runtime::default(),
+            scripts: scripts::Scripts::default(),
             live: live::Lives::default(),
             background: background::Background::default(),
         }
@@ -1756,6 +1760,8 @@ mod rotation_origin_tests;
 mod save_format_tests;
 #[cfg(test)]
 mod scale_tool_tests;
+#[cfg(test)]
+mod scripts_tests;
 #[cfg(test)]
 mod section_contents_tests;
 #[cfg(test)]

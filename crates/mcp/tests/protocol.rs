@@ -219,3 +219,23 @@ fn set_properties_passes_on_what_it_skipped() {
     assert!(c.ok("set_properties", json!({"ids": [f], "props": {"gap": 4}})).get("warnings").is_none());
     assert!(c.err("set_properties", json!({"ids": [t], "props": {"gap": 4}})).contains("auto layout"));
 }
+
+#[test]
+fn run_script_returns_results_errors_with_edit_ids_and_screenshots() {
+    let mut c = Client::new();
+    let out = c.ok("run_script", json!({"source": "for (let i = 0; i < 3; i++) fc.createRectangle({x: i * 50, width: 40, height: 40}); return fc.currentPage.children.length", "label": "three"}));
+    assert_eq!(out["result"], 3);
+    assert_eq!(out["changes"]["counts"]["created"], 3);
+    // A failure is an isError result that carries an editId; the fix goes as edits.
+    let e = c.err("run_script", json!({"source": "fc.createEllipse({});\nthrow new Error('nope')"}));
+    let failed: Value = serde_json::from_str(&e).unwrap();
+    assert_eq!(failed["error"]["line"], 2);
+    assert_eq!(c.page_children().len(), 3, "the failed run was rolled back");
+    let fixed = c.ok("run_script", json!({"editId": failed["editId"], "edits": [{"find": "throw new Error('nope')", "replace": "return 'ok'"}]}));
+    assert_eq!(fixed["result"], "ok");
+    // With a screenshot: the JSON first, then the image of what was made.
+    let r = c.call("run_script", json!({"source": "fc.createFrame({x: 300, width: 80, height: 60, props: {fills: ['#3366FF']}})", "screenshot": true}));
+    let content = r["content"].as_array().unwrap();
+    assert!(content.iter().any(|b| b["type"] == "image"), "{r}");
+    assert!(content[0]["text"].as_str().unwrap().contains("\"ok\": true"));
+}

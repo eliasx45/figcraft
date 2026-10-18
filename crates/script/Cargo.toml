@@ -1,0 +1,18 @@
+[package]
+name = "figcraft-script"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "FigCraft scripts: JavaScript (boa) run against the document through the engine's commands, with a layer object model (fc.currentPage, node.children, node.fills = …, findAll)"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde_json = { workspace = true }
+boa_engine = { workspace = true }
+web-time = "1.1.0"
+
+# On the web, boa's clock and Math.random need the browser.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+boa_engine = { workspace = true, features = ["js"] }

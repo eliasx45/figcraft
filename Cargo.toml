@@ -31,6 +31,7 @@ figcraft-ui-egui = { path = "crates/ui-egui" }
 figcraft-mcp = { path = "crates/mcp" }
 figcraft-collab-net = { path = "crates/collab-net" }
 figcraft-plugin = { path = "crates/plugin" }
+figcraft-script = { path = "crates/script" }
 
 # Which paths stored in a document may be followed (craft-libs).
 craft-docpath = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "82a24b006eefa036b43c09a67fb9a3fbd17ffe63" }
@@ -73,6 +74,8 @@ crc32fast = "1"
 # debug builds may not do, and then a long-running plugin overflows the native stack.
 wasmi = { version = "2", default-features = false, features = ["std", "stable", "validate", "portable-dispatch"] }
 wat = "1.261"
+# scripts (`script.run`): a pure-Rust JavaScript engine (no JIT; also runs in the web build).
+boa_engine = { version = "0.22", default-features = false, features = ["annex-b"] }
 
 # ui
 egui = "0.36"

@@ -87,6 +87,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "list_commands",
     "run_command",
     "batch",
+    "run_script",
     "create_node",
     "set_properties",
     "inspect_document",
@@ -135,6 +136,25 @@ pub fn tool_definitions() -> Vec<Value> {
                     "label": string("Undo history label (default \"Batch\")"),
                 }),
                 &["commands"],
+            ),
+            false,
+        ),
+        tool(
+            "run_script",
+            "Run script",
+            "Run JavaScript against the document as ONE undo step (engine `script.run`): loops, conditions and reads in a single call instead of one command per round trip. All or nothing: if the script throws, everything it did is rolled back and the result has `error` {message, line, column} and an `editId`; send only the fix next time as {editId, edits: [{find, replace, all?}]}. `return` hands back the result (layers come out as their properties). API: fc.run(command, params) runs any command (list_commands), fc.get(id) reads a layer as JSON; layer objects: fc.currentPage, fc.pages, fc.selection (assign an array to select), fc.getNodeById(id), fc.findAll(fn) / fc.findOne(fn) on the current page, fc.create(type, params) and fc.createFrame / createRectangle / createEllipse / createText / createLine / createComponent / … (params as create_node, `parent` may be a layer; new layers don't take the selection); on a layer: children, parent, removed, any property inspect_document shows (name, type, x, y, width, height, fills, characters, fontSize, …), assign any set_properties key to write it (node.fills = ['#3366FF'], node.x += 10), findAll(fn), findOne(fn), findChildren(fn), appendChild(layer), insertChild(index, layer), clone(), remove(), set({props}), toJSON(). `args` holds your input, console.log lines come back in `logs`. Returns {ok, result, logs, calls, changes {created, createdTop, changed, removed, counts}, ms}. With `screenshot` the result also shows what the script made or changed (or the given ids), to check the result and fix it in the next call. Example: {\"source\": \"for (const t of fc.findAll(n => n.type === 'TEXT')) if (t.fontSize < 14) t.fontSize = 14; return fc.findAll(n => n.type === 'TEXT').length\"}",
+            obj(
+                json!({
+                    "source": string("The script (JavaScript, run as a function body: `return` gives the result)"),
+                    "editId": string("Instead of `source`: the editId of a failed run, fixed by `edits`"),
+                    "edits": {"type": "array", "description": "With editId: replacements applied to the failed script in order; each `find` must occur exactly once unless `all`", "items": obj(json!({"find": string("Exact text in the failed script"), "replace": string("Replacement"), "all": boolean("Replace every occurrence")}), &["find", "replace"])},
+                    "args": {"description": "Input for the script, as the global `args` (any JSON)"},
+                    "timeout": num("Time budget in seconds (default 10, at most 3600)"),
+                    "label": string("Undo history label: \"Script: <label>\""),
+                    "screenshot": {"description": "Also return a PNG: true shows the layers the script made (else those it changed), or pass layer ids", "anyOf": [{"type": "boolean"}, ids_schema("Layers to render")]},
+                    "maxSize": int("Screenshot's largest side in pixels (default 1200)"),
+                }),
+                &[],
             ),
             false,
         ),
@@ -409,6 +429,7 @@ pub fn call_tool(b: &mut dyn Backend, name: &str, args: &Value) -> ToolResult {
         "list_commands" => list_commands(b, &a),
         "run_command" => run_command(b, &a),
         "batch" => batch(b, &a),
+        "run_script" => run_script(b, &a),
         "create_node" => create_node(b, &a),
         "set_properties" => set_properties(b, &a),
         "inspect_document" => inspect_document(b, &a),
@@ -503,6 +524,55 @@ fn batch(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<ToolResult, Stri
     }
     let label = s_arg(a, "label")?.unwrap_or("Batch");
     exec(b, "command.batch", json!({"label": label, "commands": steps})).map(|v| ToolResult::json(&v))
+}
+
+fn run_script(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<ToolResult, String> {
+    let mut params = Map::new();
+    for k in ["source", "editId", "edits", "args", "timeout", "label"] {
+        if let Some(v) = a.get(k).filter(|v| !v.is_null()) {
+            params.insert(k.into(), v.clone());
+        }
+    }
+    let shot = match a.get("screenshot") {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => None,
+        Some(Value::Bool(true)) => Some(None),
+        Some(_) => Some(Some(ids_arg(a, "screenshot")?.unwrap_or_default())),
+    };
+    let max = n_arg(a, "maxSize")?.unwrap_or(1200.0);
+    let out = exec(b, "script.run", Value::Object(params))?;
+    if out.get("ok") != Some(&Value::Bool(true)) {
+        return Ok(ToolResult::error(serde_json::to_string_pretty(&out).unwrap_or_default()));
+    }
+    let Some(ids) = shot else { return Ok(ToolResult::json(&out)) };
+    let ids = match ids {
+        Some(ids) => ids,
+        None => script_shot_ids(b, &out),
+    };
+    let mut shot_args = Map::new();
+    if !ids.is_empty() {
+        shot_args.insert("ids".into(), json!(ids));
+    }
+    shot_args.insert("maxSize".into(), json!(max));
+    let mut r = screenshot(b, &shot_args)?;
+    r.content.insert(0, json!({"type": "text", "text": serde_json::to_string_pretty(&out).unwrap_or_default()}));
+    Ok(r)
+}
+
+/// What a script made (its new top layers), else the layers it changed that aren't pages; empty
+/// means the whole page.
+fn script_shot_ids(b: &mut dyn Backend, out: &Value) -> Vec<u64> {
+    let list = |k: &str| out["changes"][k].as_array().map(|a| a.iter().filter_map(Value::as_u64).collect::<Vec<_>>()).unwrap_or_default();
+    let made = list("createdTop");
+    if !made.is_empty() {
+        return made.into_iter().take(200).collect();
+    }
+    list("changed")
+        .into_iter()
+        .take(200)
+        .filter(|id| {
+            b.call("node.get", json!({"id": id, "depth": 0})).ok().is_some_and(|n| n.get("type").and_then(Value::as_str).is_some_and(|t| t != "PAGE"))
+        })
+        .collect()
 }
 
 fn create_node(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<ToolResult, String> {
