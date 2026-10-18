@@ -253,18 +253,27 @@ fn single_line(t: &TextData) -> bool {
 /// Greek text node `n` (its transform in `xf`): a bar per laid-out line, across the line's
 /// glyphs, kept inside `limit` (local; what the node's bounds allow it to paint).
 pub fn greek_text(pix: &mut Pixmap, n: &Node, xf: Affine, limit: Rect) {
+    for (bar, c) in greek_bars(n, limit) {
+        fill_local(pix, bar, xf, c);
+    }
+}
+
+/// Where [`greek_text`] puts its bars (local) and in which straight RGBA colours, ink density
+/// included (a GPU renderer draws the same).
+pub fn greek_bars(n: &Node, limit: Rect) -> Vec<(Rect, [f32; 4])> {
+    let mut out = Vec::new();
     if let NodeKind::Text(t) = &n.kind
         && single_line(t)
     {
         if !t.characters.trim().is_empty() {
             let bar = Rect::new(0.0, n.height * LINE_BAR.0, n.width, n.height * LINE_BAR.1).intersect(limit);
             for c in n.fills.iter().filter_map(paint_color) {
-                fill_local(pix, bar, xf, [c[0], c[1], c[2], c[3] * TEXT_INK]);
+                out.push((bar, [c[0], c[1], c[2], c[3] * TEXT_INK]));
             }
         }
-        return;
+        return out;
     }
-    let Some((layout, dy)) = figcraft_text::layout_node(n) else { return };
+    let Some((layout, dy)) = figcraft_text::layout_node(n) else { return out };
     for line in &layout.lines {
         let glyphs = layout.glyphs.get(line.glyph_start..line.glyph_end).unwrap_or(&[]);
         let Some(first) = glyphs.first() else { continue };
@@ -277,9 +286,10 @@ pub fn greek_text(pix: &mut Pixmap, n: &Node, xf: Affine, limit: Rect) {
         }
         let fills = layout.styles.get(first.style).and_then(|s| s.fills.as_ref()).unwrap_or(&n.fills);
         for c in fills.iter().filter_map(paint_color) {
-            fill_local(pix, bar, xf, [c[0], c[1], c[2], c[3] * TEXT_INK]);
+            out.push((bar, [c[0], c[1], c[2], c[3] * TEXT_INK]));
         }
     }
+    out
 }
 
 /// Whether `xf` keeps rectangles axis-aligned (no rotation or skew).

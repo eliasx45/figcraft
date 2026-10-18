@@ -1717,6 +1717,7 @@ impl FigApp {
                     figcraft_render::Work::Full => json!({"kind": "full"}),
                 }),
                 "quality": if self.canvas.tex_coarse { "preview" } else { "refined" },
+                "texScale": self.canvas.tex_view.as_ref().map(|v| v.scale),
                 "previewLatencyMs": self.canvas.preview_latency_ms,
                 "refineLatencyMs": self.canvas.refine_latency_ms,
                 "tiles": tiles,

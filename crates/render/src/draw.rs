@@ -343,7 +343,7 @@ fn device_rect(xf: Affine, r: Rect) -> Rect {
 }
 
 /// The area text may paint without its glyphs being looked at: its box, generously grown.
-fn text_box_bounds(n: &Node) -> Rect {
+pub fn text_box_bounds(n: &Node) -> Rect {
     n.local_rect().inflate(n.height.max(10.0), n.height.max(10.0) * 0.5)
 }
 

@@ -308,7 +308,7 @@ impl GpuTilePainter {
     }
 
     /// The kept page scene brought up to date with `doc`, its sampled parts drawn for `scale`.
-    fn update(&mut self, doc: &Arc<Document>, page: NodeId, skip: &[NodeId], scale: f64) {
+    fn update(&mut self, doc: &Arc<Document>, page: NodeId, skip: &[NodeId], scale: f64, lod: bool) {
         let fonts = figcraft_text::layout_generation();
         let old = self.kept.take().filter(|k| k.page == page && k.skip == skip && k.fonts == fonts && k.doc.color_profile == doc.color_profile);
         if let Some(k) = old.as_ref()
@@ -326,6 +326,8 @@ impl GpuTilePainter {
             _ => HashMap::new(),
         };
         let images = &mut self.images;
+        // What's too small to read is approximated only in zoomed-out views.
+        let lod = lod && scale <= figcraft_render::lod::MAX_SCALE;
         let kids = doc.node(page).map(|p| p.children.as_slice()).unwrap_or_default();
         let parts = kids
             .iter()
@@ -334,7 +336,7 @@ impl GpuTilePainter {
                 // Pixels made for another scale are made again.
                 let cached = cached.filter(|p| !(rescaled && matches!(p, Ok((_, _, true)))));
                 let part = cached.unwrap_or_else(|| {
-                    let mut b = Builder { doc, skip, images, scale, sampled: false };
+                    let mut b = Builder { doc, skip, images, scale, sampled: false, lod };
                     let mut sc = Scene::new();
                     b.node(&mut sc, *c, figcraft_geom::Affine::IDENTITY, 0)
                         // A page unit of margin for anti-aliasing.
@@ -450,7 +452,7 @@ impl TilePainter for GpuTilePainter {
             // Bounds don't depend on the scale: keep the one the scene has.
             let scale = self.kept.as_ref().map(|k| k.scale).or(tiles.first().map(TileKey::scale)).unwrap_or(1.0);
             let t = std::time::Instant::now();
-            self.update(doc, page, &opts.skip, scale);
+            self.update(doc, page, &opts.skip, scale, opts.lod);
             self.counts.scene_ms = ms(t);
         }
         let base = Self::base(doc, page, opts);
@@ -487,7 +489,7 @@ impl TilePainter for GpuTilePainter {
                 return out;
             }
             let t = std::time::Instant::now();
-            self.update(doc, page, &opts.skip, figcraft_render::tiles::level_scale(level));
+            self.update(doc, page, &opts.skip, figcraft_render::tiles::level_scale(level), opts.lod);
             self.counts.scene_ms += ms(t);
             match self.block(level, &keys, base, native) {
                 Some(done) => {

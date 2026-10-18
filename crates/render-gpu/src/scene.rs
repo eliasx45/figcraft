@@ -60,6 +60,9 @@ pub struct Builder<'a> {
     pub scale: f64,
     /// Whether a paint was turned into pixels at `scale` (the scene then belongs to that scale).
     pub sampled: bool,
+    /// Approximate what's too small to read at `scale`, as the CPU's canvas previews do
+    /// (`figcraft_render::lod`: text greeked into bars).
+    pub lod: bool,
 }
 
 fn pc(c: Color) -> peniko::Color {
@@ -207,6 +210,17 @@ impl Builder<'_> {
 
     /// Text as glyph outlines, grouped by style (as the CPU renderer does).
     fn text(&mut self, sc: &mut Scene, n: &Node, xf: Affine) -> Result<(), Fallback> {
+        if self.lod {
+            // How text looks depends on the scale: the scene belongs to it.
+            self.sampled = true;
+            let scale = xf.determinant().abs().sqrt() * self.scale;
+            if figcraft_render::lod::greeked(n, scale) {
+                for (bar, c) in figcraft_render::lod::greek_bars(n, figcraft_render::draw::text_box_bounds(n)) {
+                    sc.fill(Fill::NonZero, xf, peniko::Color::new(c), None, &bar);
+                }
+                return Ok(());
+            }
+        }
         let Some((layout, dy)) = figcraft_text::layout_node(n) else { return Ok(()) };
         let gxf = xf * Affine::translate((0.0, dy));
         let mut by_style: HashMap<usize, BezPath> = HashMap::new();

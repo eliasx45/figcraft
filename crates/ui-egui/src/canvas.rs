@@ -17,7 +17,7 @@ use crate::theme::{ACCENT, COMPONENT, Tokens, doc_c32, regular, semibold};
 pub struct CanvasState {
     pub rect: Rect,
     texture: Option<egui::TextureHandle>,
-    tex_view: Option<figcraft_render::View>,
+    pub(crate) tex_view: Option<figcraft_render::View>,
     /// The file ([`figcraft_engine::DocState::uid`]) and page the texture shows: it is drawn only
     /// on them.
     tex_of: Option<(u64, NodeId)>,
