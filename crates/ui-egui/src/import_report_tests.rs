@@ -201,3 +201,13 @@ fn a_file_opened_from_base64_data_has_a_summary_too() {
     // Shown as a sentence, worked out once when the report opens.
     assert!(report.shown.iter().any(|n| n == "Layers without a type were skipped"), "{:?}", report.shown);
 }
+
+#[test]
+fn a_figma_paste_reports_only_when_something_did_not_come_across() {
+    assert!(Report::from_result("edit.pasteFigma", &json!({}), &json!({"ids": [1], "warnings": []})).is_none());
+    let result = json!({"ids": [1], "warnings": ["2 of 5 images couldn't be loaded (2 timed out); they show a missing-image placeholder"],
+        "summary": {"name": "Pasted Figma layers", "layers": 12, "images": 3}});
+    let report = Report::from_result("edit.pasteFigma", &json!({}), &result).unwrap();
+    assert!(report.placed && !report.appended);
+    assert_eq!((report.layers, report.images, report.notes.len()), (Some(12), Some(3), 1));
+}

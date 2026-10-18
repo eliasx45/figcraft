@@ -35,7 +35,11 @@ impl Report {
     /// a native file's `repairs` are shown by the engine's own message, and an SVG opened without
     /// notes has nothing to report. `params` are the command's, for the file's name.
     pub fn from_result(command: &str, params: &Value, result: &Value) -> Option<Self> {
-        if !matches!(command, "file.open" | "file.openRecent" | "file.import") {
+        if !matches!(command, "file.open" | "file.openRecent" | "file.import" | "edit.pasteFigma") {
+            return None;
+        }
+        // A paste reports only when something didn't come across.
+        if command == "edit.pasteFigma" && result.get("warnings").and_then(Value::as_array).is_none_or(Vec::is_empty) {
             return None;
         }
         let warnings = result.get("warnings").and_then(Value::as_array)?;
@@ -63,7 +67,7 @@ impl Report {
             layers: count("layers"),
             images: count("images"),
             appended,
-            placed: command == "file.import" && !appended,
+            placed: (command == "file.import" && !appended) || command == "edit.pasteFigma",
             uid: 0,
             notes: Vec::new(),
             shown: Vec::new(),
@@ -129,6 +133,7 @@ pub fn show(app: &mut FigApp, ctx: &egui::Context) {
     let t = Tokens::get(ctx);
     let mut open = true;
     let mut close_clicked = false;
+    let mut relink = false;
     crate::dialogs::window(tr("Import report"), ctx).open(&mut open).show(ctx, |ui| {
         ui.set_width(420.0);
         ui.label(RichText::new(&report.name).strong());
@@ -171,9 +176,18 @@ pub fn show(app: &mut FigApp, ctx: &egui::Context) {
             ui.label(trn("{n} more notes omitted from this report", omitted, &[]));
         }
         ui.add_space(12.0);
-        close_clicked = crate::widgets::button(ui, tr("Close"), true, true).clicked();
+        let missing_images = report.notes.iter().any(|n| n.contains("missing-image placeholder"));
+        ui.horizontal(|ui| {
+            close_clicked = crate::widgets::button(ui, tr("Close"), true, true).clicked();
+            if missing_images && crate::widgets::button(ui, tr("Relink missing images…"), false, true).clicked() {
+                relink = true;
+            }
+        });
     });
-    if !open || close_clicked {
+    if !open || close_clicked || relink {
         app.ui.import_report = None;
+    }
+    if relink {
+        crate::menus::invoke(app, "file.relinkImages");
     }
 }

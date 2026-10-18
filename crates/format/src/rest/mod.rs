@@ -7,7 +7,7 @@
 //! corners, constraints, auto layout, layout grids, export settings, text with styled runs,
 //! vectors from `fillGeometry` / `strokeGeometry`, components, component sets, instances and
 //! component properties are imported. Image fills keep their `imageRef` as the image key and
-//! show a grey placeholder unless an [`ImageResolver`] supplies the bytes (nothing is fetched).
+//! show a hatched missing-image placeholder unless an [`ImageResolver`] supplies the bytes (nothing is fetched).
 //! Prototyping comes along: interactions (triggers, actions, transitions, easing), flows,
 //! scrolling and the prototype device. Variables come from the local variables response
 //! (`GET /v1/files/:key/variables/local`), embedded next to the file JSON or passed separately
@@ -871,7 +871,7 @@ impl<'a> Ctx<'a> {
     }
 
     /// The document image key for an `imageRef`: its bytes when the resolver has them, else a
-    /// grey placeholder stored under the `imageRef` itself.
+    /// missing-image placeholder stored under the `imageRef` itself.
     pub(crate) fn image_key(&mut self, image_ref: &str) -> String {
         if let Some(k) = self.image_keys.get(image_ref) {
             return k.clone();
@@ -883,9 +883,11 @@ impl<'a> Ctx<'a> {
                 self.missing_images += 1;
                 let key = if image_ref.is_empty() { MISSING_IMAGE } else { clip_str(image_ref) }.to_string();
                 if !self.doc.images.contains_key(&key)
-                    && let Some(png) = placeholder_png()
+                    && let Some(png) = missing_image_png()
                 {
-                    self.doc.images.insert(key.clone(), ImageData { bytes: Arc::new(png), width: PLACEHOLDER_SIDE, height: PLACEHOLDER_SIDE });
+                    self.doc
+                        .images
+                        .insert(key.clone(), ImageData { bytes: Arc::new(png.to_vec()), width: PLACEHOLDER_SIDE, height: PLACEHOLDER_SIDE });
                 }
                 key
             }
@@ -942,7 +944,7 @@ impl<'a> Ctx<'a> {
             let n = self.missing_images;
             let (s, verb) = if n == 1 { ("", "shows") } else { ("s", "show") };
             self.warn(format!(
-                "{n} image{s} without image data {verb} a grey placeholder named by its imageRef (put the downloaded images, named by imageRef, in an `images` folder next to the JSON)"
+                "{n} image{s} without image data {verb} a hatched missing-image placeholder named by its imageRef (put the downloaded images, named by imageRef, in an `images` folder next to the JSON)"
             ));
         }
         let unused = self.style_meta.keys().filter(|k| !self.doc.styles.iter().any(|s| s.id == **k)).count();
@@ -1244,12 +1246,44 @@ fn sane(p: &BezPath) -> bool {
     [b.x0, b.y0, b.x1, b.y1].iter().all(|v| v.is_finite() && v.abs() <= MAX_COORD)
 }
 
-/// Side of the placeholder image (large enough that scaling it up stays flat).
+/// Side of the placeholder image.
 const PLACEHOLDER_SIDE: u32 = 64;
 
-/// A light-grey PNG standing in for image fills whose bytes aren't available.
-fn placeholder_png() -> Option<Vec<u8>> {
-    let img = image::RgbaImage::from_pixel(PLACEHOLDER_SIDE, PLACEHOLDER_SIDE, image::Rgba([0xD9, 0xD9, 0xD9, 0xFF]));
+/// The PNG standing in for image fills whose bytes aren't available: diagonal hatching with a
+/// crossed-out picture glyph in the middle, so a missing image never looks like a plain grey shape.
+/// Built once; [`is_missing_image`] recognises it.
+pub fn missing_image_png() -> Option<&'static [u8]> {
+    static PNG: std::sync::OnceLock<Option<Vec<u8>>> = std::sync::OnceLock::new();
+    PNG.get_or_init(draw_missing_image).as_deref()
+}
+
+/// Whether `bytes` are the [`missing_image_png`] placeholder.
+pub fn is_missing_image(bytes: &[u8]) -> bool {
+    missing_image_png().is_some_and(|png| png == bytes)
+}
+
+fn draw_missing_image() -> Option<Vec<u8>> {
+    const BASE: image::Rgba<u8> = image::Rgba([0xE4, 0xE4, 0xE4, 0xFF]);
+    const HATCH: image::Rgba<u8> = image::Rgba([0xD2, 0xD2, 0xD2, 0xFF]);
+    const INK: image::Rgba<u8> = image::Rgba([0x8A, 0x8A, 0x8A, 0xFF]);
+    let side = PLACEHOLDER_SIDE;
+    let img = image::RgbaImage::from_fn(side, side, |x, y| {
+        let (fx, fy) = (f64::from(x), f64::from(y));
+        // The glyph: a 28×22 picture frame centred, with a mountain, a sun and a slash through it.
+        let (gx, gy) = (fx - 18.0, fy - 21.0);
+        let inside = (0.0..=28.0).contains(&gx) && (0.0..=22.0).contains(&gy);
+        let border = inside && (gx < 2.0 || gx > 26.0 || gy < 2.0 || gy > 20.0);
+        let mountain = inside && gy > 8.0 && gy < 20.0 && (gx - 11.0).abs() < (gy - 8.0) * 0.9;
+        let sun = (gx - 21.0).powi(2) + (gy - 7.0).powi(2) <= 6.25;
+        let slash = (fx - 14.0 - (fy - 14.0)).abs() < 1.6 && (14.0..=50.0).contains(&fx);
+        if border || mountain || sun || slash {
+            INK
+        } else if (x + y) % 8 < 3 {
+            HATCH
+        } else {
+            BASE
+        }
+    });
     let mut out = Vec::new();
     img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png).ok()?;
     Some(out)

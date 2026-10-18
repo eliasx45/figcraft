@@ -61,6 +61,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn images_are_named_by_the_sha1_of_their_bytes_and_the_placeholder_is_recognised() {
+        assert_eq!(crate::fig::image_hash(b"abc"), "a9993e364706816aba3e25717850c26c9cd0d89d");
+        let png = crate::rest::missing_image_png().unwrap();
+        assert!(crate::rest::is_missing_image(png));
+        assert!(!crate::rest::is_missing_image(&png[..png.len() - 1]));
+        // Not one flat colour: a missing image must not pass for a grey shape.
+        let img = image::load_from_memory(png).unwrap().to_rgba8();
+        assert!(img.pixels().any(|p| p != img.get_pixel(0, 0)));
+    }
+
+    #[test]
     fn envelope_is_data_not_html_and_rejects_truncated_or_wrong_formats() {
         let b64 = base64::engine::general_purpose::STANDARD.encode(b"fig-kiwi\0\0\0\0");
         let html = format!("<meta charset='utf-8'><span data-buffer=\"<!--(figma){b64}(/figma)-->\"></span>");

@@ -72,7 +72,9 @@ pub(super) fn adapt_warning(w: String) -> Option<String> {
     }
     if w.contains("without image data") {
         let count = w.split_whitespace().next().unwrap_or("Some");
-        return Some(format!("{count} image fill(s) whose image isn't in the file show a grey placeholder"));
+        return Some(format!(
+            "{count} image fill(s) whose image isn't in the file show a missing-image placeholder (Relink missing images can fill them in)"
+        ));
     }
     Some(w.replace("the variables JSON", "the file").replace("the file JSON", "the file"))
 }

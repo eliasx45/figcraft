@@ -177,7 +177,7 @@ fn paints_gradients_and_image_placeholders() {
     assert_eq!(img.image, "abc123", "the imageRef names the placeholder");
     assert_eq!((img.scale_mode, img.scale, img.rotation), (ImageScaleMode::Tile, 0.5, 1));
     assert!(close(f64::from(img.filters.exposure), 0.25) && img.filters.saturation == -1.0);
-    assert!(doc.images.get("abc123").is_some_and(|i| i.width == PLACEHOLDER_SIDE), "grey placeholder stored");
+    assert!(doc.images.get("abc123").is_some_and(|i| i.width == PLACEHOLDER_SIDE), "missing-image placeholder stored");
     let PaintKind::Image(crop) = &named(&doc, "Image2").fills[0].kind else { panic!() };
     assert_eq!(crop.scale_mode, ImageScaleMode::Crop);
     assert_eq!(crop.crop, Some([0.5, 0.0, 0.0, 0.5, 0.25, 0.25]));

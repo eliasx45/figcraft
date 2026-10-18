@@ -11,7 +11,7 @@ pub mod bidi;
 pub mod branch_ui;
 pub mod canvas;
 pub mod cjk;
-mod clipboard;
+pub mod clipboard;
 pub mod colorpicker;
 pub mod comments;
 pub mod component_panel;
@@ -261,10 +261,7 @@ pub trait Services {
         None
     }
     /// Resolve the images a Figma copy explicitly carries, without blocking the UI.
-    fn clipboard_images(
-        &mut self,
-        _images: std::collections::BTreeMap<String, String>,
-    ) -> Option<std::sync::mpsc::Receiver<std::collections::BTreeMap<String, Vec<u8>>>> {
+    fn clipboard_images(&mut self, _images: std::collections::BTreeMap<String, String>) -> Option<std::sync::mpsc::Receiver<clipboard::Fetched>> {
         None
     }
     fn clipboard_set_png(&mut self, _w: u32, _h: u32, _rgba: &[u8]) {}

@@ -8,12 +8,20 @@ use serde_json::json;
 use crate::FigApp;
 use crate::i18n::tr;
 
+/// The images of a Figma copy as the platform loaded them: bytes by hash, and why the others
+/// couldn't be loaded (by hash; short reasons such as "timed out", never a signed URL).
+#[derive(Debug, Default)]
+pub struct Fetched {
+    pub images: BTreeMap<String, Vec<u8>>,
+    pub failed: BTreeMap<String, String>,
+}
+
 pub struct Pending {
     html: String,
     uid: u64,
     revision: u64,
     params: serde_json::Value,
-    images: Receiver<BTreeMap<String, Vec<u8>>>,
+    images: Receiver<Fetched>,
 }
 
 /// Returns true even on invalid recognized data: never paste an old internal selection instead.
@@ -48,21 +56,19 @@ pub fn paste(app: &mut FigApp, at: serde_json::Value) -> bool {
         app.clipboard_pending = Some(Pending { html, uid, revision, params, images });
         app.toast(tr("Loading copied images…"));
     } else {
-        finish(app, &html, BTreeMap::new(), at);
+        finish(app, &html, Fetched::default(), at);
     }
     true
 }
 
-fn finish(app: &mut FigApp, html: &str, images: BTreeMap<String, Vec<u8>>, mut params: serde_json::Value) {
-    let images: BTreeMap<_, _> = images.into_iter().map(|(k, b)| (k, base64::engine::general_purpose::STANDARD.encode(b))).collect();
+fn finish(app: &mut FigApp, html: &str, fetched: Fetched, mut params: serde_json::Value) {
+    let images: BTreeMap<_, _> = fetched.images.into_iter().map(|(k, b)| (k, base64::engine::general_purpose::STANDARD.encode(b))).collect();
     params["html"] = json!(html);
     params["images"] = json!(images);
+    params["imageFailures"] = json!(fetched.failed);
+    // `run`, not `run_user`: the params hold every image, too big to clone for the report.
     if let Some(r) = app.run("edit.pasteFigma", params) {
-        let warnings: Vec<_> =
-            r.get("warnings").and_then(serde_json::Value::as_array).into_iter().flatten().filter_map(serde_json::Value::as_str).collect();
-        if !warnings.is_empty() {
-            app.toast(warnings.join("; "));
-        }
+        crate::import_report::capture(app, "edit.pasteFigma", &json!({}), &r);
     }
 }
 
@@ -75,7 +81,7 @@ pub fn poll(app: &mut FigApp, ctx: &egui::Context) {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
             return;
         }
-        Err(TryRecvError::Disconnected) => BTreeMap::new(),
+        Err(TryRecvError::Disconnected) => Fetched::default(),
     };
     let same = app.session.ds().is_ok_and(|d| {
         d.uid == p.uid && d.revision == p.revision && json!(d.page) == p.params["page"] && json!(app.session.selection()) == p.params["selection"]
@@ -141,7 +147,7 @@ mod tests {
         });
         app.run("file.new", json!({"name":"Other design"}));
         let before = app.session.doc().unwrap().clone();
-        tx.send(BTreeMap::new()).unwrap();
+        tx.send(Fetched::default()).unwrap();
         poll(&mut app, &egui::Context::default());
         assert_eq!(app.session.doc().unwrap(), &before);
         assert!(app.clipboard_pending.is_none());

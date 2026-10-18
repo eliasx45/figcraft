@@ -78,6 +78,16 @@ fn cache() -> &'static Mutex<PixmapCache> {
     C.get_or_init(|| Mutex::new(PixmapCache::default()))
 }
 
+/// Drop every decoded pixmap of image `key`. Keys are content hashes, so this is only needed when
+/// a key's bytes are replaced in place (a missing-image placeholder relinked under its own hash).
+pub fn forget(key: &str) {
+    let mut c = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let stale: Vec<Key> = c.map.keys().filter(|k| k.0 == key).cloned().collect();
+    for k in stale {
+        c.remove(&k);
+    }
+}
+
 fn fkey(f: &ImageFilters) -> [i32; 7] {
     let q = |v: f32| (v * 1000.0).round() as i32;
     [q(f.exposure), q(f.contrast), q(f.saturation), q(f.temperature), q(f.tint), q(f.highlights), q(f.shadows)]

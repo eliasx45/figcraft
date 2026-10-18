@@ -35,7 +35,13 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
         spec!("edit.cut", "Cut", "{ids?}", true, cut),
         spec!("edit.paste", "Paste", "{parent?, x?, y? (page coordinates of the pasted top-left)}", true, paste),
-        spec!("edit.pasteFigma", "Paste Figma layers", "{html, images?: {hash: base64}, parent?, x?, y?} → {ids, warnings}", true, paste_figma::run),
+        spec!(
+            "edit.pasteFigma",
+            "Paste Figma layers",
+            "{html, images?: {hash: base64}, imageFailures?: {hash: reason}, parent?, x?, y?} → {ids, warnings, missingImages: [{hash, reason}], summary}",
+            true,
+            paste_figma::run
+        ),
         spec!(
             "edit.pasteDesignLayers",
             "Paste design layers",

@@ -98,7 +98,7 @@ fn resource_ids_and_links_between_roots_survive_collisions_and_repeated_pastes()
     dest.styles.push(collision.clone());
     let page = dest.first_page().unwrap();
     for _ in 0..2 {
-        let ids = insert(&mut dest, &mut src.clone(), &[root, other], page, Affine::IDENTITY, &mut vec![]).unwrap();
+        let ids = insert(&mut dest, &mut src.clone(), &[root, other], page, Affine::IDENTITY, &mut vec![], &mut BTreeSet::new()).unwrap();
         let n = dest.get(ids[0]).unwrap();
         assert_ne!(n.styles.fill.as_deref(), Some("same-id"));
         assert_eq!(n.interactions[0].actions[0].dest(), Some(ids[1]));
@@ -136,7 +136,7 @@ fn variable_aliases_modes_and_component_sources_are_remapped() {
     let mut dest = Document::new("Destination");
     dest.variables = src.variables.clone();
     let page = dest.first_page().unwrap();
-    let ids = insert(&mut dest, &mut src, &[root, main, instance], page, Affine::IDENTITY, &mut vec![]).unwrap();
+    let ids = insert(&mut dest, &mut src, &[root, main, instance], page, Affine::IDENTITY, &mut vec![], &mut BTreeSet::new()).unwrap();
     let root = dest.get(ids[0]).unwrap();
     let bound = root.bound.get("fills/0/color").unwrap();
     assert_ne!(bound, "accent");
@@ -177,4 +177,97 @@ fn clipboard_image_bytes_use_the_file_resolver_and_are_saved_with_the_design() {
     assert_eq!(doc.images.get(&image.image).unwrap().bytes.as_ref(), &png);
     let (saved, _) = figcraft_format::load_bytes(&figcraft_format::save_bytes(doc, None).unwrap()).unwrap();
     assert_eq!(saved.images.get(&image.image).unwrap().bytes.as_ref(), &png);
+}
+
+/// A copy whose rectangle paints a 2×2 PNG: (clipboard HTML, the image's key on the clipboard,
+/// the PNG, the whole `.fig` file the copy came from).
+fn image_copy() -> (String, String, Vec<u8>, Vec<u8>) {
+    let mut source = fixture();
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    image::RgbaImage::from_pixel(2, 2, image::Rgba([30, 140, 80, 255])).write_to(&mut encoded, image::ImageFormat::Png).unwrap();
+    let png = encoded.into_inner();
+    let (hash, _, _) = figcraft_format::add_image(&mut source, png.clone()).unwrap();
+    let rect = source.find_by_name("Editable rectangle", None)[0];
+    source.get_mut(rect).unwrap().fills = vec![figcraft_color::Paint::image(hash, figcraft_color::ImageScaleMode::Fill)];
+    let html = html(&source);
+    let contents = figcraft_format::fig::clipboard::decode(&html).unwrap();
+    let (imported, _) = figcraft_format::fig::import(&contents.canvas, "Clipboard").unwrap();
+    let key = imported
+        .nodes()
+        .flat_map(|n| &n.fills)
+        .find_map(|p| match &p.kind {
+            figcraft_color::PaintKind::Image(i) => Some(i.image.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let (fig, _) = figcraft_format::fig::export(&source, None).unwrap();
+    (html, key, png, fig)
+}
+
+fn rect_image(s: &Session) -> String {
+    let doc = s.doc().unwrap();
+    let r = doc.get(doc.find_by_name("Editable rectangle", None)[0]).unwrap();
+    let figcraft_color::PaintKind::Image(image) = &r.fills[0].kind else { panic!("image fill") };
+    image.image.clone()
+}
+
+#[test]
+fn images_that_did_not_load_keep_their_hash_are_reported_and_relink_from_the_fig_file() {
+    let (html, key, png, fig) = image_copy();
+    let mut s = Session::new();
+    let out = s.execute(CMD, &json!({"html": html, "imageFailures": {key.clone(): "timed out"}})).unwrap();
+    // The headline says how much came across and why, then how to get the rest.
+    let first = out["warnings"][0].as_str().unwrap();
+    assert!(first.starts_with("1 of 1 image(s) couldn't be loaded (1 timed out)"), "{out}");
+    assert!(first.contains("Relink missing images"), "{first}");
+    assert_eq!(out["warnings"].as_array().unwrap().len(), 1, "the importer's own image note isn't repeated: {out}");
+    assert_eq!(out["missingImages"], json!([{"hash": key, "reason": "timed out"}]));
+    assert_eq!(out["summary"]["layers"], 3);
+    assert_eq!(out["summary"]["images"], 0);
+    // The paint keeps the copy's own hash, on a recognisable placeholder (not a plain grey).
+    assert_eq!(rect_image(&s), key);
+    assert!(figcraft_format::rest::is_missing_image(&s.doc().unwrap().images[&key].bytes));
+
+    let before = s.doc().unwrap().clone();
+    let r = s.execute("image.relinkMissing", &json!({"data": base64::engine::general_purpose::STANDARD.encode(&fig)})).unwrap();
+    assert_eq!(r, json!({"relinked": 1, "missing": 0}));
+    let doc = s.doc().unwrap();
+    assert_eq!(doc.images[&rect_image(&s)].bytes.as_ref(), &png);
+    assert!(!doc.images.values().any(|i| figcraft_format::rest::is_missing_image(&i.bytes)), "the placeholder goes");
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(s.doc().unwrap(), &before);
+}
+
+#[test]
+fn relink_from_a_folder_matches_files_by_name_or_by_content() {
+    let dir = std::env::temp_dir().join(format!("figcraft-relink-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (html, key, png, _) = image_copy();
+    for by_name in [false, true] {
+        for f in std::fs::read_dir(&dir).unwrap() {
+            std::fs::remove_file(f.unwrap().path()).unwrap();
+        }
+        std::fs::write(dir.join("unrelated.png"), b"not an image").unwrap();
+        std::fs::write(dir.join(if by_name { format!("{key}.png") } else { "Exported photo.png".into() }), &png).unwrap();
+        let mut s = Session::new();
+        s.execute(CMD, &json!({"html": html})).unwrap();
+        let r = s.execute("image.relinkMissing", &json!({"path": dir.to_string_lossy()})).unwrap();
+        assert_eq!(r, json!({"relinked": 1, "missing": 0}), "by name: {by_name}");
+        assert_eq!(s.doc().unwrap().images[&rect_image(&s)].bytes.as_ref(), &png);
+        // Nothing left to relink is not an error.
+        assert_eq!(s.execute("image.relinkMissing", &json!({"path": dir.to_string_lossy()})).unwrap(), json!({"relinked": 0, "missing": 0}));
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn relink_refuses_junk_without_touching_the_document() {
+    let (html, ..) = image_copy();
+    let mut s = Session::new();
+    s.execute(CMD, &json!({"html": html})).unwrap();
+    let before = s.doc().unwrap().clone();
+    for p in [json!({}), json!({"data": "@@"}), json!({"data": "AAAA"}), json!({"path": "/nonexistent/figcraft/relink.fig"})] {
+        assert!(s.execute("image.relinkMissing", &p).is_err(), "{p}");
+        assert_eq!(s.doc().unwrap(), &before);
+    }
 }

@@ -18,6 +18,7 @@ pub const UI_COMMANDS: &[&str] = &[
     "file.open",
     "file.import",
     "file.placeImage",
+    "file.relinkImages",
     "file.save",
     "file.saveAs",
     "file.export",
@@ -123,6 +124,7 @@ pub fn invoke(app: &mut FigApp, id: &str) {
         "plugin.import" => crate::plugins_ui::import_dialog(app),
         "file.import" => app.import_dialog(false),
         "file.placeImage" => app.import_dialog(true),
+        "file.relinkImages" => relink_images_dialog(app),
         "file.save" => app.save(),
         "file.saveAs" => app.save_as_dialog(),
         "file.openRecent" => {
@@ -1416,6 +1418,20 @@ pub(crate) fn recent_row(app: &FigApp, key: &str, q: &str) -> Option<ActionRow> 
         });
     }
     None
+}
+
+/// File ▸ Relink missing images…: a `.fig` copy of the source file, or any image in a folder of
+/// the images (the whole folder is searched).
+fn relink_images_dialog(app: &mut FigApp) {
+    app.pick_open(tr("Relink missing images"), &["fig", "png", "jpg", "jpeg", "webp", "gif"], |app, path| {
+        let is_fig = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("fig"));
+        let source = if is_fig { Some(path) } else { path.parent().map(std::path::Path::to_path_buf) };
+        let Some(source) = source else { return };
+        if let Some(r) = app.run("image.relinkMissing", json!({"path": source.to_string_lossy()})) {
+            let (done, left) = (r["relinked"].as_u64().unwrap_or(0), r["missing"].as_u64().unwrap_or(0));
+            app.toast(trf("Relinked {done} images; {left} still missing", &[("done", &done), ("left", &left)]));
+        }
+    });
 }
 
 #[cfg(test)]

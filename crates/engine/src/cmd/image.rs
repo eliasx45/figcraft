@@ -34,6 +34,13 @@ pub fn specs() -> Vec<CommandSpec> {
             }
             ok()
         }),
+        spec!(
+            "image.relinkMissing",
+            "Relink missing images",
+            "{path? (a .fig file, or a folder of image files named by their hash or matching it), data? (base64 of a .fig file)} → {relinked, missing}  fills in images a paste or an import couldn't load (shown as missing-image placeholders); the others stay as they are",
+            true,
+            relink_missing
+        ),
         spec!("image.presets", "Image presets", "{} → {builtIn: [{id, label, filters}], saved: [{name, filters}]}", false, |s, _| {
             let built_in: Vec<Value> = ImageFilters::PRESETS.iter().map(|(id, label, f)| json!({"id": id, "label": label, "filters": f})).collect();
             Ok(json!({"builtIn": built_in, "saved": s.doc()?.image_presets}))
@@ -170,4 +177,101 @@ fn save_preset(s: &mut Session, p: &Value) -> Result<Value> {
         None => doc.image_presets.push(preset),
     }
     Ok(json!({"name": name, "filters": filters}))
+}
+
+/// A `.fig` file (or a folder's image) read for relinking: as big as a file may open.
+const MAX_RELINK_FILE: u64 = 1024 * 1024 * 1024;
+/// One image file in a folder.
+const MAX_RELINK_IMAGE: u64 = 64 * 1024 * 1024;
+/// Files looked at in a folder.
+const MAX_RELINK_FILES: usize = 5_000;
+
+/// Images of `.fig` bytes or of the files in folder `path` that some of `missing` (hashes) name.
+fn relink_sources(p: &Value, missing: &[String]) -> Result<std::collections::BTreeMap<String, Vec<u8>>> {
+    const CMD: &str = "image.relinkMissing";
+    let fig = |bytes: &[u8]| figcraft_format::fig::archive_images(bytes, missing.iter().map(String::as_str)).map_err(|e| bad(CMD, e.to_string()));
+    if let Some(data) = string(p, "data") {
+        use base64::Engine as _;
+        let bytes = base64::engine::general_purpose::STANDARD.decode(data.trim()).map_err(|_| bad(CMD, "`data` is not base64"))?;
+        return fig(&bytes);
+    }
+    let path = string(p, "path").ok_or_else(|| bad(CMD, "pass `path` (a .fig file or a folder) or `data`"))?;
+    if !crate::file_access::is_dir(&path) {
+        return fig(&crate::file_access::read_capped(&path, MAX_RELINK_FILE)?);
+    }
+    let mut found = std::collections::BTreeMap::new();
+    for file in crate::file_access::read_dir(&path)?.into_iter().take(MAX_RELINK_FILES) {
+        if found.len() == missing.len() {
+            break;
+        }
+        let stem = file.file_stem().and_then(|s| s.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
+        let named = missing.iter().find(|h| **h == stem && !found.contains_key(*h)).cloned();
+        let Ok(bytes) = crate::file_access::read_capped(&file, MAX_RELINK_IMAGE) else { continue };
+        // A file named by its hash, or one whose bytes have a missing image's hash (a `.fig`
+        // file's SHA-1, or the SHA-256 FigCraft's own files use).
+        let hash = named
+            .or_else(|| [figcraft_format::fig::image_hash(&bytes), figcraft_format::image_hash(&bytes)].into_iter().find(|h| missing.contains(h)));
+        if let Some(h) = hash {
+            found.insert(h, bytes);
+        }
+    }
+    Ok(found)
+}
+
+fn relink_missing(s: &mut Session, p: &Value) -> Result<Value> {
+    let doc = s.doc()?;
+    let missing: Vec<String> =
+        doc.images.iter().filter(|(_, img)| figcraft_format::rest::is_missing_image(&img.bytes)).map(|(k, _)| k.clone()).collect();
+    if missing.is_empty() {
+        return Ok(json!({"relinked": 0, "missing": 0}));
+    }
+    let found = relink_sources(p, &missing)?;
+    let doc = s.doc_mut()?;
+    let mut renamed = std::collections::BTreeMap::new();
+    for (old, bytes) in found {
+        // Bytes that don't decode as an image stay missing.
+        if let Ok((new, _, _)) = figcraft_format::add_image(doc, bytes) {
+            renamed.insert(old, new);
+        }
+    }
+    let rename = |paints: &mut [figcraft_color::Paint]| {
+        for paint in paints {
+            if let PaintKind::Image(img) = &mut paint.kind
+                && let Some(new) = renamed.get(&img.image)
+            {
+                img.image = new.clone();
+            }
+        }
+    };
+    let ids: Vec<_> = doc.nodes().map(|n| n.id).collect();
+    for id in ids {
+        if let Some(n) = doc.node_mut(id) {
+            rename(&mut n.fills);
+            rename(&mut n.strokes);
+            if let figcraft_doc::NodeKind::Text(t) = &mut n.kind {
+                if let Some(f) = t.style.fills.as_mut() {
+                    rename(f);
+                }
+                for r in &mut t.runs {
+                    if let Some(f) = r.style.fills.as_mut() {
+                        rename(f);
+                    }
+                }
+            }
+        }
+    }
+    for style in &mut doc.styles {
+        if let figcraft_doc::StyleKind::Paint { paints } = &mut style.kind {
+            rename(paints);
+        }
+    }
+    for (old, new) in &renamed {
+        if old == new {
+            // Same key, new bytes: the decoded placeholder must not be drawn again.
+            figcraft_render::images::forget(old);
+        } else {
+            doc.images.remove(old);
+        }
+    }
+    Ok(json!({"relinked": renamed.len(), "missing": missing.len() - renamed.len()}))
 }

@@ -176,6 +176,19 @@ fn embedded_image<'k>(image: &Kv, blobs: &'k [Kv]) -> Option<(String, &'k [u8])>
     Some((hash.iter().map(|b| format!("{b:02x}")).collect(), bytes))
 }
 
+/// The hash a `.fig` file names an image by: the SHA-1 of its bytes, in lowercase hex.
+pub fn image_hash(bytes: &[u8]) -> String {
+    use sha1::Digest as _;
+    sha1::Sha1::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The images of `.fig` file `bytes` among `hashes` (the ones it has), for relinking images that
+/// a paste left out. Damaged or unreadable members are skipped.
+pub fn archive_images<'h>(bytes: &[u8], hashes: impl IntoIterator<Item = &'h str>) -> Result<BTreeMap<String, Vec<u8>>, FormatError> {
+    let archive = Archive::open(bytes)?;
+    Ok(hashes.into_iter().filter_map(|h| Some((h.to_string(), archive.image(&h.to_ascii_lowercase())?))).collect())
+}
+
 /// The parts of a `.fig` archive the import reads.
 struct Archive<'b> {
     canvas: Vec<u8>,

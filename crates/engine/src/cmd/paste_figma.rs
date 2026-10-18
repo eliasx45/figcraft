@@ -10,7 +10,10 @@ use serde_json::{Value, json};
 use crate::{EngineError, Result, Session, bad};
 
 const CMD: &str = "edit.pasteFigma";
-const MAX_IMAGE_BYTES: usize = 64 * 1024 * 1024;
+/// All images of one paste (the platform's download cap); images past it are left out, not refused.
+const MAX_IMAGE_BYTES: usize = 512 * 1024 * 1024;
+/// Missing images listed by hash in the result.
+const MAX_LISTED: usize = 200;
 
 #[cfg(test)]
 #[path = "paste_figma_tests.rs"]
@@ -21,6 +24,7 @@ pub(super) fn run(s: &mut Session, p: &Value) -> Result<Value> {
     let contents = figcraft_format::fig::clipboard::decode(html).map_err(|e| bad(CMD, e.to_string()))?;
     let mut images = BTreeMap::new();
     let mut budget = MAX_IMAGE_BYTES;
+    let mut over_budget = 0usize;
     if let Some(entries) = p.get("images").and_then(Value::as_object) {
         if entries.len() > 256 {
             return Err(bad(CMD, "too many images"));
@@ -28,13 +32,29 @@ pub(super) fn run(s: &mut Session, p: &Value) -> Result<Value> {
         for (hash, value) in entries {
             let value = value.as_str().ok_or_else(|| bad(CMD, "image values must be base64"))?;
             if value.len() > budget.saturating_mul(4).div_ceil(3) + 4 {
-                return Err(bad(CMD, "clipboard images exceed 64 MiB"));
+                over_budget += 1;
+                continue;
             }
             let bytes = base64::engine::general_purpose::STANDARD.decode(value).map_err(|_| bad(CMD, "invalid image base64"))?;
-            budget = budget.checked_sub(bytes.len()).ok_or_else(|| bad(CMD, "clipboard images exceed 64 MiB"))?;
+            match budget.checked_sub(bytes.len()) {
+                Some(left) => budget = left,
+                None => {
+                    over_budget += 1;
+                    continue;
+                }
+            }
             images.insert(hash.clone(), bytes);
         }
     }
+    // Why the platform couldn't load an image, by hash (shown with the missing images).
+    let failures: BTreeMap<String, String> = p
+        .get("imageFailures")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .take(256)
+        .filter_map(|(h, why)| Some((h.chars().take(64).collect(), why.as_str()?.chars().take(200).collect())))
+        .collect();
     let (mut other, mut warnings) = figcraft_format::fig::import_with_images(&contents.canvas, "Pasted Figma layers", &|h| {
         images.get(h).cloned().or_else(|| s.doc().ok()?.images.get(h).map(|i| i.bytes.as_ref().clone()))
     })
@@ -50,9 +70,66 @@ pub(super) fn run(s: &mut Session, p: &Value) -> Result<Value> {
         (Some((x, y)), Some(b)) => Affine::translate((x - b.x0, y - b.y0)),
         _ => Affine::IDENTITY,
     };
-    let ids = insert(s.doc_mut()?, &mut other, &roots, parent, shift, &mut warnings)?;
+    let mut missing = BTreeSet::new();
+    let ids = insert(s.doc_mut()?, &mut other, &roots, parent, shift, &mut warnings, &mut missing)?;
     s.set_selection(ids.clone());
-    Ok(json!({"ids": ids, "warnings": warnings}))
+    let layers: usize = ids.iter().map(|id| s.doc().map_or(0, |d| d.subtree(*id).len())).sum();
+    let used = image_keys(s.doc()?, &ids);
+    let loaded = used.len().saturating_sub(missing.len());
+    let missing_list: Vec<Value> = missing
+        .iter()
+        .take(MAX_LISTED)
+        .map(|h| json!({"hash": h, "reason": failures.get(h).map_or("not on the clipboard", String::as_str)}))
+        .collect();
+    // The headline goes first: how much of the copy came across.
+    let mut notes = Vec::new();
+    if !missing.is_empty() {
+        let mut why: BTreeMap<&str, usize> = BTreeMap::new();
+        for h in &missing {
+            *why.entry(failures.get(h).map_or("not on the clipboard", String::as_str)).or_default() += 1;
+        }
+        let why: Vec<String> = why.into_iter().map(|(r, n)| format!("{n} {r}")).collect();
+        notes.push(format!(
+            "{} of {} image(s) couldn't be loaded ({}); they show a missing-image placeholder. File ▸ Relink missing images… fills them in from a .fig copy of the file or a folder of the images",
+            missing.len(),
+            used.len(),
+            why.join(", ")
+        ));
+    }
+    if over_budget > 0 {
+        notes.push(format!("{over_budget} images were left out: the copy's images pass 512 MB"));
+    }
+    // The headline already covers the importer's own note about missing images.
+    if !missing.is_empty() {
+        warnings.retain(|w| !w.contains("missing-image placeholder"));
+    }
+    match warnings.len() {
+        0 => {}
+        1 => notes.push("1 layer or property was approximated or left out (listed below)".into()),
+        n => notes.push(format!("{n} layers or properties were approximated or left out (listed below)")),
+    }
+    notes.append(&mut warnings);
+    Ok(json!({
+        "ids": ids,
+        "warnings": notes,
+        "missingImages": missing_list,
+        "summary": {"name": "Pasted Figma layers", "layers": layers, "images": loaded},
+    }))
+}
+
+/// Image keys the paints of `roots` and their layers use.
+fn image_keys(doc: &Document, roots: &[NodeId]) -> BTreeSet<String> {
+    let mut keys = BTreeSet::new();
+    for id in roots.iter().flat_map(|r| doc.subtree(*r)) {
+        if let Some(n) = doc.node(id) {
+            for paint in n.fills.iter().chain(&n.strokes) {
+                if let figcraft_color::PaintKind::Image(image) = &paint.kind {
+                    keys.insert(image.image.clone());
+                }
+            }
+        }
+    }
+    keys
 }
 
 fn warn(warnings: &mut Vec<String>, message: String) {
@@ -102,6 +179,7 @@ fn insert(
     parent: NodeId,
     shift: Affine,
     warnings: &mut Vec<String>,
+    missing: &mut BTreeSet<String>,
 ) -> Result<Vec<NodeId>> {
     // A reserved node id gives this import a collision-free namespace, including references whose
     // definitions were absent from the clipboard. Such references cannot bind to unrelated data.
@@ -120,6 +198,12 @@ fn insert(
         + ":";
     let mut images = BTreeMap::new();
     for (old, image) in &src.images {
+        // A missing image keeps its own hash (not the placeholder's), so it can be relinked later.
+        if figcraft_format::rest::is_missing_image(&image.bytes) {
+            doc.images.entry(old.clone()).or_insert_with(|| image.clone());
+            missing.insert(old.clone());
+            continue;
+        }
         let (hash, _, _) = figcraft_format::add_image(doc, image.bytes.as_ref().clone()).map_err(|e| EngineError::Other(e.to_string()))?;
         images.insert(old.clone(), hash);
     }

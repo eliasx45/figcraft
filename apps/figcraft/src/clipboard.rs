@@ -1,9 +1,20 @@
 //! Only the image URLs explicitly carried by a Figma copy. No login, cookies or API token.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, channel};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-const MAX_BYTES: u64 = 64 * 1024 * 1024;
+use figcraft_ui_egui::clipboard::Fetched;
+
+/// All images of one paste together. A storyboard of phone screenshots easily passes 100 MB.
+const MAX_BYTES: u64 = 512 * 1024 * 1024;
+/// One image (the `.fig` import's own cap).
+const MAX_IMAGE: u64 = 64 * 1024 * 1024;
+/// Downloads at a time: a page of photos one after another took longer than any sane wait.
+const WORKERS: usize = 6;
+const PER_IMAGE: Duration = Duration::from_secs(30);
+const OVERALL: Duration = Duration::from_secs(120);
 
 fn allowed(raw: &str, hash: &str) -> bool {
     let Ok(url) = url::Url::parse(raw) else { return false };
@@ -18,34 +29,80 @@ fn allowed(raw: &str, hash: &str) -> bool {
         && url.path().strip_prefix("/img/").is_some_and(|p| p.replace('/', "") == hash)
 }
 
-pub fn fetch(images: BTreeMap<String, String>) -> Option<Receiver<BTreeMap<String, Vec<u8>>>> {
+/// One image: its bytes, or a short reason (never the signed URL, which must not be logged).
+fn get(agent: &ureq::Agent, url: &str, budget: &AtomicU64) -> Result<Vec<u8>, String> {
+    let mut response = agent.get(url).call().map_err(|e| match e {
+        ureq::Error::StatusCode(code) => format!("the server answered {code}"),
+        ureq::Error::Timeout(_) => "timed out".into(),
+        _ => "couldn't connect".into(),
+    })?;
+    let left = budget.load(Ordering::Relaxed);
+    if left == 0 {
+        return Err("over the 512 MB limit for one paste".into());
+    }
+    let bytes = response.body_mut().with_config().limit(left.min(MAX_IMAGE)).read_to_vec().map_err(|e| match e {
+        ureq::Error::BodyExceedsLimit(_) => "too large".to_string(),
+        ureq::Error::Timeout(_) => "timed out".into(),
+        _ => "the download broke off".into(),
+    })?;
+    let len = bytes.len() as u64;
+    budget.try_update(Ordering::Relaxed, Ordering::Relaxed, |b| b.checked_sub(len)).map_err(|_| "over the 512 MB limit for one paste".to_string())?;
+    Ok(bytes)
+}
+
+pub fn fetch(images: BTreeMap<String, String>) -> Option<Receiver<Fetched>> {
     let (tx, rx) = channel();
     std::thread::Builder::new()
         .name("figcraft-clipboard-images".into())
         .spawn(move || {
-            let agent: ureq::Agent =
-                ureq::Agent::config_builder().https_only(true).max_redirects(0).timeout_global(Some(Duration::from_secs(10))).build().into();
+            let agent: ureq::Agent = ureq::Agent::config_builder().https_only(true).max_redirects(0).timeout_global(Some(PER_IMAGE)).build().into();
             let started = Instant::now();
-            let mut out = BTreeMap::new();
-            let mut remaining = MAX_BYTES;
+            let budget = Arc::new(AtomicU64::new(MAX_BYTES));
+            let out = Arc::new(Mutex::new(Fetched::default()));
+            let mut queue = VecDeque::new();
             for (hash, url) in images.into_iter().take(256) {
-                if started.elapsed() >= Duration::from_secs(30) || remaining == 0 {
-                    break;
-                }
-                if !allowed(&url, &hash) {
-                    continue;
-                }
-                // Never log signed URLs. Failures become the shared importer's missing-image warnings.
-                let Ok(mut response) = agent.get(&url).call() else { continue };
-                if !response.status().is_success() {
-                    continue;
-                }
-                if let Ok(bytes) = response.body_mut().with_config().limit(remaining).read_to_vec() {
-                    remaining = remaining.saturating_sub(bytes.len() as u64);
-                    out.insert(hash, bytes);
+                if allowed(&url, &hash) {
+                    queue.push_back((hash, url));
+                } else if let Ok(mut o) = out.lock() {
+                    o.failed.insert(hash, "not a Figma image link".into());
                 }
             }
-            let _ = tx.send(out);
+            let queue = Arc::new(Mutex::new(queue));
+            let workers: Vec<_> = (0..WORKERS)
+                .filter_map(|i| {
+                    let (agent, budget, out, queue) = (agent.clone(), budget.clone(), out.clone(), queue.clone());
+                    std::thread::Builder::new()
+                        .name(format!("figcraft-clipboard-image-{i}"))
+                        .spawn(move || {
+                            while let Some((hash, url)) = queue.lock().ok().and_then(|mut q| q.pop_front()) {
+                                let result = if started.elapsed() >= OVERALL {
+                                    Err("not started within two minutes".into())
+                                } else {
+                                    get(&agent, &url, &budget)
+                                };
+                                if let Ok(mut o) = out.lock() {
+                                    match result {
+                                        Ok(bytes) => o.images.insert(hash, bytes).map(drop),
+                                        Err(why) => o.failed.insert(hash, why).map(drop),
+                                    };
+                                }
+                            }
+                        })
+                        .ok()
+                })
+                .collect();
+            for w in workers {
+                let _ = w.join();
+            }
+            // Images no worker reached (none could start) count as failed too.
+            let leftover: Vec<_> = queue.lock().map(|mut q| q.drain(..).collect()).unwrap_or_default();
+            let fetched = out.lock().map(|mut o| {
+                for (hash, _) in leftover {
+                    o.failed.insert(hash, "couldn't start a download".into());
+                }
+                std::mem::take(&mut *o)
+            });
+            let _ = tx.send(fetched.unwrap_or_default());
         })
         .ok()?;
     Some(rx)

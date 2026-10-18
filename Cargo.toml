@@ -64,6 +64,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 ruzstd = { version = "0.9.1", default-features = false, features = ["std"] }
 sha2 = "0.10"
+sha1 = "0.11"
 base64 = "0.22"
 crc32fast = "1"
 

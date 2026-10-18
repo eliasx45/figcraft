@@ -282,7 +282,7 @@ impl Services for Desktop {
     fn clipboard_images(
         &mut self,
         images: std::collections::BTreeMap<String, String>,
-    ) -> Option<std::sync::mpsc::Receiver<std::collections::BTreeMap<String, Vec<u8>>>> {
+    ) -> Option<std::sync::mpsc::Receiver<figcraft_ui_egui::clipboard::Fetched>> {
         crate::clipboard::fetch(images)
     }
     fn clipboard_set_png(&mut self, w: u32, h: u32, rgba: &[u8]) {

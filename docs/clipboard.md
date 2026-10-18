@@ -20,11 +20,16 @@ image resolver the file importer uses. Image data is embedded when the design is
 
 - Only HTTPS image URLs on `s3-alpha-sig.figma.com` and `s3-alpha.figma.com`, with the matching
   `/img/` hash path, are fetched. Redirects are not followed. No Figma credentials are used.
-- Limits: 64 MiB of HTML, 1 MiB of metadata, 256 images and 64 MiB of downloaded image bytes
-  in total. Individual requests time out after 10 seconds; new requests stop after 30 seconds.
+- Limits: 64 MiB of HTML, 1 MiB of metadata, 256 images and 512 MiB of downloaded image bytes
+  in total (64 MiB for one image). Six images download at a time; each request times out after
+  30 seconds and no new request starts after two minutes. (Until 2026-10-18 images came one at a
+  time within 30 seconds and 64 MiB, so a page of photos pasted mostly as grey boxes.)
   The shared `.fig` decoder also enforces its decompression, nesting and node limits.
-- Missing, expired or unavailable images receive the importer's placeholder and warning. Copy
-  again in Figma to refresh expired links. Invalid clipboard data produces an error, never an
+- Missing, expired or unavailable images keep their own hash and show a hatched missing-image
+  placeholder; the import report says how many didn't load and why (timed out, the server's
+  answer, over the limit). **File ▸ Relink missing images…** (`image.relinkMissing {path | data}`)
+  fills them in from a `.fig` copy of the source file or from a folder of the images (files named
+  by their hash, or whose bytes' SHA-1 is the hash). Copy again in Figma to refresh expired links. Invalid clipboard data produces an error, never an
   accidental paste of an older internal selection.
 - Switching designs/pages/selections or editing while images load cancels that pending paste.
   Each window keeps its own pending operation. A second paste waits until the current one ends.
@@ -42,7 +47,7 @@ no fill regions; the canvas, SVG and PDF share that outline behavior.
 
 ## Command and verification
 
-`edit.pasteFigma {html, images?: {hash: base64}, parent?, x?, y?}` returns `{ids, warnings}`.
+`edit.pasteFigma {html, images?: {hash: base64}, imageFailures?: {hash: reason}, parent?, x?, y?}` returns `{ids, warnings, missingImages: [{hash, reason}], summary: {layers, images}}`; the first warning is the headline (how many images did not load, and why).
 `x,y` are the pasted selection's top-left in page coordinates. CLI/MCP/control callers supply
 image bytes themselves; engine commands never perform network access or open dialogs.
 
