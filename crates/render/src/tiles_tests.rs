@@ -97,7 +97,7 @@ fn background_blurs_at_a_tile_edge_read_across_it() {
 fn tiles_off_the_content_are_empty_without_rendering() {
     let (doc, page, _) = scene();
     let far = TileKey { level: 0, x: 40, y: -30 };
-    let painted = CpuTilePainter.paint(&doc, page, &[far, TileKey { level: 0, x: 0, y: 0 }], &Options::default());
+    let painted = CpuTilePainter.paint(&doc, page, &[far, TileKey { level: 0, x: 0, y: 0 }], &Options::default(), &|| false);
     assert!(matches!(painted[0], (k, Some(Painted::Empty)) if k == far));
     assert!(matches!(painted[1].1, Some(Painted::Pixels(_))));
     // Rendered and found blank: empty too.
@@ -238,4 +238,17 @@ fn an_edit_touches_the_tiles_where_the_layer_was_and_is() {
     // Coarse tiles over both places are touched too.
     assert!(touched(&TileKey { level: -4, x: 0, y: 0 }, &areas, 0.0));
     assert_eq!(changed(&doc, &doc, page), Some(vec![]));
+}
+
+#[test]
+fn a_stop_leaves_the_tiles_not_started_for_later() {
+    let (doc, page, _) = scene();
+    let keys: Vec<TileKey> = (0..6).map(|x| TileKey { level: 0, x, y: 0 }).collect();
+    assert!(CpuTilePainter.paint(&doc, page, &keys, &Options::default(), &|| true).is_empty(), "stopped before any");
+    // Stop after the first tile starts: the rest are left out, none is reported as failed.
+    let started = std::sync::atomic::AtomicUsize::new(0);
+    let stop = || started.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 1;
+    let painted = CpuTilePainter.paint(&doc, page, &keys, &Options::default(), &stop);
+    assert!(!painted.is_empty() && painted.len() < keys.len(), "{} of {}", painted.len(), keys.len());
+    assert!(painted.iter().all(|(_, p)| p.is_some()));
 }

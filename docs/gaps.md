@@ -268,7 +268,8 @@ No alpha blockers: the alpha gate in [`roadmap.md`](roadmap.md#alpha-gate) passe
   `TilePainter` (CPU today) and kept as GPU textures (at most 256). A zoom draws each part of the
   screen from the sharpest image there is (the last render or a tile), so zooming far out or back
   in shows the whole page in the first frame, softer until the exact render lands. Edits stale only
-  the tiles they touch. Rendering is unchanged: a GPU painter can replace the CPU one behind the
+  the tiles they touch; a canvas render asked for stops the tiles not started yet (they're painted
+  after it), so tiles never hold up the canvas. Rendering is unchanged: a GPU painter can replace the CPU one behind the
   same interface, and the grid, cache and compositing stay.
 - **Landed (2026-10-15):** a bounded render margin is reused during panning and refilled before
   the visible view reaches its edge. The extra rendered area is capped at 1.6× visible pixels;
