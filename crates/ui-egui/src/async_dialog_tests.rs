@@ -121,3 +121,25 @@ fn dont_save_closes_the_tab_and_drops_its_changes() {
     assert_eq!(app.session.docs.len(), 1);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A picker that hasn't answered yet.
+struct Open;
+
+impl Services for Open {
+    fn pick_save(&mut self, _title: &str, _name: &str, _exts: &[&str]) -> DialogFuture {
+        Box::pin(std::future::pending())
+    }
+}
+
+#[test]
+fn an_open_dialog_keeps_looking_without_input() {
+    // The system's wake can be lost on macOS: a frame must come back on its own to see the answer.
+    let mut app = FigApp::new(Session::new(), Box::new(Open));
+    app.save_as_dialog();
+    let ctx = egui::Context::default();
+    let mut out = ctx.run_ui(egui::RawInput::default(), |ui| app.poll_dialog(ui.ctx()));
+    out.textures_delta.clear();
+    let delay = out.viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.repaint_delay);
+    assert!(delay.is_some_and(|d| d <= std::time::Duration::from_secs(1)), "repaint after {delay:?}");
+    assert!(app.pending_dialog.is_some());
+}
