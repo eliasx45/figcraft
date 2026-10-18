@@ -259,6 +259,26 @@ fn changed_areas(doc: &Document, page: NodeId, id: NodeId, out: &mut Vec<Rect>) 
     Some(())
 }
 
+/// Page areas that differ between `old` and `new` on `page` (see [`crate::tiles::changed`]):
+/// where changed layers were and are, what paints from them, and grainy layers they touch whole.
+pub(crate) fn changed_page_areas(old: &Document, new: &Document, page: NodeId) -> Option<Vec<Rect>> {
+    if old.color_profile != new.color_profile {
+        return None;
+    }
+    let (so, sn) = (sensitive(old), sensitive(new));
+    let mut areas = Vec::new();
+    for id in new.changed_ids(old, MAX_CHANGED)? {
+        if in_pattern_source(new, &sn, id) || in_pattern_source(old, &so, id) {
+            return None;
+        }
+        changed_areas(old, page, id, &mut areas)?;
+        changed_areas(new, page, id, &mut areas)?;
+    }
+    let grainy: Vec<Rect> = so.areas.iter().chain(&sn.areas).filter(|g| areas.iter().any(|a| a.intersect(**g).area() > 0.0)).copied().collect();
+    areas.extend(grainy);
+    Some(areas)
+}
+
 /// The previous frame brought up to date for `doc` at `px`, rendering only what changed; `None`
 /// when a full render is the better (or only correct) choice. Also returns the pixels rendered.
 fn patch(last: Frame, doc: &Arc<Document>, page: NodeId, view: &View, px: (i64, i64), opts: &Options, s: &Sensitive) -> Option<(Pixmap, u64)> {

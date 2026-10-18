@@ -20,6 +20,7 @@ pub mod paint;
 pub mod pattern;
 pub mod retained;
 pub mod shadow;
+pub mod tiles;
 
 pub use draw::{node_outline, paint_bounds, stroke_fill, subtree_outline, ts_path, vector_mask_outline};
 pub use export_depth::{ExportDepthError, MAX_EXPORT_DEPTH, check_export_depth};
@@ -475,5 +476,7 @@ mod solo_tests;
 mod spread_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tiles_tests;
 #[cfg(test)]
 mod width_tests;

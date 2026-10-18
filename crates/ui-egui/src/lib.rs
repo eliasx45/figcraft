@@ -60,6 +60,7 @@ pub mod shortcuts_panel;
 pub mod style_picker;
 pub mod tabs;
 pub mod theme;
+pub mod tiles;
 pub mod toolbar;
 pub mod typography;
 pub mod variable_ui;
@@ -202,6 +203,8 @@ mod shortcuts_tests;
 mod style_folder_rename_tests;
 #[cfg(test)]
 mod text_enter_tests;
+#[cfg(test)]
+mod tiles_tests;
 #[cfg(test)]
 mod titlebar_tests;
 #[cfg(test)]
@@ -1625,6 +1628,13 @@ impl FigApp {
 
     /// UI state as JSON (control channel `ui.inspect`).
     pub fn inspect(&self) -> Value {
+        // Apart: one json! of everything goes past the macro recursion limit.
+        let tiles = json!({
+            "kept": self.canvas.tiles.len(),
+            "textures": self.canvas.tiles.textures(),
+            "stale": self.canvas.tiles.stale(),
+            "drawn": self.canvas.tiles.drawn,
+        });
         let mut state = json!({
             "rightTab": self.ui.right_tab,
             "leftTab": self.ui.left_tab,
@@ -1675,6 +1685,7 @@ impl FigApp {
                 "quality": if self.canvas.tex_coarse { "preview" } else { "refined" },
                 "previewLatencyMs": self.canvas.preview_latency_ms,
                 "refineLatencyMs": self.canvas.refine_latency_ms,
+                "tiles": tiles,
             },
             "live": live::inspect(self),
             "window": self.windows.current,

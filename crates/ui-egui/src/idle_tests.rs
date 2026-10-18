@@ -73,11 +73,11 @@ impl Harness {
 }
 
 /// Waits (without drawing frames, however slow the machine) until the render thread is done with
-/// every job and has woken the UI for it; returns whether one was in flight.
+/// every job and tile and has woken the UI for it; returns whether one was in flight.
 pub(crate) fn wait_for_render(app: &FigApp) -> bool {
     let start = Instant::now();
     let mut waited = false;
-    while app.worker.as_ref().is_some_and(crate::render_worker::Worker::in_flight) {
+    while app.worker.as_ref().is_some_and(crate::render_worker::Worker::busy) {
         assert!(start.elapsed() < Duration::from_secs(120), "the render thread never finished");
         std::thread::sleep(Duration::from_millis(2));
         waited = true;

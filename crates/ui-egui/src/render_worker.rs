@@ -8,11 +8,14 @@
 //! whole view is first rendered coarsely ([`PREVIEW_FACTOR`] times fewer pixels each way, kept
 //! apart from the full image so pans and edits still build on it), then refined unless a newer
 //! request is already waiting.
+//! Between canvas renders the thread paints canvas tiles ([`figcraft_render::tiles`]) for
+//! [`crate::tiles`]: a few at a time, so a canvas render never waits behind more than a few.
 
 use std::sync::Arc;
 
 use figcraft_color::ColorProfile;
 use figcraft_doc::{Document, NodeId};
+use figcraft_render::tiles::{CpuTilePainter, Painted, TileKey, TilePainter};
 use figcraft_render::{Pixmap, Retained, View, Work};
 // A monotonic clock in the browser too: preview decisions rest on how long renders take there.
 use web_time::Instant;
@@ -60,6 +63,52 @@ pub struct Done {
     pub coarse: bool,
     /// [`Job::at`].
     pub at: Instant,
+}
+
+/// What tiles are rendered with: tiles of other options aren't shown.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TileOpts {
+    pub outline: bool,
+    pub outline_extras: figcraft_render::Outline,
+    pub outlined: Vec<NodeId>,
+    pub solo: Option<NodeId>,
+    pub proof: bool,
+    /// [`figcraft_text::layout_generation`]: new fonts change text everywhere.
+    pub fonts: u64,
+}
+
+/// Tiles to paint, most useful first; a newer batch replaces the one being painted.
+#[derive(Clone)]
+pub struct TileBatch {
+    /// Set by the worker it's submitted to.
+    pub seq: u64,
+    pub doc: Arc<Document>,
+    pub page: NodeId,
+    /// [`crate::tiles::TileCache`]'s generation: tiles of an older one are dropped.
+    pub generation: u64,
+    pub opts: TileOpts,
+    pub keys: Vec<TileKey>,
+}
+
+pub struct TileDone {
+    pub key: TileKey,
+    /// `None`: only the page's background.
+    pub image: Option<egui::ColorImage>,
+    /// The document it shows (it may have changed since).
+    pub doc: Arc<Document>,
+    pub generation: u64,
+}
+
+/// Tiles a canvas render waits behind at most: one per core.
+fn tile_chunk() -> usize {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get).clamp(1, 16)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        2
+    }
 }
 
 /// A render of a document in `profile` as a texture image for the screen (sRGB).
@@ -123,6 +172,8 @@ pub struct Renders {
     full_ms: f64,
     /// Previews come first only when renders from scratch take at least this long.
     preview_after_ms: f64,
+    /// Paints canvas tiles: on the CPU today.
+    painter: Box<dyn TilePainter>,
 }
 
 impl Default for Renders {
@@ -134,7 +185,14 @@ impl Default for Renders {
 impl Renders {
     /// Previews when renders from scratch take at least `ms` (tests: 0, always).
     pub fn with_threshold(ms: f64) -> Self {
-        Self { full: Retained::default(), preview: Retained::default(), last: None, full_ms: 0.0, preview_after_ms: ms }
+        Self {
+            full: Retained::default(),
+            preview: Retained::default(),
+            last: None,
+            full_ms: 0.0,
+            preview_after_ms: ms,
+            painter: Box::new(CpuTilePainter),
+        }
     }
 
     /// Whether `job` gets a preview first: the kept image is of another zoom, page or file (so the
@@ -168,6 +226,40 @@ impl Renders {
     }
 }
 
+impl Renders {
+    /// Paint `keys` of `batch`, ready for textures. A panic paints none of them.
+    pub fn tiles(&mut self, batch: &TileBatch, keys: &[TileKey]) -> Vec<TileDone> {
+        let o = &batch.opts;
+        let opts = figcraft_render::Options {
+            outline_mode: o.outline,
+            outline: o.outline_extras,
+            outlined: o.outlined.clone(),
+            solo: o.solo,
+            lod: true,
+            ..Default::default()
+        };
+        let painter = &mut self.painter;
+        let painted =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| painter.paint(&batch.doc, batch.page, keys, &opts))).unwrap_or_default();
+        painted
+            .into_iter()
+            .filter_map(|(key, p)| {
+                let image = match p? {
+                    Painted::Empty => None,
+                    Painted::Pixels(pix) => {
+                        let mut image = screen_image(&pix, batch.doc.color_profile);
+                        if o.proof {
+                            mark_outside_srgb(&mut image, &pix, batch.doc.color_profile);
+                        }
+                        Some(image)
+                    }
+                };
+                Some(TileDone { key, image, doc: batch.doc.clone(), generation: batch.generation })
+            })
+            .collect()
+    }
+}
+
 /// Run `f` on `retained`; after a panic, forget the image it may have left half drawn.
 fn guarded(retained: &mut Retained, f: impl FnOnce(&mut Retained) -> Option<Done>) -> Option<Done> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(retained))) {
@@ -180,32 +272,116 @@ fn guarded(retained: &mut Retained, f: impl FnOnce(&mut Retained) -> Option<Done
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+enum Msg {
+    Job(u64, Job),
+    Tiles(TileBatch),
+}
+
+/// The batch being painted and how far it got.
+type Painting = Option<(TileBatch, usize)>;
+
+/// Take what's queued: the newest job (if any) and the newest tile batch.
+#[cfg(not(target_arch = "wasm32"))]
+fn drain(jobs: &std::sync::mpsc::Receiver<Msg>, tiles: &mut Painting) -> Option<(u64, Job)> {
+    let mut newest = None;
+    while let Ok(m) = jobs.try_recv() {
+        match m {
+            Msg::Job(seq, job) => newest = Some((seq, job)),
+            Msg::Tiles(b) => *tiles = Some((b, 0)),
+        }
+    }
+    newest
+}
+
+/// Paint the next chunk of the batch; `None` when it has none left.
+fn paint_next(renders: &mut Renders, tiles: &mut Painting) -> Option<Vec<TileDone>> {
+    let (batch, at) = tiles.as_mut()?;
+    let keys = batch.keys.get(*at..)?.iter().take(tile_chunk()).copied().collect::<Vec<_>>();
+    if keys.is_empty() {
+        *tiles = None;
+        return None;
+    }
+    *at += keys.len();
+    Some(renders.tiles(batch, &keys))
+}
+
+fn tiles_left(tiles: &Painting) -> bool {
+    tiles.as_ref().is_some_and(|(b, at)| *at < b.keys.len())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub struct Worker {
-    tx: std::sync::mpsc::Sender<(u64, Job)>,
+    tx: std::sync::mpsc::Sender<Msg>,
     rx: std::sync::mpsc::Receiver<Done>,
+    tile_rx: std::sync::mpsc::Receiver<TileDone>,
     /// Jobs submitted so far.
     submitted: u64,
     /// The newest job the thread is done with: rendered (or skipped for a newer one) and the UI
     /// woken for it.
     finished: Arc<std::sync::atomic::AtomicU64>,
+    /// Tile batches submitted so far, and the newest one painted (older ones it replaced count).
+    tiles_submitted: u64,
+    tiles_finished: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Worker {
     pub fn new(ctx: egui::Context) -> Self {
-        let (tx, jobs) = std::sync::mpsc::channel::<(u64, Job)>();
+        use std::sync::mpsc::TryRecvError;
+        let (tx, jobs) = std::sync::mpsc::channel::<Msg>();
         let (done_tx, rx) = std::sync::mpsc::channel::<Done>();
+        let (tile_tx, tile_rx) = std::sync::mpsc::channel::<TileDone>();
         let finished = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let done_with = finished.clone();
+        let tiles_finished = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let tiles_done_with = tiles_finished.clone();
         // The window that renders with it (each window has its own worker).
         let viewport = ctx.viewport_id();
         let spawned = std::thread::Builder::new().name("figcraft-render".into()).spawn(move || {
             let mut renders = Renders::default();
             let mut next = None;
+            let mut tiles: Painting = None;
             loop {
-                let Some((mut seq, mut job)) = next.take().or_else(|| jobs.recv().ok()) else { break };
+                let first = match next.take() {
+                    Some(j) => Some(j),
+                    // Wait for work only when no tiles are left to paint.
+                    None if tiles_left(&tiles) => match jobs.try_recv() {
+                        Ok(Msg::Job(seq, job)) => Some((seq, job)),
+                        Ok(Msg::Tiles(b)) => {
+                            tiles = Some((b, 0));
+                            continue;
+                        }
+                        Err(TryRecvError::Empty) => None,
+                        Err(TryRecvError::Disconnected) => break,
+                    },
+                    None => match jobs.recv() {
+                        Ok(Msg::Job(seq, job)) => Some((seq, job)),
+                        Ok(Msg::Tiles(b)) => {
+                            tiles = Some((b, 0));
+                            continue;
+                        }
+                        Err(_) => break,
+                    },
+                };
+                let Some((mut seq, mut job)) = first else {
+                    // Idle: a few tiles, then look for a canvas render again.
+                    let seq = tiles.as_ref().map_or(0, |(b, _)| b.seq);
+                    if let Some(done) = paint_next(&mut renders, &mut tiles) {
+                        for d in done {
+                            if tile_tx.send(d).is_err() {
+                                return;
+                            }
+                        }
+                        ctx.request_repaint_of(viewport);
+                    }
+                    if !tiles_left(&tiles) {
+                        tiles = None;
+                        tiles_done_with.store(seq, std::sync::atomic::Ordering::Release);
+                    }
+                    continue;
+                };
                 // Skip to the newest queued job.
-                while let Ok(newer) = jobs.try_recv() {
+                if let Some(newer) = drain(&jobs, &mut tiles) {
                     (seq, job) = newer;
                 }
                 if let Some(d) = renders.preview(&job) {
@@ -214,7 +390,7 @@ impl Worker {
                     }
                     ctx.request_repaint_of(viewport);
                     // A newer request makes refining this one moot: it gets its own preview.
-                    if let Ok(newer) = jobs.try_recv() {
+                    if let Some(newer) = drain(&jobs, &mut tiles) {
                         next = Some(newer);
                         continue;
                     }
@@ -231,17 +407,31 @@ impl Worker {
         if let Err(e) = spawned {
             log::error!("render thread: {e}");
         }
-        Self { tx, rx, submitted: 0, finished }
+        Self { tx, rx, tile_rx, submitted: 0, finished, tiles_submitted: 0, tiles_finished }
     }
 
     pub fn submit(&mut self, job: Job) {
-        if self.tx.send((self.submitted + 1, job)).is_ok() {
+        if self.tx.send(Msg::Job(self.submitted + 1, job)).is_ok() {
             self.submitted += 1;
         }
     }
 
+    /// Paint these tiles when there's nothing else to render (replacing the tiles asked for
+    /// before).
+    pub fn submit_tiles(&mut self, mut batch: TileBatch) {
+        batch.seq = self.tiles_submitted + 1;
+        if self.tx.send(Msg::Tiles(batch)).is_ok() {
+            self.tiles_submitted += 1;
+        }
+    }
+
+    /// [`Self::in_flight`], or tiles still being painted (tests waiting for a still UI).
+    pub fn busy(&self) -> bool {
+        self.in_flight() || self.tiles_finished.load(std::sync::atomic::Ordering::Acquire) < self.tiles_submitted
+    }
+
     /// Whether a submitted job is still rendering or hasn't woken the UI yet (a finished image
-    /// may still wait for [`Self::poll`]).
+    /// may still wait for [`Self::poll`]). Tiles don't count.
     pub fn in_flight(&self) -> bool {
         self.finished.load(std::sync::atomic::Ordering::Acquire) < self.submitted
     }
@@ -253,6 +443,11 @@ impl Worker {
         }
         last
     }
+
+    /// The tiles painted since the last call.
+    pub fn poll_tiles(&mut self) -> Vec<TileDone> {
+        self.tile_rx.try_iter().collect()
+    }
 }
 
 /// The browser's worker: renders inline, one image a frame: a preview first when one is due, the
@@ -263,6 +458,7 @@ pub struct Inline {
     pending: Option<Job>,
     previewed: bool,
     renders: Renders,
+    tiles: Painting,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -270,7 +466,21 @@ pub type Worker = Inline;
 
 impl Inline {
     pub fn new(ctx: egui::Context) -> Self {
-        Self { ctx, pending: None, previewed: false, renders: Renders::default() }
+        Self { ctx, pending: None, previewed: false, renders: Renders::default(), tiles: None }
+    }
+    pub fn submit_tiles(&mut self, batch: TileBatch) {
+        self.tiles = Some((batch, 0));
+    }
+    /// A few tiles a frame while no canvas render is pending.
+    pub fn poll_tiles(&mut self) -> Vec<TileDone> {
+        if self.pending.is_some() {
+            return vec![];
+        }
+        let done = paint_next(&mut self.renders, &mut self.tiles).unwrap_or_default();
+        if tiles_left(&self.tiles) {
+            self.ctx.request_repaint();
+        }
+        done
     }
     pub fn submit(&mut self, job: Job) {
         self.pending = Some(job);
@@ -278,6 +488,9 @@ impl Inline {
     }
     pub fn in_flight(&self) -> bool {
         self.pending.is_some()
+    }
+    pub fn busy(&self) -> bool {
+        self.pending.is_some() || tiles_left(&self.tiles)
     }
     pub fn poll(&mut self) -> Option<Done> {
         if !self.previewed {

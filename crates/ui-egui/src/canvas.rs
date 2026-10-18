@@ -23,6 +23,8 @@ pub struct CanvasState {
     tex_of: Option<(u64, NodeId)>,
     /// The texture is a coarse preview (see [`crate::render_worker`]).
     pub tex_coarse: bool,
+    /// Tiles shown where the texture doesn't reach or is blurrier (see [`crate::tiles`]).
+    pub tiles: crate::tiles::TileCache,
     submitted: Option<JobKey>,
     /// The view of the last render asked for.
     want_view: Option<figcraft_render::View>,
@@ -58,6 +60,7 @@ impl Default for CanvasState {
             tex_view: None,
             tex_of: None,
             tex_coarse: false,
+            tiles: crate::tiles::TileCache::default(),
             submitted: None,
             want_view: None,
             render_work: None,
@@ -195,7 +198,17 @@ pub fn show(app: &mut FigApp, ui: &mut Ui, worker: &mut Worker) {
     app.sync_preedit();
     // Retained rendering snaps the view outward and adds one pixel on each axis.
     let max_texture_side = (ctx.input(|i| i.max_texture_side).min(16_384) as u32).saturating_sub(1).max(1);
-    request_render(app, worker, ppp, max_texture_side);
+    let tiled = tiles_on(app);
+    // A new document this frame (an edit, maybe one of a drag's): tiles wait for a still one.
+    let mut edited = false;
+    if let Some((uid, page, opts, doc)) = tiled.then(|| tile_source(app)).flatten() {
+        edited = app.canvas.tiles.sync(uid, page, &opts, &doc);
+    }
+    for d in worker.poll_tiles() {
+        app.canvas.tiles.insert(&ctx, d);
+    }
+    app.canvas.tiles.begin_frame();
+    request_render(app, worker, ppp, max_texture_side, tiled);
     // Every finished render is shown, even when a newer one is already on its way: renders finish
     // in order, and an edit every frame (a drag) would otherwise never show until it stopped.
     let shown = app.session.ds().map(|ds| (ds.uid, ds.page)).ok();
@@ -239,14 +252,7 @@ pub fn show(app: &mut FigApp, ui: &mut Ui, worker: &mut Worker) {
         })
         .unwrap_or(t.canvas);
     painter.rect_filled(rect, CornerRadius::ZERO, bg);
-    if let (Some(tex), Some(v), true) = (&app.canvas.texture, &app.canvas.tex_view, shown.is_some() && app.canvas.tex_of == shown) {
-        // Re-project the last render onto the current view.
-        let tl = app.to_screen(v.origin.0, v.origin.1);
-        let zoom = app.session.ds().map(|d| d.view.zoom).unwrap_or(1.0);
-        let pixel_preview = app.session.ds().ok().and_then(|ds| ds.view.pixel_preview_scale()) == Some(v.scale);
-        let image_rect = presented_image_rect(tl, v, zoom, ppp, pixel_preview);
-        painter.image(tex.id(), image_rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
-    }
+    draw_canvas_image(app, &painter, ppp, shown, tiled);
     app.session.tool.labels = overlays(app, &painter, &t);
     crate::frame_labels::rename_field(app, ui);
     // The zoom tool's area.
@@ -258,6 +264,16 @@ pub fn show(app: &mut FigApp, ui: &mut Ui, worker: &mut Worker) {
         }
     }
     crate::dev_mode::draw(app, &painter);
+    // Tiles once the canvas render is done, between edits and never while a button is held.
+    if tiled
+        && !edited
+        && !worker.in_flight()
+        && !ctx.input(|i| i.pointer.any_down())
+        && let Some((visible, scale)) = visible_page(app, ppp)
+        && let Some(batch) = app.canvas.tiles.plan(visible, scale)
+    {
+        worker.submit_tiles(batch);
+    }
     crate::handles::draw(app, &painter);
     crate::selection_spacing::draw(app, &painter);
     crate::comments::draw(app, &painter);
@@ -277,6 +293,125 @@ pub fn show(app: &mut FigApp, ui: &mut Ui, worker: &mut Worker) {
         shown.show(&ctx, at);
         app.canvas.cursor = Some(shown);
     }
+}
+
+/// Whether the canvas uses tiles: not in pixel preview (whose pixels are the point), and not when
+/// `FIGCRAFT_NO_TILES` is set (to compare).
+fn tiles_on(app: &FigApp) -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let off = *OFF.get_or_init(|| cfg!(not(target_arch = "wasm32")) && std::env::var_os("FIGCRAFT_NO_TILES").is_some());
+    !off && app.session.ds().is_ok_and(|ds| ds.view.pixel_preview_scale().is_none())
+}
+
+/// What the tiles are of: the file, page, options and document the canvas shows.
+fn tile_source(app: &FigApp) -> Option<(u64, NodeId, crate::render_worker::TileOpts, Arc<Document>)> {
+    let ds = app.session.ds().ok()?;
+    let doc = app.preedit_view().map(|p| p.doc.clone()).unwrap_or_else(|| ds.doc.clone());
+    let opts = crate::render_worker::TileOpts {
+        outline: ds.view.outlines,
+        outline_extras: figcraft_render::Outline { hidden: ds.view.outline_hidden, bounds: ds.view.outline_bounds, light: false },
+        outlined: if ds.view.outlines_selection { ds.selection.clone() } else { vec![] },
+        solo: ds.focused(),
+        proof: ds.view.proof_srgb && !doc.color_profile.is_srgb(),
+        fonts: figcraft_text::layout_generation(),
+    };
+    Some((ds.uid, ds.page, opts, doc))
+}
+
+/// The page rect the canvas shows and its device pixels per page unit.
+fn visible_page(app: &FigApp, ppp: f32) -> Option<(figcraft_geom::Rect, f64)> {
+    let ds = app.session.ds().ok()?;
+    let rect = app.canvas.rect;
+    let zoom = ds.view.zoom;
+    if !(zoom.is_finite() && zoom > 0.0 && rect.width() > 0.0 && rect.height() > 0.0) {
+        return None;
+    }
+    let (x, y) = ds.view.origin();
+    Some((figcraft_geom::Rect::new(x, y, x + f64::from(rect.width()) / zoom, y + f64::from(rect.height()) / zoom), zoom * f64::from(ppp)))
+}
+
+/// Whether tiles show all of the view at `scale` magnified no more than a coarse preview would be.
+fn tiles_cover(tiles: &crate::tiles::TileCache, ds: &figcraft_engine::DocState, rect: &Rect, scale: f64) -> bool {
+    use figcraft_render::tiles::{Pick, compose, level_at_most};
+    let zoom = ds.view.zoom;
+    if !(zoom.is_finite() && zoom > 0.0) {
+        return false;
+    }
+    let (x, y) = ds.view.origin();
+    let visible = figcraft_geom::Rect::new(x, y, x + f64::from(rect.width()) / zoom, y + f64::from(rect.height()) / zoom);
+    let Some(lowest) = level_at_most(scale / crate::render_worker::PREVIEW_FACTOR) else { return false };
+    let pieces = compose(visible, scale, None, |k| tiles.have(k).filter(|h| !h.stale));
+    let covered: f64 = pieces.iter().filter(|p| matches!(p.pick, Pick::Tile(k) if k.level >= lowest)).map(|p| p.rect.area()).sum();
+    visible.area() > 0.0 && covered >= visible.area() * 0.999
+}
+
+/// Draw the canvas: the last canvas render re-projected onto the current view, and tiles where it
+/// doesn't reach or a tile is sharper (see [`figcraft_render::tiles::compose`]).
+fn draw_canvas_image(app: &mut FigApp, painter: &egui::Painter, ppp: f32, shown: Option<(u64, NodeId)>, tiled: bool) {
+    use figcraft_render::tiles::{Exact, Pick, compose};
+    let zoom = app.session.ds().map(|d| d.view.zoom).unwrap_or(1.0);
+    let exact = match (&app.canvas.texture, &app.canvas.tex_view, shown.is_some() && app.canvas.tex_of == shown) {
+        (Some(tex), Some(v), true) => Some((tex.id(), v.clone())),
+        _ => None,
+    };
+    let whole = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+    // Re-project the last render onto the current view.
+    let draw_exact = |app: &FigApp, painter: &egui::Painter, id: egui::TextureId, v: &figcraft_render::View| {
+        let tl = app.to_screen(v.origin.0, v.origin.1);
+        let pixel_preview = app.session.ds().ok().and_then(|ds| ds.view.pixel_preview_scale()) == Some(v.scale);
+        let image_rect = presented_image_rect(tl, v, zoom, ppp, pixel_preview);
+        painter.image(id, image_rect, whole, Color32::WHITE);
+    };
+    let visible = if tiled { visible_page(app, ppp) } else { None };
+    let Some((visible, scale)) = visible else {
+        if let Some((id, v)) = &exact {
+            draw_exact(app, painter, *id, v);
+        }
+        return;
+    };
+    let exact_covers = exact.as_ref().is_some_and(|(_, v)| {
+        let e = v.page_rect();
+        v.scale >= scale * (1.0 - 1e-9) && e.x0 <= visible.x0 && e.y0 <= visible.y0 && e.x1 >= visible.x1 && e.y1 >= visible.y1
+    });
+    if !exact_covers {
+        app.canvas.tiles.resolve();
+    }
+    let pieces = {
+        let tiles = &app.canvas.tiles;
+        compose(visible, scale, exact.as_ref().map(|(_, v)| Exact { rect: v.page_rect(), scale: v.scale }), |k| tiles.have(k))
+    };
+    // All from the canvas render: drawn whole, as without tiles (on whole device pixels at rest).
+    if pieces.iter().all(|p| p.pick == Pick::Exact) {
+        if let Some((id, v)) = &exact {
+            draw_exact(app, painter, *id, v);
+        }
+        return;
+    }
+    let screen = |app: &FigApp, r: &figcraft_geom::Rect| Rect::from_min_max(app.to_screen(r.x0, r.y0), app.to_screen(r.x1, r.y1));
+    let mut drawn = 0;
+    for p in &pieces {
+        match p.pick {
+            Pick::Exact => {
+                let Some((id, v)) = &exact else { continue };
+                let e = v.page_rect();
+                let (w, h) = (e.width().max(1e-300), e.height().max(1e-300));
+                let uv = Rect::from_min_max(
+                    pos2(((p.rect.x0 - e.x0) / w) as f32, ((p.rect.y0 - e.y0) / h) as f32),
+                    pos2(((p.rect.x1 - e.x0) / w) as f32, ((p.rect.y1 - e.y0) / h) as f32),
+                );
+                painter.image(*id, screen(app, &p.rect), uv, Color32::WHITE);
+            }
+            Pick::Tile(k) => {
+                // A tile with only the page's background: the background is already there.
+                let Some(id) = app.canvas.tiles.texture(k) else { continue };
+                let uv = k.uv(p.rect);
+                let uv = Rect::from_min_max(pos2(uv.x0 as f32, uv.y0 as f32), pos2(uv.x1 as f32, uv.y1 as f32));
+                painter.image(id, screen(app, &p.rect), uv, Color32::WHITE);
+                drawn += 1;
+            }
+        }
+    }
+    app.canvas.tiles.drawn = drawn;
 }
 
 /// The image's screen rect; align native-density renders to device pixels to avoid linear filtering
@@ -349,7 +484,7 @@ fn covers(outer: &figcraft_render::View, inner: &figcraft_render::View) -> bool 
     o.x0 <= i.x0 + eps && o.y0 <= i.y0 + eps && o.x1 >= i.x1 - eps && o.y1 >= i.y1 - eps
 }
 
-fn request_render(app: &mut FigApp, worker: &mut Worker, ppp: f32, max_texture_side: u32) {
+fn request_render(app: &mut FigApp, worker: &mut Worker, ppp: f32, max_texture_side: u32, tiled: bool) {
     let Ok(ds) = app.session.ds() else { return };
     let rect = app.canvas.rect;
     let (mut ox, mut oy) = ds.view.origin();
@@ -411,7 +546,8 @@ fn request_render(app: &mut FigApp, worker: &mut Worker, ppp: f32, max_texture_s
         solo: key.solo,
         proof,
         uid: ds.uid,
-        zoom_preview: ds.view.pixel_preview_scale().is_none(),
+        // Tiles at least as sharp as a preview already show the view: straight to the full render.
+        zoom_preview: ds.view.pixel_preview_scale().is_none() && !(tiled && tiles_cover(&app.canvas.tiles, ds, &rect, scale)),
         at: web_time::Instant::now(),
     };
     app.canvas.want_view = Some(job.view.clone());
