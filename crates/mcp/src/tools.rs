@@ -128,7 +128,7 @@ pub fn tool_definitions() -> Vec<Value> {
         tool(
             "batch",
             "Run commands as one step",
-            "Run several commands in order as ONE undo step (engine `command.batch`). If any command fails, everything is rolled back and the error names the failing step. Returns an array of the results in order. Note: later commands cannot reference ids created by earlier ones in the same batch (ids are only known afterwards), so create containers first, then batch the edits.",
+            "Run several commands in order as ONE undo step (engine `command.batch`). If any command fails, everything is rolled back and the error names the failing step. Returns an array of the results in order. A later step can use a layer an earlier step created: anywhere in its params, {\"$step\": n} stands for the `id` in step n's result (zero-based; {\"$step\": n, \"field\": \"…\"} picks another field). Example: [{\"command\":\"node.create\",\"params\":{\"type\":\"frame\"}}, {\"command\":\"node.create\",\"params\":{\"type\":\"text\",\"text\":\"Hi\",\"parent\":{\"$step\":0}}}] builds a frame and a text inside it in one call.",
             obj(
                 json!({
                     "commands": {"type": "array", "minItems": 1, "description": "Steps to run", "items": obj(json!({"command": string("Command id"), "params": {"type": "object"}}), &["command"])},
@@ -163,7 +163,7 @@ pub fn tool_definitions() -> Vec<Value> {
         tool(
             "set_properties",
             "Set properties",
-            "Set properties on one or more layers as one undo step (engine `node.set`). Keys: name, visible, locked, opacity (0-1), blend, x, y (relative to the parent frame; groups don't count), width, height, rotation (degrees), fill (colour) / fills (array of paints: \"#hex\" or {\"type\":\"solid\",\"color\":\"#hex\"} or {\"type\":\"linearGradient\",\"stops\":[\"#hex\",\"#hex\"]} or stops [{\"position\":0..1,\"color\":\"#hex\"}], optional from/to handles in the unit box; radialGradient too), stroke / strokes, strokeWeight, strokeAlign (inside|center|outside), cornerRadius (n or [tl,tr,br,bl]), effects (array, e.g. {\"type\":\"dropShadow\",\"color\":\"#00000040\",\"offset\":[0,4],\"radius\":8}), clip, layout (null|horizontal|vertical|grid), gap, padding (n or [t,r,b,l]), mainAlign (min|center|max|spaceBetween|spaceAround|spaceEvenly), crossAlign, wrap, contentAlign (auto|spaceBetween: wrapped lines), sizingH / sizingV (fixed|hug|fill), constraints {horizontal, vertical}, characters, fontFamily, fontStyle, fontSize, lineHeight, letterSpacing, textAlign, textAutoResize. Run list_commands with filter \"node.set\" for the full list. Unknown keys are an error. Returns the updated layers.",
+            "Set properties on one or more layers as one undo step (engine `node.set`). Keys: name, visible, locked, opacity (0-1), blend, x, y (relative to the parent frame; groups don't count), width, height, rotation (degrees), fill (colour) / fills (array of paints: \"#hex\" or {\"type\":\"solid\",\"color\":\"#hex\"} or {\"type\":\"linearGradient\",\"stops\":[\"#hex\",\"#hex\"]} or stops [{\"position\":0..1,\"color\":\"#hex\"}], optional from/to handles in the unit box; radialGradient too), stroke / strokes, strokeWeight, strokeAlign (inside|center|outside), cornerRadius (n or [tl,tr,br,bl]), effects (array, e.g. {\"type\":\"dropShadow\",\"color\":\"#00000040\",\"offset\":[0,4],\"radius\":8}), clip, layout (null|horizontal|vertical|grid), gap, padding (n or [t,r,b,l]), mainAlign (min|center|max|spaceBetween|spaceAround|spaceEvenly), crossAlign, wrap, contentAlign (auto|spaceBetween: wrapped lines), sizingH / sizingV (fixed|hug|fill), constraints {horizontal, vertical}, characters, fontFamily, fontStyle, fontSize, lineHeight, letterSpacing, textAlign, textAutoResize. Auto layout keys (gap, padding, mainAlign, crossAlign, wrap, …) apply to frames, components and instances only: other layers among the ids are skipped and named in `warnings`, and with none that can take them the call is an error. A fontStyle draws in the family's nearest face; `warnings` says when that face has another weight or slant than the name asks for. Run list_commands with filter \"node.set\" for the full list. Unknown keys are an error. Returns the updated layers.",
             obj(
                 json!({"ids": ids_schema("Layer ids (default: the selection)"), "props": {"type": "object", "description": "Property values to set"}}),
                 &["props"],
@@ -250,8 +250,8 @@ pub fn tool_definitions() -> Vec<Value> {
         tool(
             "save_file",
             "Save file",
-            "Save the active document as a .figcraft file. `path` is required the first time (an untitled document has no path); later saves reuse it.",
-            obj(json!({"path": string("Output .figcraft path")}), &[]),
+            "Save the active document as a .figcraft file. `path` is required the first time (an untitled document has no path); later saves reuse it. A `path` ending in .fig writes an experimental .fig export copy instead and leaves the document's own path and unsaved changes alone.",
+            obj(json!({"path": string("Output .figcraft path, or a .fig path for an experimental export copy")}), &[]),
             false,
         ),
         tool("undo", "Undo", "Undo the last change (one command, batch or gesture). Returns {undone: bool}.", empty(), false),
@@ -546,7 +546,7 @@ fn set_properties(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<ToolRes
         }
         params["ids"] = json!(ids);
     }
-    exec(b, "node.set", params)?;
+    let warnings = exec(b, "node.set", params)?.get("warnings").cloned();
     let ids = match ids {
         Some(i) => i,
         None => b
@@ -557,7 +557,11 @@ fn set_properties(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<ToolRes
             .unwrap_or_default(),
     };
     let nodes: Vec<Value> = ids.iter().take(20).filter_map(|i| b.call("node.get", json!({"id": i, "depth": 0})).ok()).collect();
-    Ok(ToolResult::json(&json!({"ok": true, "nodes": nodes})))
+    let mut out = json!({"ok": true, "nodes": nodes});
+    if let Some(w) = warnings {
+        out["warnings"] = w;
+    }
+    Ok(ToolResult::json(&out))
 }
 
 fn inspect_document(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<ToolResult, String> {
@@ -667,8 +671,19 @@ fn screenshot(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<ToolResult,
         let side = (x1 - x0).max(y1 - y0).max(1e-6);
         scale = scale.min(max / side);
     }
-    let bytes = b.render_png(&ids, scale)?;
-    let (w, h) = png_info(&bytes);
+    let mut bytes = b.render_png(&ids, scale)?;
+    let (mut w, mut h) = png_info(&bytes);
+    // Layer bounds leave out effects (shadows) and overflow of unclipped frames, but the render
+    // includes them: shrink to the measured image until it fits `maxSize` (rounding can add a pixel).
+    for _ in 0..4 {
+        let side = f64::from(w.max(h));
+        if side <= max {
+            break;
+        }
+        scale *= max / side;
+        bytes = b.render_png(&ids, scale)?;
+        (w, h) = png_info(&bytes);
+    }
     Ok(ToolResult::image(
         &bytes,
         "image/png",

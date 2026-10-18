@@ -124,10 +124,11 @@ fn run(app: &mut FigApp, cmd: &str, params: Value) {
 
 /// Plugins ▸ Development ▸ Import plugin from manifest…: pick a `figcraft-plugin.json`.
 pub fn import_dialog(app: &mut FigApp) {
-    let Some(p) = app.services.pick_open(tr("Import plugin from manifest"), &["json"]) else { return };
-    if let Some(v) = app.run("plugin.import", json!({"path": p.to_string_lossy()})) {
-        app.toast(trf("Imported {name}", &[("name", &v["name"].as_str().unwrap_or(tr("the plugin")))]));
-    }
+    app.pick_open(tr("Import plugin from manifest"), &["json"], |app, p| {
+        if let Some(v) = app.run("plugin.import", json!({"path": p.to_string_lossy()})) {
+            app.toast(trf("Imported {name}", &[("name", &v["name"].as_str().unwrap_or(tr("the plugin")))]));
+        }
+    });
 }
 
 /// The installed plugins at the top of the Plugins menu: a plugin with one command is an item, one
@@ -150,7 +151,7 @@ pub fn menu(app: &mut FigApp, ui: &mut Ui, t: &Tokens) -> bool {
                 }
             }
             commands => {
-                let picked = crate::menus::submenu(ui, "Plugins", &format!("Plugins/plugin:{}", m.id), &m.name, t, |ui| {
+                let picked = crate::menus::submenu(ui, &format!("Plugins/plugin:{}", m.id), &m.name, t, |ui| {
                     commands.iter().find(|c| crate::menus::item(ui, &c.label, "", true, false, t)).map(|c| c.id.clone())
                 });
                 if let Some(c) = picked {
@@ -163,7 +164,7 @@ pub fn menu(app: &mut FigApp, ui: &mut Ui, t: &Tokens) -> bool {
         app.session.prefs.plugins.iter().filter(|p| p.manifest.widget).map(|p| (p.manifest.id.as_str(), p.manifest.name.as_str())).collect();
     let widget = (!widgets.is_empty())
         .then(|| {
-            crate::menus::submenu(ui, "Plugins", "Plugins/widgets", tr("Widgets"), t, |ui| {
+            crate::menus::submenu(ui, "Plugins/widgets", tr("Widgets"), t, |ui| {
                 widgets.iter().find(|(_, name)| crate::menus::item(ui, name, "", true, false, t)).map(|(id, _)| id.to_string())
             })
         })

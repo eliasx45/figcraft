@@ -347,14 +347,14 @@ impl Store {
         let key = load_key(root)?;
         let dir = root.join(FILES);
         fs::create_dir_all(&dir).map_err(|e| format!("can't create {}: {e}", dir.display()))?;
-        let (directory, problems) = Directory::open(root, cfg.directory);
+        let (directory, startup_problems) = Directory::open(root, cfg.directory);
         let abuse = Abuse::new(cfg.hosting.abuse);
         let mut store = Store {
             root: root.to_path_buf(),
             cfg,
             key,
             files: BTreeMap::new(),
-            problems,
+            problems: Vec::new(),
             directory,
             abuse,
             served: figcraft_collab_net::net::Bucket::new(LIBRARY_RATE, LIBRARY_BURST),
@@ -368,6 +368,9 @@ impl Store {
             free: None,
             _lock: lock,
         };
+        for problem in startup_problems {
+            store.note(problem);
+        }
         store.scan(&dir);
         store.blocked = store.read_list::<String>(BLOCKED).iter().filter_map(|s| s.parse().ok()).map(ip_key).collect();
         store.reports = store.read_list(REPORTS);
@@ -385,7 +388,7 @@ impl Store {
         match disk::read_capped(&path, 16 << 20).and_then(|b| serde_json::from_slice(&b).map_err(|e| format!("{name} is damaged ({e})"))) {
             Ok(list) => list,
             Err(e) => {
-                self.problems.push(e);
+                self.note(e);
                 Vec::new()
             }
         }
@@ -394,7 +397,7 @@ impl Store {
     fn scan(&mut self, dir: &Path) {
         let entries = match fs::read_dir(dir) {
             Ok(e) => e,
-            Err(e) => return self.problems.push(format!("can't list {}: {e}", dir.display())),
+            Err(e) => return self.note(format!("can't list {}: {e}", dir.display())),
         };
         let mut ids: Vec<(String, PathBuf)> = entries.flatten().map(|e| (e.file_name().to_string_lossy().into_owned(), e.path())).collect();
         ids.sort();
@@ -403,18 +406,18 @@ impl Store {
                 continue;
             }
             if !valid_id(&id) {
-                self.problems.push(format!("skipped {}: not a file folder of this server", path.display()));
+                self.note(format!("skipped {}: not a file folder of this server", path.display()));
                 continue;
             }
             if self.files.len() >= self.cfg.max_files {
-                self.problems.push(format!("skipped file {id}: over the {}-file cap", self.cfg.max_files));
+                self.note(format!("skipped file {id}: over the {}-file cap", self.cfg.max_files));
                 continue;
             }
             match self.check(&path) {
                 Ok(entry) => {
                     self.files.insert(id, entry);
                 }
-                Err(why) => self.problems.push(format!("skipped file {id}: {why}")),
+                Err(why) => self.note(format!("skipped file {id}: {why}")),
             }
         }
     }
@@ -437,7 +440,7 @@ impl Store {
             && let Ok(log) = disk::read_log(&bytes)
             && log.generation != generation
         {
-            log::info!("file at {}: its log predates the last compaction; it is ignored", path.display());
+            log::info!("file at {}: its log isn't of its snapshot's generation; it is replayed over it when the file opens", path.display());
         }
         let bytes = [SNAPSHOT, LOG].iter().filter_map(|n| fs::metadata(path.join(n)).ok()).map(|m| m.len()).sum();
         Ok(Entry { meta, links, log: None, bytes, forced: 0 })
@@ -1123,8 +1126,32 @@ impl Store {
                     fresh_log = true;
                 }
             }
-            // From before a compaction that was cut short: the snapshot has it all.
-            Ok(_) => {}
+            // From before a compaction that was cut short, the snapshot has it all; or a generation
+            // field damaged, which no checksum covers. Replaying tells them apart without trusting
+            // it: entries the snapshot holds are skipped, so only edits it lacks change anything.
+            Ok(log) => {
+                let before = server.seq();
+                let mut stopped = None;
+                for entry in log.entries {
+                    if let Err(e) = server.replay(entry) {
+                        stopped = Some(e);
+                        break;
+                    }
+                }
+                let (snap, found, recovered) = (generation, log.generation, server.seq().saturating_sub(before));
+                if recovered > 0 {
+                    issues.push(format!(
+                        "file {file}: its log's generation ({found}) doesn't match its snapshot's ({snap}), but it held \
+                         {recovered} changes the snapshot didn't; they were recovered"
+                    ));
+                }
+                if let Some(e) = stopped {
+                    issues.push(format!(
+                        "file {file}: its log's generation ({found}) doesn't match its snapshot's ({snap}) and it stops \
+                         making sense after {recovered} newer changes ({e}); the rest was dropped"
+                    ));
+                }
+            }
             Err(why) => issues.push(format!("file {file}: {why}; starting a new log")),
         }
         for i in issues {
@@ -1489,6 +1516,8 @@ impl Backend for Store {
             Admin::Blocked => AdminReply::Blocked(self.blocked()).into(),
             Admin::Code { file, token } => self.set_code(&file, &token).map_or_else(failed, |code| AdminReply::Code { code }.into()),
             Admin::Owned { files } => self.owned(&files).into(),
+            // The hub removes people itself (it knows who is connected); it never asks the store.
+            Admin::RemovePeer { .. } => failed("removing someone from a file is done by the server's hub".into()),
             Admin::Remove { file } => {
                 if !self.files.contains_key(&file) {
                     return failed("this file isn't on the server (it may have been removed)".into());

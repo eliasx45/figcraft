@@ -60,20 +60,23 @@ pub fn section(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[NodeId]) {
     }
 }
 
-/// One export setting: size (typed or picked), suffix, format, advanced options and remove; a
-/// PDF's print settings under it.
+/// One export setting: size (typed or picked; images only, SVG and PDF are vector), suffix,
+/// format, advanced options and remove; a PDF's print settings under it.
 fn setting_row(app: &mut FigApp, ui: &mut Ui, ids: &[NodeId], i: usize, e: &ExportSetting) {
     row(ui, 32.0, |ui| {
         // Tighter spacing so the advanced options and remove buttons fit beside the fields.
         ui.spacing_mut().item_spacing.x = 4.0;
-        let (size_w, format_w, button, gap) = (52.0, 54.0, 22.0, ui.spacing().item_spacing.x);
-        let suffix_w = (ui.available_width() - size_w - format_w - button * 2.0 - gap * 4.0).max(32.0);
-        let presets: Vec<String> =
-            ExportSize::SCALES.iter().map(|value| ExportSize::Scale { value: *value }.label()).chain(["512w".into(), "512h".into()]).collect();
-        if let Some(s) = widgets::combo_field(ui, Id::new(("export_size", i)), &e.size.label(), size_w, &presets)
-            && ExportSize::parse(&s) != Some(e.size)
-        {
-            app.run("export.update", json!({"ids": ids, "index": i, "size": s}));
+        let (format_w, button, gap) = (54.0, 22.0, ui.spacing().item_spacing.x);
+        let size_w = e.format.is_raster().then_some(52.0);
+        let suffix_w = (ui.available_width() - size_w.map_or(0.0, |w| w + gap) - format_w - button * 2.0 - gap * 3.0).max(32.0);
+        if let Some(size_w) = size_w {
+            let presets: Vec<String> =
+                ExportSize::SCALES.iter().map(|value| ExportSize::Scale { value: *value }.label()).chain(["512w".into(), "512h".into()]).collect();
+            if let Some(s) = widgets::combo_field(ui, Id::new(("export_size", i)), &e.size.label(), size_w, &presets)
+                && ExportSize::parse(&s) != Some(e.size)
+            {
+                app.run("export.update", json!({"ids": ids, "index": i, "size": s}));
+            }
         }
         if let Some(sfx) = widgets::text_field(ui, Id::new(("export_suffix", i)), &e.suffix, suffix_w, tr("Suffix"))
             && sfx != e.suffix
@@ -318,11 +321,13 @@ pub(crate) fn export_layers(app: &mut FigApp, ids: &[NodeId], assets: bool) {
         // The suggested name keeps only the file's own name (a layer's folders apply to folders).
         [one] => save_one(app, &[one.id], &one.setting, one.file.rsplit('/').next().unwrap_or(&one.file)),
         _ => {
-            let Some(dir) = app.services.pick_folder(tr("Export")) else { return };
-            if let Some(r) = app.run("file.exportLayers", json!({"ids": ids, "dir": dir.to_string_lossy(), "assets": assets})) {
-                let n = r["files"].as_array().map_or(0, Vec::len);
-                app.toast(trn("Exported {n} files", n, &[]));
-            }
+            let ids = ids.to_vec();
+            app.pick_folder(tr("Export"), move |app, dir| {
+                if let Some(r) = app.run("file.exportLayers", json!({"ids": ids, "dir": dir.to_string_lossy(), "assets": assets})) {
+                    let n = r["files"].as_array().map_or(0, Vec::len);
+                    app.toast(trn("Exported {n} files", n, &[]));
+                }
+            });
         }
     }
 }
@@ -330,14 +335,14 @@ pub(crate) fn export_layers(app: &mut FigApp, ids: &[NodeId], assets: bool) {
 /// Export `ids` together as one file with `setting`, through a save dialog suggesting `file`.
 pub(crate) fn save_one(app: &mut FigApp, ids: &[NodeId], setting: &ExportSetting, file: &str) {
     let ext = setting.format.ext();
-    let Some(p) = app.services.pick_save(tr("Export"), file, &[ext]) else { return };
-    let path = p.to_string_lossy().to_string();
     let mut params = setting_params(setting);
     params["ids"] = json!(ids);
-    params["path"] = json!(path);
-    if app.run("file.export", params).is_some() {
-        app.toast(trf("Exported {name}", &[("name", &p.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default())]));
-    }
+    app.pick_save(tr("Export"), file, &[ext], move |app, p| {
+        params["path"] = json!(p.to_string_lossy());
+        if app.run("file.export", params).is_some() {
+            app.toast(trf("Exported {name}", &[("name", &p.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default())]));
+        }
+    });
 }
 
 /// The file name a one-off export of `ids` suggests: the first layer's name (or `fallback`) with

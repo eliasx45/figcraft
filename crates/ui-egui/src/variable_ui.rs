@@ -361,6 +361,12 @@ pub fn bound_row(app: &mut FigApp, ui: &mut Ui, ids: &[NodeId], field: &str, kin
     });
 }
 
+/// Whether a variable of type `have` belongs in a picker for `want` on `field`: its own type, and
+/// numbers for text content too (shown as text).
+fn kind_fits(want: Option<VariableType>, field: Option<&str>, have: VariableType) -> bool {
+    want.is_none_or(|k| have == k || (field == Some("characters") && have == VariableType::Number))
+}
+
 /// The picker popover (call once per frame).
 pub fn picker(app: &mut FigApp, ctx: &egui::Context) {
     let Some(p) = ctx.data(|d| d.get_temp::<Picker>(picker_id())) else { return };
@@ -379,8 +385,12 @@ pub fn picker(app: &mut FigApp, ctx: &egui::Context) {
     };
     // Prototypes and styles use this file's variables.
     let local_only = matches!(p.target, Target::Proto(_) | Target::Style { .. });
+    let field = match &p.target {
+        Target::Bind { field, .. } => Some(field.as_str()),
+        _ => None,
+    };
     let keep = |lib: Option<&PublishedLibrary>, v: &Variable| {
-        p.kind.is_none_or(|k| v.kind == k)
+        kind_fits(p.kind, field, v.kind)
             && !(local_only && lib.is_some())
             && (q.is_empty() || v.name.to_lowercase().contains(&q))
             && scope.is_none_or(|s| v.in_scope(s))
@@ -397,6 +407,7 @@ pub fn picker(app: &mut FigApp, ctx: &egui::Context) {
             });
             ui.add_space(4.0);
             let r = ui.add(egui::TextEdit::singleline(&mut query).hint_text(tr("Search")).font(regular(11.0)).desired_width(224.0));
+            crate::widgets::select_all_on_focus(ui, &r, &query);
             if !r.has_focus() && !crate::a11y::field_focused(ui.ctx()) {
                 r.request_focus();
             }
@@ -474,4 +485,20 @@ pub fn picker(app: &mut FigApp, ctx: &egui::Context) {
 /// Whether this file or a library offers any variable of `kind` (or any variable).
 fn groups_any_kind(doc: &Document, libs: &[Arc<PublishedLibrary>], kind: Option<VariableType>) -> bool {
     !groups(doc, libs, |_, v| kind.is_none_or(|k| v.kind == k)).is_empty()
+}
+
+#[cfg(test)]
+mod kind_tests {
+    use super::*;
+
+    #[test]
+    fn text_content_offers_numbers_too() {
+        use VariableType::*;
+        assert!(kind_fits(Some(String), Some("characters"), Number), "a number shows as text");
+        assert!(kind_fits(Some(String), Some("characters"), String));
+        assert!(!kind_fits(Some(String), Some("characters"), Color));
+        assert!(!kind_fits(Some(String), Some("fontFamily"), Number), "only text content");
+        assert!(!kind_fits(Some(Number), Some("width"), String));
+        assert!(kind_fits(None, None, Boolean));
+    }
 }

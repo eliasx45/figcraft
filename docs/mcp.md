@@ -26,6 +26,68 @@ If that connection cannot be established, the error says the request was not sen
 A connection the app closed while it sat idle is noticed before the next request is written and
 replaced then, so a pause between calls is not an error.
 
+The app keeps answering while its window is minimised or covered by other windows (see
+`docs/control-protocol.md`): edits, inspection (`inspect_ui` too), pointer, key and text input and
+renders work as usual (minimised, each request to the app takes up to about 0.1 s). Only a capture
+of the window itself (`screenshot` with `window`) needs it on screen: it is then an error at once;
+`screenshot` without `window` renders the document instead.
+
+### Confining file access
+
+```sh
+figcraft-cli mcp --automation-read-root /work/project --automation-write-root /work/project/out
+```
+
+```json
+{"mcpServers": {"figcraft": {"command": "/path/to/figcraft-cli",
+  "args": ["mcp", "--automation-read-root", "/work/project", "--automation-write-root", "/work/project/out"]}}}
+```
+
+The two flags (the other Craft apps take the same ones) keep an agent to the folders you give it.
+Each may be given more than once, as `--flag DIR` or `--flag=DIR`:
+
+- Every file a tool call reads must lie inside a **read root or a write root**; every file it writes
+  inside a **write root**. Anything else is refused with an ordinary tool error the agent can read
+  and correct, for example `automation path rejected: /etc/x.png is outside the folders that may be
+  written: /work/project/out`. Nothing is written and the server keeps serving.
+- Read and write authority are separate. With only `--automation-read-root` nothing can be written
+  to disk (`export` and the export commands without a `path` still return the bytes). Without either
+  flag nothing changes.
+- The roots must be existing folders: a missing one, or a file, stops the server at startup.
+  `initialize`'s `instructions` name the folders, so the agent knows where it may work.
+- **What is covered:** everything a call does, because the engine reaches the file system through
+  one module (`crates/engine/src/file_access.rs`), and `crates/engine/clippy.toml` refuses `std::fs`
+  anywhere else in the engine, so a command added later is covered too. That is `open_file` (and the
+  `variables` file it may name), `save_file`, `export {path}`, and through `run_command` / `batch`
+  every command that names a file: `file.open`, `file.openRecent` (recent files outside the roots
+  are never listed, opened, removed or named: `index` counts the files listed), `file.import`,
+  `file.placeImage`, `image.place`, `file.save`, `file.saveAs`, `file.revert`, `file.recover`,
+  `file.export`, `file.exportSvg`, `file.exportLayers` (and the folders it makes), `file.exportFramesPdf`, the images and variables JSON read next to an imported REST API
+  file, `library.add` and the library files open documents link to, `variable.import` /
+  `variable.export`, `codeConnect.import` / `codeConnect.export`, `component.playground {path}`,
+  `plugin.import {path}`, a development plugin's module read again from disk,
+  `plugin.directory.publish {path}` and its assets, `collab.recoverFile {path}`, and the headless
+  `ui.render` / `ui.screenshot` with a `path`.
+- **How paths are resolved:** a relative path is made absolute against the server's working
+  directory, then its links are followed: the real path is what is compared and what is opened. For
+  a file that doesn't exist yet, its nearest existing folder is resolved and the rest must be plain
+  names, so `..` below a folder that doesn't exist is refused, and so is a link that leads nowhere
+  (writing through it would create its target, wherever that is). A path outside the roots gets
+  the same refusal whatever exists there, so a refusal doesn't tell what is outside. Folders are
+  compared by whole names: `/work2/x` is not inside `/work`. On Windows the case comes from the disk (`C:\WORK\x` is
+  inside `C:\work`), `\\?\` and UNC (`\\server\share\…`) paths are resolved like drive-letter ones,
+  and new names that are devices (`CON`, `NUL`, `COM1`…) or streams (`a.png:x`) are refused.
+- Not confined: the app's own folders, which no tool names (preferences, Data Recovery copies,
+  plugins installed from a plugin directory, the system fonts).
+- `--attach` with either flag is a usage error: the app runs the commands, so only the app can
+  confine them. Start it with the same flags, `figcraft --control 7979 --automation-read-root DIR
+  --automation-write-root DIR` (see [Control protocol](control-protocol.md#confining-file-access)),
+  then attach as usual. The attached `screenshot` gets its PNGs from the app as data, so no
+  temporary file is written anywhere.
+- A path is checked, then opened: another program that swaps a folder for a link in between can
+  still win that race. The roots keep an agent to the files it was given, not other software on the
+  computer; if that matters, run the server as a user that can't change the roots' folders.
+
 ### Fonts
 
 The headless server lays text out with the same fonts as the app: the fonts built into FigCraft
@@ -130,6 +192,8 @@ Or in a project's `.mcp.json`:
     columns (vertical layouts wrap top to bottom into new columns).
   - `object.convertToGroup` / `object.convertToFrame` turn a frame into a group or back in place
     (layers stay put; a group has no auto layout, fill, stroke, corner radius, clipping or grids).
+  - `object.convertToSection` turns a frame on the page or in a section into a section in place, and
+    `object.convertToFrame` turns a section back into a frame (keeping its fill, not clipping).
   - `contentAlign` (wrapping layouts): `auto` (default) packs the lines `crossGap` apart at the
     start, centre or end `crossAlign` names (lines of nothing but fill children stretch instead);
     `spaceBetween` puts the free space between the lines (one line, or no free space: like `auto`).
@@ -185,6 +249,8 @@ Or in a project's `.mcp.json`:
   user units, e.g. `{"wght": 550, "wdth": 85}` (`null` = back to what the style name implies);
   `text.setVariations {variations, replace?}` merges instead. `text.fonts {family, style?, axes: true}`
   lists a font's axes and named instances (named instances are also valid `fontStyle` values).
+  `text.missingFonts` lists the families the document names that aren't installed
+  (`{families: [{family, layers}]}`); their text draws in a fallback font.
   OpenType features: `features {"liga": false, "tnum": true}`.
   Decorations: `textDecorationStyle` (`solid`, `dotted`, `wavy`), `textDecorationThickness` and
   `textDecorationOffset` (`auto`, px, or `"10%"` of the font size; the offset runs from the baseline
@@ -193,7 +259,8 @@ Or in a project's `.mcp.json`:
 - **Lists** are per paragraph: `listStyle` (`none`, `bulleted`, `numbered`) and `indentation` (the
   nesting level, 0–8) apply to the paragraphs chars `start`..`end` touch (all of them without a
   range); `get_node` reports one `listStyle` for the layer, or `lineTypes` and `lineIndentations`
-  per paragraph. `text.bulletList`, `text.numberList` and `text.listStyle` act on the selected
+  per paragraph, plus `listStartOffsets` when a numbered list starts past 1 (from a `.fig` file;
+  1 shows "2."). `text.bulletList`, `text.numberList` and `text.listStyle` act on the selected
   paragraphs while text is edited. Layer props: `listSpacing` (px between list items, in place of
   `paragraphSpacing`), `hangingList` (markers outside the box) and `hangingPunctuation`. While
   editing, `key` Tab / Shift+Tab nest an item or move it out, Enter on an empty item and Backspace
@@ -235,7 +302,7 @@ Or in a project's `.mcp.json`:
 |---|---|
 | `list_commands {filter?}` | Every command: id, label, menu, shortcut, undoable, params doc. |
 | `run_command {command, params}` | Run any command (e.g. `align.left`, `layout.add`, `component.create`, `instance.place` (drop an instance at a page point into the frame or auto layout slot under it), `component.exposeInstance` / `instance.exposed` (nested instance properties on instances), `component.makeSlot` / `instance.slotInsert` / `instance.resetSlot` (slots, below), `inspect.code` (CSS, HTML + CSS for a whole frame, React, Leptos, SwiftUI or Jetpack Compose for a layer; components take their properties as parameters and instances are calls, see Dev Mode below), `inspect.properties` (layout, auto layout, typography, fills, strokes and effects with their style and variable names; `colorFormat`: hex, rgb, css, hsl or hsb), `inspect.assets` (layers under the selection with export settings, icons and images, each with its `kind`), `inspect.code` takes `unit: rem` and `rootFontSize` for CSS, HTML, React and Leptos, `style.create`, `variable.bind`, `variable.update` (rename, describe, scope), `variable.set` with `{alias}`, `variable.renameMode` / `variable.removeMode`, `variable.deleteCollection`, `proto.interaction.add`, `codeConnect.set` (components linked to real code, see Dev Mode below)). |
-| `batch {commands: [{command, params}], label?}` | Several commands as one undo step (`command.batch`); all-or-nothing for open documents and their document state. Failed inner commands are removed from the journal; preferences, clipboard, tool state and UI requests are not rolled back. |
+| `batch {commands: [{command, params}], label?}` | Several commands as one undo step (`command.batch`); all-or-nothing for open documents and their document state. Failed inner commands are removed from the journal; preferences, clipboard, tool state and UI requests are not rolled back. A step can use what an earlier step returned: `{"$step": n}` anywhere in its params becomes the `id` in step n's result (zero-based), and `{"$step": n, "field": "…"}` another field of it (see Step references below). |
 | `create_node {type, x, y, width, height, parent, index, name, text, path, props}` | Create a frame, rectangle, ellipse, polygon, star, line, arrow, text, vector, section, component or slice; returns `{id, node}`. |
 | `set_properties {ids, props}` | `node.set` on layers (geometry, fills, strokes, effects, corner radius, auto layout, sizing, constraints, masks (`isMask`, `maskType: alpha\|vector\|luminance`), handoff status (`devStatus: none\|readyForDev\|completed`; marking again clears "Changed"), a section's `sectionContentsHidden`, text…); returns the updated layers. |
 | `inspect_document {depth, allPages}` | The document as JSON (layer tree, styles, selection, history). |
@@ -243,7 +310,7 @@ Or in a project's `.mcp.json`:
 | `select {ids}` | Replace the selection (`[]` deselects). |
 | `export {ids, format, scale \| size, path?, bleed?, cropMarks?, bleedMarks?, cmyk?, contentsOnly?, includeBoundingBox?, svgOutlineText?, svgIdAttribute?, svgSimplifyStroke?}` | png, jpg, svg, webp, pdf, or `fig`: the whole file as `.fig`, experimental (see Exporting `.fig` files below); `size` is `2x`, `512w` or `512h`. The image covers what the layers paint (shadows towards their offset, strokes, unclipped children, a mask group's mask; hidden layers take no room; a slice is its area with everything under it); `contentsOnly: false` also draws every other layer showing in that area, `includeBoundingBox` exports the layers' own boxes; SVG: `svgOutlineText: false` keeps `<text>`, `svgIdAttribute` writes unique ids from layer names, `svgSimplifyStroke: false` writes every stroke as an outline. The same options go in export settings (`export.add` / `export.update`). PDF: frames one page each (sized in points), anything else together on one page; print options: `bleed` (points or a length like `"3mm"`, `"0.125in"`), crop and bleed marks, CMYK colour (see Exports below), also taken by `file.export`, `file.exportLayers`, `file.exportFramesPdf` and stored per export setting by `export.add` / `export.update`; `run_command` `file.exportFramesPdf {page?, path?}` writes every top-level frame of a page. Without `path`, images come back as MCP image content, SVG as text. Layers' own export settings: `run_command` with `export.add` / `export.update {index, size?, suffix?, format?}` / `export.remove` and `file.exportLayers {ids?, dir?, assets?}` (every layer once per setting, named `<layer><suffix>.<format>`, a slash in a layer name making a folder; `assets: true` exports the Inspect tab's assets instead: icons as SVG, images as PNG). |
 | `screenshot {ids?, scale?, maxSize?, window?}` | PNG of the page (with background) or of layers, scaled to fit `maxSize` (default 1600). `window: true` captures the app window in front when attached, a window id (see Windows below) that window. |
-| `open_file {path, variables?}` / `save_file {path?}` | Open `.figcraft`, `.json` (FigCraft JSON or REST API file JSON with its variables, see below), `.fig` (best effort, see below), `.svg` (see Importing SVG below) or an image; save as `.figcraft`. |
+| `open_file {path, variables?}` / `save_file {path?}` | Open `.figcraft`, `.json` (FigCraft JSON or REST API file JSON with its variables, see below), `.fig` (best effort, see below), `.svg` (see Importing SVG below) or an image; save as `.figcraft`. `open_file` returns `opened` (for a file opened anew, a `summary` of `name`, `pages`, `layers` and `images`, and `warnings` or `repairs`; a file that was already open just gives its `index`) and the document's `document` outline. |
 | `undo` / `redo` | Step through history. |
 | `pointer {kind, x, y, to?, steps?, tool?, shift, alt, cmd, pressure?, pressureTo?}` | Mouse gestures in page coordinates with the current tool: `click`, `double`, `drag`, `down`, `move`, `up`, `hover`. A dragged layer drops into the frame or auto layout slot under the pointer, except one inside a group, a boolean group or an instance (outside its slots), which only moves. `pressure` (0–1) is pen pressure; a drag goes from `pressure` to `pressureTo` (see Brushes and pen pressure). |
 | `key {key, shift, alt, cmd}` | A shortcut or key as if typed on the canvas (every default shortcut, tool keys, Escape, Delete, arrows, number keys for opacity, arrows that pan the view when nothing is selected; while editing text, the text shortcuts and then text editing keys). Keys are names like `A`, `0`, `Enter`, `ArrowLeft`, `=`, `/`, or egui's (`Plus`, `Questionmark`); `cmd` is Cmd on macOS and Ctrl elsewhere. |
@@ -349,7 +416,8 @@ on; `key` resolves keys the way the canvas does. Commands behind keys:
   `$$` a dollar sign. Layers are numbered in stacking order, bottom first. Returns `{names}`.
 - Pages: `page.add {name?}` (a name starting with `-` adds a divider: an empty page shown as a line
   in the pages list, never opened and holding no layers), `page.list` (each page's `divider`),
-  `page.rename`, `page.move {id, index}`, `page.duplicate` ("Copy of …", after its source),
+  `page.rename`, `page.move {id, index}`, `page.duplicate` ("Copy of …", after its source, with its colour,
+  flows (starting at the copied frames), prototype settings and guides),
   `page.delete` (the last page that isn't a divider stays).
 - `component.list`: each component's `folder` (the Assets panel's folders: its page, the frames
   holding it, then its name's slash parts) and `label` (the name on its tile).
@@ -365,7 +433,10 @@ on; `key` resolves keys the way the canvas does. Commands behind keys:
   nested layers), Escape or a click drops it.
 - `pref.reduceMotion {on?}`: reduced motion (the interface's own animations off; the system's
   accessibility setting turns it on too). Prototype transitions still play.
-- `pref.language {language: system|en|es|es-419|fr|de|pt-BR|ja|ko|zh-Hans|…}`: the app's interface language, applied live ("system":
+- `pref.autoSave {on?}`: files that have a path save themselves a few seconds after they change
+  (off by default; the desktop app's timer does it, so scripts still call `file.save`).
+- `pref.language {language: system|en|cs|ru|es|es-419|fr|de|pt-BR|ja|ko|zh-Hans|…}`: the app's interface language, applied live ("system":
+- `pref.language {language: system|en|es|es-419|fr|de|pt-BR|ja|ko|sv|zh-Hans|…}`: the app's interface language, applied live ("system":
   the OS or browser language; a language without a catalog shows English). Command ids, labels and
   every result stay English.
 
@@ -780,10 +851,12 @@ skipped. The result's `opened.warnings` list what was approximated or skipped.
 ending in `.fig`) writes the whole document as a `.fig` file, from the same public format notes the
 import uses: the layer tree, geometry, paints with image bytes, strokes, effects, text with styled
 runs, vector networks, auto layout, constraints, components, sets, instances with their overrides
-and property values, and prototype interactions. `warnings` lists what was left out (shared style
-links, variables, comments, Dev Mode data and the like). Only round trips through FigCraft's own
-importer are verified; other apps may not open every file. Without `path` the file comes back as
-base64 `data`. Check one by opening it again:
+and property values, variable collections with their modes, variables and bindings, shared styles
+with their layer links, and prototype interactions. `warnings` lists what was left out (comments,
+Dev Mode data, some bindings and settings and the like). Round trips through FigCraft's own
+importer are tested, and the example documents and small test files were opened in other software
+(`docs/file-format-parity.md` says what was checked); other apps may not open every file. Without
+`path` the file comes back as base64 `data`. Check one by opening it again:
 
 ```text
 {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"export","arguments":{"format":"fig","path":"/tmp/handoff.fig"}}}
@@ -1106,6 +1179,11 @@ only: a host stops hosting it, a guest leaves it.
   pointer. Your selection, page and view go out by themselves when they change.
 - `collab.follow {client}` follows that person's viewport; `collab.follow {}` stops (so does any
   pan or zoom of your own, or Escape).
+- `collab.removePerson {client}` removes that person from the session: they are told the session
+  is over for them (they keep their copy and don't reconnect), and their address can't join the
+  file again while the session runs. Only the person hosting, or the owner of a
+  file on a server (with its owner token), can; a server older than this request says it can't.
+  Returns `{removed, name}`.
 - `collab.cursorChat {text}` shows `text` next to your cursor for everyone in the session (put the
   cursor somewhere first with `collab.cursor`): at most 100 characters, control characters become
   spaces, `""` closes it. Others see it fade 5 seconds after its last change, so send it again to
@@ -1358,6 +1436,27 @@ through the outlines of its layers.
   clears it; no `preset` reads it). The desktop app reads pressure from pen input on Windows; in the
   browser from stylus touch events that report a force; macOS and Linux tablets report none.
 
+### Selection colors
+
+`selection.colors {ids?}` returns `{colors: [{paint, style, variable, targets}]}` across the
+selection and its descendants, deduplicating overlapping roots. Only visible solid and gradient
+paints are listed; masks and boolean operands are omitted. Styles and variables distinguish
+otherwise equal paints. Each target is `{id, fills, index, range}`; `range` is null for a node
+paint or `[start, end]` in character offsets for an effective text-range fill.
+
+Pass the returned target list to:
+
+- `selection.setPaint {targets, paint}` to replace only those slots (same paint syntax as `fill.set`).
+- `selection.selectColor {targets}` to select their distinct owning layers, without a document undo step.
+- `selection.applyColorStyle {targets, style}` to apply a document paint style. As with `style.apply`,
+  this replaces the matching node's entire fill/stroke list and links the style. Text ranges copy
+  resolved paints and keep their typography, without a paint-style link.
+
+Keep the targets fixed throughout a live interaction. A color becoming equal to another color
+must not add slots to the gesture. Invalid or missing targets fail atomically. Direct paint edits
+detach bindings on changed paint values (opacity alone keeps the color binding); a text-range edit preserves the node bindings other
+characters still inherit. Each mutating command is one undo step (an interaction can group them).
+
 ### Paint, effect and layout grid lists
 
 A layer's fills, strokes, effects and layout grids are lists kept **bottom first**: index 0 paints
@@ -1399,7 +1498,8 @@ siblings and the frame's edges) along those axes, keeping whole pixels in the fr
 
 `guide.select {index, frame? | page?}` selects a guide (and deselects the layers; `{}` deselects
 it), as clicking one does in the app; `guide.remove {}` without an index removes the selected one
-(the context menu's Remove guide). While a guide is selected and no layer is, Delete removes it,
+(the context menu's Remove guide), and removing another guide keeps the selected one selected.
+While a guide is selected and no layer is, Delete removes it,
 the arrows across it nudge it (Shift: the big nudge) and Escape deselects it. In the app, a guide
 dragged out of a ruler and dropped on a frame becomes the guide of the top-level frame there, along
 the frame's axis nearer the ruler's; Alt-dragging a guide drops a copy, and holding Alt while
@@ -1523,6 +1623,18 @@ the instance's text layer id with `get_node`):
 {"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"type_text","arguments":{"id":7,"text":"Grace Hopper"}}}
 ```
 
+Smart-selection spacing (movable siblings in rows, columns or aligned grids):
+
+```json
+{"jsonrpc":"2.0","id":"spacing","method":"tools/call","params":{"name":"run_command","arguments":{"command":"arrange.spacing","params":{"ids":[3,4,5],"horizontal":24}}}}
+```
+
+`horizontal` and `vertical` are optional page-unit gaps (at least one is required, magnitude at
+most 1,000,000). The first column/row stays fixed; subsequent tracks move without changing sizes,
+parents or offsets inside each track. Nonuniform gaps become uniform. Normal auto-layout flow
+children, locked/hidden layers and instance internals are excluded. Interactive callers may pass
+`fromGesture: true` inside an interaction to keep using its original tracks during a scrub.
+
 Align and distribute as one undo step:
 
 ```json
@@ -1531,6 +1643,29 @@ Align and distribute as one undo step:
   {"command":"distribute.horizontal","params":{"ids":[3,4,5]}}]}}}
 ```
 
-The end-to-end tests in `crates/mcp/tests/agent_tasks.rs` are worked examples of ten realistic
-tasks (auto layout, components and overrides, gradients and shadows, paint styles, Light/Dark
-variables, align/distribute/group, boolean subtract + flatten, export, undo/redo, drawing with tools).
+### Step references
+
+A step in a `batch` can use what an earlier step returned. `{"$step": n}` anywhere in a step's
+params (a value, an item in `ids`, a nested field) is replaced by the `id` in the result of step `n`
+(zero-based) before the step runs; `{"$step": n, "field": "name"}` takes another field of that
+result. This builds a nested tree in one call and one undo step, without guessing ids:
+
+```json
+{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"batch","arguments":{"label":"Card","commands":[
+  {"command":"node.create","params":{"type":"frame","name":"Card","props":{"layout":"vertical","gap":12}}},
+  {"command":"node.create","params":{"type":"text","parent":{"$step":0},"text":"Ada Lovelace"}},
+  {"command":"node.create","params":{"type":"frame","parent":{"$step":0},"name":"Button"}},
+  {"command":"node.create","params":{"type":"text","parent":{"$step":2},"text":"Follow"}}]}}}
+```
+
+A reference to the same or a later step, a negative or non-integer index, a missing `field` or any
+other key next to `$step` fails the whole batch, which is rolled back. Only an object whose keys are
+`$step` (and optionally `field`) is a reference: text such as `"$step 0"` is left as written. The
+`$step` key is reserved in step params: an object holding it anywhere (in plugin data or a variable
+value too) is read as a reference. A step that is itself a `command.batch` is passed on as written,
+so the references in its steps are to its own steps, not the outer batch's.
+
+The end-to-end tests in `crates/mcp/tests/agent_tasks.rs` are worked examples of realistic tasks
+(auto layout, a card built in one batch with step references, components and overrides, gradients
+and shadows, paint styles, Light/Dark variables, align/distribute/group, boolean subtract + flatten,
+export, undo/redo, drawing with tools).

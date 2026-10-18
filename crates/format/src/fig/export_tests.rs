@@ -595,6 +595,17 @@ fn normalize(n: &mut Node, ix: &dyn Fn(NodeId) -> NodeId) {
     n.source = None;
     n.overrides.clear();
     n.constrain_proportions = false;
+    // A text's resize mode is its sizing (the editor keeps them together; generated documents
+    // don't): auto width hugs both axes, auto height its height.
+    if let NodeKind::Text(t) = &n.kind {
+        let cl = &mut n.child_layout;
+        let hug = |s: &mut Sizing| *s = if *s == Sizing::Fixed { Sizing::Hug } else { *s };
+        match t.auto_resize {
+            TextAutoResize::WidthAndHeight => [&mut cl.sizing_h, &mut cl.sizing_v].into_iter().for_each(hug),
+            TextAutoResize::Height => hug(&mut cl.sizing_v),
+            _ => {}
+        }
+    }
     let fold = |ps: &mut Vec<Paint>| {
         for p in ps.iter_mut() {
             if let PaintKind::Solid { color } = &mut p.kind {
@@ -619,9 +630,6 @@ fn normalize(n: &mut Node, ix: &dyn Fn(NodeId) -> NodeId) {
         }
     }
     if let Some(l) = &mut n.layout {
-        if matches!(l.main_align, MainAlign::SpaceAround | MainAlign::SpaceEvenly) {
-            l.main_align = MainAlign::SpaceBetween;
-        }
         // Track counts only matter (and are only written) for grids.
         if l.mode != LayoutMode::Grid {
             let d = AutoLayout::default();
@@ -680,7 +688,7 @@ fn normalize(n: &mut Node, ix: &dyn Fn(NodeId) -> NodeId) {
             for r in &mut td.runs {
                 px(&mut r.style);
             }
-            td.paragraphs = (0..td.paragraph_count()).map(|p| ParaList { list: td.para_list(p).list, indent: 0 }).collect();
+            td.paragraphs = (0..td.paragraph_count()).map(|p| ParaList { indent: 0, ..td.para_list(p) }).collect();
             td.list = ListStyle::None;
         }
         NodeKind::Vector { network } => {
@@ -1012,6 +1020,37 @@ fn junk_documents_never_panic() {
             let _ = import(&bytes, "x");
         }
     }
+}
+
+/// A frame's own min/max size survives whatever its parent is, not only under auto layout.
+#[test]
+fn frame_size_limits_survive_without_auto_layout_parent() {
+    fn limits(doc: &Document) -> [Option<f64>; 4] {
+        let (bytes, ew) = export(doc, None).unwrap();
+        let (back, iw) = import(&bytes, "File").unwrap();
+        assert!(ew.is_empty() && iw.is_empty(), "export {ew:?}, import {iw:?}");
+        let cl = &back.nodes().find(|n| n.name == "Subject").unwrap().child_layout;
+        [cl.min_w, cl.max_w, cl.min_h, cl.max_h]
+    }
+    let mut doc = Document::new("File");
+    let page = doc.first_page().unwrap();
+    let id = doc.create(page, NodeKind::Frame, "Subject", 0.0, 0.0, 100.0, 100.0).unwrap();
+    let node = doc.node_mut(id).unwrap();
+    node.layout = Some(AutoLayout::default());
+    node.child_layout.min_w = Some(80.0);
+    node.child_layout.max_w = Some(150.0);
+    node.child_layout.min_h = Some(60.0);
+    node.child_layout.max_h = Some(170.0);
+    let expected = [Some(80.0), Some(150.0), Some(60.0), Some(170.0)];
+
+    let mut nested = doc.clone();
+    let wrapper = nested.create(page, NodeKind::Frame, "Wrapper", 0.0, 0.0, 300.0, 300.0).unwrap();
+    nested.node_mut(wrapper).unwrap().layout = Some(AutoLayout::default());
+    nested.reparent(id, wrapper, None).unwrap();
+    assert_eq!(limits(&nested), expected, "auto layout parent");
+    nested.node_mut(wrapper).unwrap().layout = None;
+    assert_eq!(limits(&nested), expected, "plain frame parent");
+    assert_eq!(limits(&doc), expected, "page parent");
 }
 
 /// Link each instance's layers to its main's by position, as they are imported (the engine

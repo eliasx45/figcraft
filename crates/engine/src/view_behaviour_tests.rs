@@ -457,6 +457,23 @@ fn a_selected_guide_is_deleted_and_nudged_with_the_keyboard() {
 }
 
 #[test]
+fn removing_an_earlier_guide_keeps_the_selected_guide() {
+    let mut s = Session::new();
+    for offset in [100, 200, 300] {
+        ex(&mut s, "guide.add", json!({"vertical": true, "offset": offset}));
+    }
+    let page = s.page().unwrap();
+    ex(&mut s, "guide.select", json!({"index": 1}));
+    ex(&mut s, "guide.remove", json!({"index": 0}));
+    assert_eq!(s.ds().unwrap().selected_guide(), Some((page, 0)), "the guide at 200 stays selected at its new index");
+    assert!(s.tool_key("ArrowRight", false, false, false).unwrap());
+    assert_eq!(guide_list(&s, page), vec![(true, 201.0), (true, 300.0)], "the arrow nudges the selected guide, not its neighbour");
+    // A later guide leaves the selection alone.
+    ex(&mut s, "guide.remove", json!({"index": 1}));
+    assert_eq!(s.ds().unwrap().selected_guide(), Some((page, 0)));
+}
+
+#[test]
 fn guides_snap_and_measure() {
     let mut s = Session::new();
     let k = guide_scene(&mut s);
@@ -724,4 +741,33 @@ fn alt_measures_between_layers() {
         want.sort();
         assert_eq!(measured(&mut s, p, m), want, "{why}");
     }
+}
+
+#[test]
+fn view_toggles_are_kept_for_the_next_launch() {
+    let mut s = Session::new();
+    // (command, turned to, ViewState field, derivation)
+    let rows: Vec<(&str, bool, fn(&ViewState) -> bool, &str)> = vec![
+        ("view.rulers", true, |v| v.rulers, "rulers shown stay shown"),
+        ("view.pixelGrid", false, |v| v.pixel_grid, "a hidden pixel grid stays hidden"),
+        ("view.layoutGrids", false, |v| v.layout_grids, "hidden layout grids stay hidden"),
+        ("view.snapPixel", false, |v| v.snap_pixel, "snapping to the pixel grid off stays off"),
+    ];
+    for (cmd, on, _, _) in &rows {
+        ex(&mut s, cmd, json!({"on": on}));
+    }
+    // Modes stay with their file: a new one never opens in outline mode or soft-proofing.
+    for cmd in ["view.outlines", "view.outlinesSelection", "view.proofSrgb"] {
+        ex(&mut s, cmd, json!({"on": true}));
+    }
+    // The app writes its preferences as JSON and reads them back at the next launch.
+    let saved = serde_json::to_value(&s.prefs).unwrap();
+    let mut next = Session::empty();
+    next.prefs = serde_json::from_value(saved).unwrap();
+    ex(&mut next, "file.new", json!({}));
+    let view = &next.ds().unwrap().view;
+    for (cmd, on, get, why) in rows {
+        assert_eq!(get(view), on, "{cmd}: {why}");
+    }
+    assert!(!view.outlines && !view.outlines_selection && !view.proof_srgb, "{view:?}");
 }

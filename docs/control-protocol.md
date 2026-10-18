@@ -18,7 +18,8 @@ reply:    {"id": 1, "ok": true, "result": ...}
 
 Requests are queued and run on the UI thread at the start of the next frame, so replies reflect the
 real UI state. A request that the UI doesn't answer within 60 s gets a timeout error. A line that is
-not JSON gets `{"id": null, "ok": false, "error": "bad JSON: …"}`. The implementation is in
+not JSON gets `{"id": null, "ok": false, "error": "bad JSON: …"}` and ends the connection (so an
+HTTP request a web page makes the browser send here never runs). The implementation is in
 `crates/ui-egui/src/control.rs` (methods) and `apps/figcraft/src/control_server.rs` (socket).
 
 A request line is limited to **32 MiB before the newline**, including whitespace. The reader stops
@@ -35,6 +36,17 @@ instead of dispatching the new request. These limits apply to the opt-in loopbac
 requests still queued after the UI timeout are discarded, including requests deferred to a hidden
 window. A command already running is not interrupted.
 
+A minimised or covered window (the main one or another, see Windows below) draws no frames, but
+still answers every method that acts on the app's state (`engine.execute`, `document.inspect`,
+`node.get`, `ui.inspect`, `ui.pointer`, `ui.key`, `ui.type`, `ui.set`, `ui.render`, `window.list`,
+…), in the file that window shows, so an attached agent can edit, inspect and save while the app is
+out of sight. The app is not drawn meanwhile and only wakes for requests, at most ten times a
+second while minimised, so a request there takes up to about 0.1 s. What only a drawn frame can
+answer (`ui.screenshot`, `ui.input`, `window.new`) is an error at once (`window 0 is minimised or
+hidden: …`) instead of waiting for the window to show; `ui.render` draws the document without it.
+Under Wayland the app can't tell that its window is minimised: where the compositor then stops
+drawing it, a request waits for the window and gets the 60 s timeout error.
+
 Coordinates are page units, y down. `x`/`y` in `node.set`/`node.create` are relative to the parent
 frame (groups have no coordinate space of their own).
 
@@ -44,6 +56,29 @@ window, with its tabs, panels and canvas: `engine.execute` acts on the file it s
 `ui.screenshot` captures it, `ui.input` reaches it. Without `window`, a request goes to the window
 last in front (the one the user clicked last, or the last `window.new` / `window.focus`). An
 unknown id is an error.
+
+## Confining file access
+
+```sh
+figcraft --control 7979 --automation-read-root /work/project --automation-write-root /work/project/out
+```
+
+`--automation-read-root <dir>` and `--automation-write-root <dir>` (each repeatable, `--flag=<dir>`
+works too; the same flags as `figcraft-cli mcp`) confine the files the app reads and writes for
+whoever asks: every control request (`engine.execute`, `ui.render`, `ui.screenshot`, `window.new`,
+`ui.key`, `ui.menu.invoke`…) and every frame of every window, so input injected with `ui.input`
+and what a person does in the window are held to the same folders. Files are read only inside a
+read or write root and written only inside a write root; anything else is an ordinary error reply
+(`automation path rejected: …`), and recent files outside the roots aren't listed. Paths are
+resolved as `docs/mcp.md` › Confining file access describes. A root that isn't an existing folder
+stops the app before its window opens. Without the flags nothing changes.
+
+Not confined: opening the files given on the command line when the app starts and the documents
+the system hands over (Finder, Open With; saving them later is confined like any write), and the
+app's own folders (preferences, recovery copies, plugins installed from a plugin directory). Run `figcraft-cli mcp --attach PORT` without the flags against
+such an app (it refuses them: the app does the confining). `ui.screenshot` and `ui.render` without a
+`path` return the PNG as data, which is how the attached MCP server takes them, so it writes no
+temporary files.
 
 ## Methods
 
@@ -60,6 +95,15 @@ JSON or the gradient shorthand `{"type":"linearGradient","stops":["#hex","#hex"]
 {"id":1,"ok":true,"result":{"id":2}}
 {"id":2,"method":"engine.execute","params":{"command":"node.set","params":{"ids":[2],"props":{"fill":"#FF6B6B","cornerRadius":8}}}}
 {"id":3,"method":"engine.execute","params":{"command":"command.batch","params":{"label":"Tidy","commands":[{"command":"align.left","params":{"ids":[2,3]}},{"command":"distribute.vertical","params":{"ids":[2,3]}}]}}}
+```
+
+Inside `command.batch`, `{"$step": n}` in a step's params stands for the `id` in step `n`'s result
+(zero-based; `{"$step": n, "field": "…"}` for another field; any object with a `$step` key is read
+as one, and a nested `command.batch` step keeps its own references to its own steps), so one batch
+can create a frame and fill it:
+
+```json
+{"id":4,"method":"engine.execute","params":{"command":"command.batch","params":{"commands":[{"command":"node.create","params":{"type":"frame","width":200,"height":100}},{"command":"node.create","params":{"type":"rectangle","parent":{"$step":0},"width":20,"height":20}}]}}}
 ```
 
 ### `engine.commands {}`
@@ -95,7 +139,18 @@ ellipse, its arc handles `arcHandles`, for a selected rectangle, frame, polygon 
 an idle window draws none) with the most frequent repaint requests behind them (`repaintCauses`:
 `[{at: "file:line", count}]`, every request made in the frame before each one, delayed ones such as
 the autosave deadline included; egui's `context.rs` begin-pass line means input events) and what the last canvas render had to do (`canvas.renderWork`: `full`, `partial` with
-the `pixels` re-rendered after a pan or an edit, or `reused`). While a prototype plays, `presenter`
+the `pixels` re-rendered after a pan or an edit, or `reused`), whether the canvas shows a coarse
+zoom preview or the refined image (`canvas.quality`: `preview` or `refined`) and the time from
+asking for a render to its preview and its refined image being handed to egui as the canvas
+texture (`canvas.previewLatencyMs`, `canvas.refineLatencyMs`, on a monotonic clock, rendering
+included in the browser too; the GPU upload and presenting the frame come after; `null` until
+there was one). `importReport` holds the Import report window's content (`{name, pages, layers, images, appended, placed, warnings, warningCount}`,
+`null` while none is open). The window opens only for a file the user opened or imported in the app
+(File ▸ Open or Import, Open recent, a recent file on the home screen, a drop, a paste, the system's open event).
+Emulated user input counts as the user's action: `ui.input` and `ui.key` (for example a Cmd+V paste or a click
+on a menu item) can open it. Commands sent through this channel with `engine.execute`, MCP, `window.new {path}`
+and files named on the command line never open it.
+`file.open` and `file.import` return the counts as `summary`. While a prototype plays, `presenter`
 (full window) and `preview` (the preview pane) hold the player's state: the `current` frame and its
 `name`, `start`, `history`, open `overlays`, how many delayed mouse triggers are `waiting`, the screen's `scroll` offset and `scrollRange`, the
 `device` (and whether it is turned to `landscape`, its `deviceColor`) and the `viewport` of the frame
@@ -143,7 +198,8 @@ A mouse gesture with the current tool. `kind`: `down`, `move`, `up`, `click`, `d
 (`x`, `y`) or screen pixels (`sx`, `sy`). `pressure` (0–1) is pen pressure (the Pencil records
 it); a drag's pressure goes from `pressure` to `pressureTo`. Returns `{selection, tool}`. With the Move and Scale
 tools, a press on a frame's or section's name label (as the canvas last drew it, along a rotated
-frame's top edge) selects and drags that frame.
+frame's top edge) selects and drags that frame; a double-click there renames the frame in place in
+the desktop app (the name field opens over the label).
 
 ```json
 {"id":4,"method":"engine.execute","params":{"command":"tool.set","params":{"tool":"ellipse"}}}
@@ -241,15 +297,18 @@ the annotations the canvas shows). `resetFrameStats` (true: start `framesDrawn` 
 `mentions` the picker offers, `devCompare` (`{id, mode, split}` or `null`), `devFocus` (the frame the
 focus view shows, or `null`) and `annotationFilter`).
 
-### `ui.screenshot {path}`
+### `ui.screenshot {path?}`
 
 PNG of the whole window (`window` picks one), UI included (needs a visible window; an idle one draws the frame to
-capture). Returns `{path, width, height}`, or an error after 60 s when the window doesn't deliver.
+capture). Returns `{path, width, height}`, without `path` `{format: "png", width, height, data}`
+(base64); an error at once when the window is minimised or hidden, or after 60 s when the window
+doesn't deliver.
 
-### `ui.render {path, scale?, ids?}`
+### `ui.render {path?, scale?, ids?}`
 
 PNG of the document without UI chrome (works without a window). Without `ids` it exports the
-selection, else the page's top-level layers. Returns the export result.
+selection, else the page's top-level layers. Returns the export result: written to `path`, or
+`{format: "png", data}` (base64) without one.
 
 ### `window.new {path?, index?}`
 

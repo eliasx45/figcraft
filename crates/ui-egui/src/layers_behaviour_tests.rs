@@ -227,6 +227,70 @@ fn pages_drag_to_reorder_and_dividers_open_nothing() {
     assert!(u.app.ui.last_error.is_none(), "{:?}", u.app.ui.last_error);
 }
 
+/// The page opened by a click on each spot from just under the pages header down to `to`.
+fn pages_down_to(u: &mut Ui, to: f32) -> Vec<NodeId> {
+    let mut opened = Vec::new();
+    for y in (190..to as i32).step_by(8) {
+        click(u, Pos2::new(150.0, y as f32), Modifiers::NONE);
+        opened.push(u.app.session.page().unwrap());
+    }
+    opened
+}
+
+#[test]
+fn a_long_pages_list_scrolls_and_leaves_room_for_the_layers() {
+    let mut s = Session::new();
+    let first = s.page().unwrap();
+    let rect = id(s.execute("shape.rectangle", &json!({"x": 0, "y": 0, "width": 10, "height": 10})).unwrap());
+    for _ in 0..59 {
+        s.execute("page.add", &json!({})).unwrap();
+    }
+    let pages = s.doc().unwrap().pages.clone();
+    let last = *pages.last().unwrap();
+    s.execute("page.select", &json!({"id": first})).unwrap();
+    s.execute("select.none", &json!({})).unwrap();
+    let mut u = Ui::new(s);
+    // The layers list stays on screen under 60 pages.
+    let layer = u.row_at(rect);
+    // The wheel over the pages list scrolls it to its last page.
+    let wheel = Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, -400.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: Default::default(),
+    };
+    for _ in 0..10 {
+        u.frame(vec![Event::PointerMoved(Pos2::new(150.0, 200.0)), wheel.clone()]);
+    }
+    for _ in 0..30 {
+        u.frame(vec![]);
+    }
+    let opened = pages_down_to(&mut u, layer.y - 60.0);
+    assert!(opened.contains(&last), "the last page can be reached");
+    let top = pages.iter().position(|p| Some(p) == opened.first()).unwrap();
+    assert!(top > 30, "the list scrolled past its first pages (top row: page {top})");
+}
+
+#[test]
+fn a_page_dropped_below_the_pages_list_stays_where_it_was() {
+    let mut s = Session::new();
+    let first = s.page().unwrap();
+    let rect = id(s.execute("shape.rectangle", &json!({"x": 0, "y": 0, "width": 10, "height": 10})).unwrap());
+    let second = id(s.execute("page.add", &json!({})).unwrap());
+    for _ in 0..58 {
+        s.execute("page.add", &json!({})).unwrap();
+    }
+    let pages = s.doc().unwrap().pages.clone();
+    s.execute("page.select", &json!({"id": first})).unwrap();
+    s.execute("select.none", &json!({})).unwrap();
+    let mut u = Ui::new(s);
+    let (row, layer) = (page_row(&mut u, second, first), u.row_at(rect));
+    // Released over the layers, where pages scrolled out of view would be: no page row is there.
+    u.drag_to(row, layer);
+    u.button(layer, false);
+    assert_eq!(u.app.session.doc().unwrap().pages, pages, "the pages keep their order");
+}
+
 /// A double click at `p`, with the screen reader tree checked on every frame: the platform adapter
 /// (UI Automation on Windows) aborts the app when the focused node isn't in the tree.
 fn double_click_checking_focus(u: &mut Ui, p: Pos2) {
@@ -266,4 +330,105 @@ fn double_clicking_a_page_renames_it_with_the_focus_in_the_screen_reader_tree() 
     double_click_checking_focus(&mut u, r1);
     assert_eq!(u.app.ui.rename_page.as_ref().map(|r| r.0), Some(p1));
     assert!(u.app.ui.last_error.is_none(), "{:?}", u.app.ui.last_error);
+}
+
+/// The y of the line between the pages and the layers, above the layers' row at `layer` (found by
+/// the resize cursor it shows when hovered).
+fn pages_edge_at(u: &mut Ui, layer: f32) -> f32 {
+    let hits: Vec<f32> = ((layer - 120.0) as i32..layer as i32)
+        .map(|y| y as f32)
+        .filter(|y| u.frame_output(vec![Event::PointerMoved(Pos2::new(150.0, *y))]).platform_output.cursor_icon == egui::CursorIcon::ResizeVertical)
+        .collect();
+    assert!(!hits.is_empty(), "no edge above {layer}");
+    (hits[0] + hits[hits.len() - 1]) / 2.0
+}
+
+#[test]
+fn the_line_between_pages_and_layers_drags_to_size_the_pages_list() {
+    let mut s = Session::new();
+    let rect = id(s.execute("shape.rectangle", &json!({"x": 0, "y": 0, "width": 10, "height": 10})).unwrap());
+    for _ in 0..59 {
+        s.execute("page.add", &json!({})).unwrap();
+    }
+    let first = s.doc().unwrap().pages[0];
+    s.execute("page.select", &json!({"id": first})).unwrap();
+    s.execute("select.none", &json!({})).unwrap();
+    let mut u = Ui::new(s);
+    let before = u.row_at(rect).y;
+    let edge = pages_edge_at(&mut u, before);
+    // A drag down by 150 px makes the pages list taller and moves the layers down with it.
+    let at = |dy: f32| Pos2::new(150.0, edge + dy);
+    let button = |p, pressed| Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+    u.frame(vec![Event::PointerMoved(at(0.0))]);
+    u.frame(vec![button(at(0.0), true)]);
+    for k in 1..=15 {
+        u.frame(vec![Event::PointerMoved(at(10.0 * k as f32))]);
+    }
+    u.frame(vec![button(at(150.0), false)]);
+    for _ in 0..30 {
+        u.frame(vec![]);
+    }
+    let after = u.row_at(rect).y;
+    assert!((after - before - 150.0).abs() < 3.0, "the layers moved from {before} to {after}");
+    // The height is kept for the next start.
+    let kept = u.app.session.prefs.pages_height.expect("kept in the preferences");
+    let mut next = Session::new();
+    next.prefs = u.app.session.prefs.clone();
+    assert_eq!(crate::FigApp::new(next, Box::new(crate::NoServices)).ui.pages_height, Some(kept));
+    // A double-click puts back the default.
+    let edge = pages_edge_at(&mut u, after);
+    let p = Pos2::new(150.0, edge);
+    u.frame(vec![Event::PointerMoved(p)]);
+    for _ in 0..2 {
+        u.frame(vec![button(p, true)]);
+        u.frame(vec![button(p, false)]);
+    }
+    for _ in 0..30 {
+        u.frame(vec![]);
+    }
+    assert_eq!(u.app.session.prefs.pages_height, None);
+    assert!((u.row_at(rect).y - before).abs() < 3.0);
+}
+
+#[test]
+fn dragging_up_the_line_under_a_short_pages_list_shrinks_it_at_once() {
+    // Five pages fit in the room the list is given: the drag starts from the rows shown, not
+    // from that room, so the line follows the pointer.
+    let mut s = Session::new();
+    let rect = id(s.execute("shape.rectangle", &json!({"x": 0, "y": 0, "width": 10, "height": 10})).unwrap());
+    for _ in 0..4 {
+        s.execute("page.add", &json!({})).unwrap();
+    }
+    let first = s.doc().unwrap().pages[0];
+    s.execute("page.select", &json!({"id": first})).unwrap();
+    s.execute("select.none", &json!({})).unwrap();
+    let mut u = Ui::new(s);
+    let before = u.row_at(rect).y;
+    let edge = pages_edge_at(&mut u, before);
+    let at = |dy: f32| Pos2::new(150.0, edge + dy);
+    let button = |p, pressed| Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+    u.frame(vec![Event::PointerMoved(at(0.0))]);
+    u.frame(vec![button(at(0.0), true)]);
+    for k in 1..=4 {
+        u.frame(vec![Event::PointerMoved(at(-10.0 * k as f32))]);
+    }
+    u.frame(vec![button(at(-40.0), false)]);
+    for _ in 0..30 {
+        u.frame(vec![]);
+    }
+    let after = u.row_at(rect).y;
+    assert!((before - after - 40.0).abs() < 3.0, "the layers moved from {before} to {after}");
+}
+
+#[test]
+fn the_pages_list_keeps_three_rows_and_leaves_the_layers_room() {
+    use crate::layers::{ROW, pages_list_height};
+    // The default: 40% of the panel.
+    assert_eq!(pages_list_height(None, 800.0), 320.0);
+    // Dragged short or tall, it stays within three rows and the room the layers need.
+    assert_eq!(pages_list_height(Some(0.0), 800.0), 3.0 * ROW);
+    assert_eq!(pages_list_height(Some(5000.0), 800.0), 800.0 - 40.0 - 3.0 * ROW);
+    assert_eq!(pages_list_height(Some(f32::NAN), 800.0), 320.0);
+    // A panel too short for both keeps the three rows.
+    assert_eq!(pages_list_height(Some(500.0), 100.0), 3.0 * ROW);
 }

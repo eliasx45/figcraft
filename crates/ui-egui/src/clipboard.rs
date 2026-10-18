@@ -28,6 +28,9 @@ pub fn paste(app: &mut FigApp, at: serde_json::Value) -> bool {
     }
     let data = match figcraft_format::fig::clipboard::decode(&html) {
         Ok(data) => data,
+        // Design data this path can't read (no Figma metadata, say) goes on to the plain design
+        // layer paste ([`crate::menus::paste`]); anything else is refused, never pasted stale.
+        Err(_) if figcraft_engine::cmd::edit::design_clipboard_buffer(&html).is_some() => return false,
         Err(e) => {
             app.toast(e.to_string());
             return true;
@@ -121,7 +124,7 @@ mod tests {
         app.run("edit.copy", json!({}));
         let before = app.session.doc().unwrap().clone();
         app.services = Box::new(Clipboard("<!--(figma)broken(/figma)-->".into()));
-        crate::menus::paste(&mut app, None);
+        crate::menus::paste(&mut app, None, None);
         assert_eq!(app.session.doc().unwrap(), &before);
     }
     #[test]

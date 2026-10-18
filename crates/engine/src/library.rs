@@ -134,9 +134,12 @@ pub fn closure(doc: &Document, roots: &[NodeId]) -> Vec<NodeId> {
     out
 }
 
-/// The style ids a layer links to (fill, stroke, effect, grid, text).
+/// The style ids a layer links to (fill, stroke, effect, grid, text, and text styles on
+/// character ranges).
 pub(crate) fn style_links(n: &Node) -> impl Iterator<Item = &String> {
-    [&n.styles.fill, &n.styles.stroke, &n.styles.effect, &n.styles.grid, &n.styles.text].into_iter().flatten()
+    let chars =
+        n.kind.text().into_iter().flat_map(|t| std::iter::once(&t.style).chain(t.runs.iter().map(|r| &r.style))).filter_map(|s| s.style_id.as_ref());
+    [&n.styles.fill, &n.styles.stroke, &n.styles.effect, &n.styles.grid, &n.styles.text].into_iter().flatten().chain(chars)
 }
 
 /// Style ids the layers under `roots` link to.
@@ -446,7 +449,25 @@ struct Stamp {
 #[derive(Clone, Debug)]
 struct Entry {
     stamp: Option<Stamp>,
+    /// When the file was read: a stamp only proves the file unchanged once its modification time
+    /// is safely older than that, since file systems keep the time in coarse ticks.
+    read_at: Option<std::time::SystemTime>,
     result: std::result::Result<Arc<PublishedLibrary>, String>,
+}
+
+/// How far a file's modification time must lie before its read for the stamp to be trusted.
+const RACY_STAMP: std::time::Duration = std::time::Duration::from_secs(2);
+
+impl Entry {
+    /// A file stamped in the future (clock skew, unpacked archives) never settles: it is re-read on
+    /// every load until the clock passes it.
+    fn still_valid(&self, now: &Stamp) -> bool {
+        let settled = match (now.modified, self.read_at) {
+            (Some(modified), Some(read_at)) => modified.checked_add(RACY_STAMP).is_some_and(|t| t < read_at),
+            _ => false,
+        };
+        settled && self.stamp.as_ref() == Some(now)
+    }
 }
 
 /// Library files read by a session, by path (re-read when they change on disk).
@@ -478,10 +499,11 @@ impl Cache {
             return Err(EngineError::Other(format!("{path} is too large to use as a library (the limit is {} MB)", max_bytes / 1024 / 1024)));
         }
         if let (Some(e), Ok(st)) = (self.entries.get(path), &stamp)
-            && e.stamp.as_ref() == Some(st)
+            && e.still_valid(st)
         {
             return e.result.clone().map_err(EngineError::Other);
         }
+        let read_at = now();
         let result = match &stamp {
             Ok(_) => read_file(path).map(Arc::new),
             Err(e) => Err(e.clone()),
@@ -489,7 +511,7 @@ impl Cache {
         if self.entries.len() >= MAX_CACHED && !self.entries.contains_key(path) {
             self.entries.clear();
         }
-        self.entries.insert(path.to_string(), Entry { stamp: stamp.ok(), result: result.clone() });
+        self.entries.insert(path.to_string(), Entry { stamp: stamp.ok(), read_at, result: result.clone() });
         result.map_err(EngineError::Other)
     }
 
@@ -503,13 +525,23 @@ impl Cache {
         if self.entries.len() >= MAX_CACHED && !self.entries.contains_key(path) {
             self.entries.clear();
         }
-        self.entries.insert(path.to_string(), Entry { stamp: None, result });
+        self.entries.insert(path.to_string(), Entry { stamp: None, read_at: None, result });
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn now() -> Option<std::time::SystemTime> {
+    Some(std::time::SystemTime::now())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn now() -> Option<std::time::SystemTime> {
+    None
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn stat(path: &str) -> std::result::Result<Stamp, String> {
-    let m = std::fs::metadata(path).map_err(|e| format!("{path}: {e}"))?;
+    let m = crate::file_access::metadata(path).map_err(|e| e.to_string())?;
     if !m.is_file() {
         return Err(format!("{path} is not a file"));
     }
@@ -523,7 +555,7 @@ fn stat(_path: &str) -> std::result::Result<Stamp, String> {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn read_file(path: &str) -> std::result::Result<PublishedLibrary, String> {
-    let f = std::fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
+    let f = crate::file_access::open(path).map_err(|e| e.to_string())?;
     match figcraft_format::read_library(std::io::BufReader::new(f)) {
         Ok(Some(lib)) => Ok(lib),
         Ok(None) => Err(format!("{path} has no published library: open it and publish it first (Libraries ▸ Publish library…)")),
@@ -582,11 +614,15 @@ fn local_key(lid: &str, key: &str, taken: impl Fn(&str) -> bool) -> String {
 }
 
 /// Copy library styles `keys` into `doc` as linked remote styles (with `update`, copies older than
-/// the library's are refreshed). Returns library style id → local id.
+/// the library's are refreshed). The variables a written copy binds are imported too and its
+/// bindings point at their copies (never at this file's variables of the same ids). Returns library
+/// style id → local id.
 pub fn import_styles(doc: &mut Document, lib: &PublishedLibrary, keys: &BTreeSet<String>, update: bool) -> BTreeMap<String, String> {
     let lid = lib.manifest.id.clone();
     let mut out = BTreeMap::new();
     let mut hashes = BTreeSet::new();
+    // Local ids of the copies written now, with the library style they copy.
+    let mut written: Vec<(String, &Style)> = Vec::new();
     for key in keys {
         let Some(style) = lib.doc.styles.iter().find(|s| s.id == *key) else { continue };
         let version = lib.manifest.style(key).map_or(lib.manifest.version, |s| s.version);
@@ -598,6 +634,7 @@ pub fn import_styles(doc: &mut Document, lib: &PublishedLibrary, keys: &BTreeSet
                 {
                     *slot = Style { id: r.local.clone(), ..style.clone() };
                     set_record(&mut doc.libraries_mut().styles, ImportedStyle { version, ..r.clone() });
+                    written.push((r.local.clone(), style));
                 }
                 r.local
             }
@@ -605,6 +642,7 @@ pub fn import_styles(doc: &mut Document, lib: &PublishedLibrary, keys: &BTreeSet
                 let local = local_key(&lid, key, |l| doc.styles.iter().any(|s| s.id == l));
                 doc.styles.push(Style { id: local.clone(), ..style.clone() });
                 set_record(&mut doc.libraries_mut().styles, ImportedStyle { library: lid.clone(), key: key.clone(), local: local.clone(), version });
+                written.push((local.clone(), style));
                 local
             }
         };
@@ -612,6 +650,17 @@ pub fn import_styles(doc: &mut Document, lib: &PublishedLibrary, keys: &BTreeSet
             paint_images(paints, &mut hashes);
         }
         out.insert(key.clone(), local);
+    }
+    let bound: BTreeSet<VariableId> = written.iter().flat_map(|(_, s)| s.bound.values().cloned()).collect();
+    if !bound.is_empty() {
+        let vars = import_variables(doc, lib, &bound, &BTreeSet::new(), update);
+        for (local, _) in &written {
+            if let Some(slot) = doc.styles.iter_mut().find(|s| s.id == *local) {
+                // Bindings to variables the library lacks are dropped (the published value stays).
+                slot.bound =
+                    std::mem::take(&mut slot.bound).into_iter().filter_map(|(f, v)| vars.variables.get(&v).map(|l| (f, l.clone()))).collect();
+            }
+        }
     }
     copy_images(doc, &lib.doc, &hashes);
     out
@@ -1201,9 +1250,16 @@ pub fn check_read_only(cmd: &str, before: &Document, after: &Document) -> std::r
     if !variables_unchanged(before, after) {
         return Err(READ_ONLY.into());
     }
-    let Some(store) = after.library_store().or_else(|| before.library_store()) else { return Ok(()) };
-    let touched = |d: &Document, id: NodeId| d.contains(id) && d.page_of(id) == Some(store);
-    if after.dirty().iter().any(|id| touched(before, *id) || touched(after, *id)) {
+    let changed_remote = |id| {
+        if !before.is_remote(id) && !after.is_remote(id) {
+            return false;
+        }
+        match (before.node_arc(id), after.node_arc(id)) {
+            (Some(old), Some(new)) => !Arc::ptr_eq(old, new),
+            _ => true,
+        }
+    };
+    if after.dirty().iter().any(|id| changed_remote(*id)) {
         return Err(READ_ONLY.into());
     }
     Ok(())

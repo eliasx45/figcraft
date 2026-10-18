@@ -813,6 +813,11 @@ pub fn button(resp: &Response, tip: &str) {
     });
 }
 
+/// A button named by `label` as it is: no key is split off (a file name may hold two spaces).
+pub fn named_button(resp: &Response, label: &str) {
+    node(resp, label, |n| n.set_role(Role::Button));
+}
+
 /// A link, named by its text.
 pub fn link(resp: &Response, label: &str) {
     node(resp, label, |n| n.set_role(Role::Link));
@@ -937,10 +942,11 @@ pub fn menu_item(resp: &Response, label: &str, trail: &str, checked: Option<bool
 }
 
 /// A menu item opening a submenu.
-pub fn submenu(resp: &Response, label: &str) {
+pub fn submenu(resp: &Response, label: &str, open: bool) {
     node(resp, label, |n| {
         n.set_role(Role::MenuItem);
         n.set_has_popup(accesskit::HasPopup::Menu);
+        n.set_expanded(open);
     });
 }
 

@@ -417,6 +417,9 @@ fn every_command_survives_junk_params() {
         // Online files: ids, servers, refreshes, actions and names as junk.
         json!({"file": [1], "server": 7, "refresh": "maybe", "action": "share", "name": {"x": 1}}),
         json!({"file": "../x", "server": "wss://\u{0}", "refresh": true, "action": "unshare", "name": 5}),
+        // Selection color slots: malformed indexes, ranges and paints.
+        json!({"targets": [{"id": 2, "fills": true, "index": -1, "range": [0, 1e308]}], "paint": {"type": "solid", "color": "invalid"}}),
+        json!({"targets": [{"id": 2, "fills": "yes", "index": 0, "range": [4, 1]}], "style": 5}),
         // Rotation origins and placing with a tool as junk.
         json!({"tool": [1], "x": 1e308, "y": "NaN", "reset": "maybe", "on": {"x": 1}}),
         json!({"tool": "frame", "x": -1e308, "y": 1e308, "reset": true, "on": "yes"}),
@@ -598,4 +601,28 @@ fn guides_add_move_remove() {
     assert_eq!(guides(&s).len(), 1, "junk never removes the first guide");
     s.execute("guide.clear", &json!({})).unwrap();
     assert!(guides(&s).is_empty());
+}
+
+#[test]
+fn find_replace_matches_and_replaces_case_insensitively() {
+    let mut s = sess();
+    let t = id(&s.execute("text.create", &json!({"text": "Hello", "x": 0, "y": 0})).unwrap());
+    let u = id(&s.execute("text.create", &json!({"text": "İ HELLO hello", "x": 0, "y": 40})).unwrap());
+    let f = id(&s.execute("frame.create", &json!({"x": 0, "y": 80, "width": 50, "height": 50, "name": "HELLO box"})).unwrap());
+    let chars = |s: &Session, i| s.doc().unwrap().node(i).unwrap().kind.text().unwrap().characters.clone();
+    let r = s.execute("edit.findReplace", &json!({"find": "hello", "replace": "bye", "layerNames": true})).unwrap();
+    assert_eq!(r["matches"], json!([t, u, f]));
+    assert_eq!(chars(&s, t), "bye");
+    assert_eq!(chars(&s, u), "İ bye bye");
+    assert_eq!(s.doc().unwrap().node(f).unwrap().name, "bye box");
+}
+
+#[test]
+fn find_replace_changing_only_the_case_replaces_every_occurrence() {
+    let mut s = sess();
+    let t = id(&s.execute("text.create", &json!({"text": "figcraft and FIGCRAFT, figcraft", "x": 0, "y": 0})).unwrap());
+    let f = id(&s.execute("frame.create", &json!({"x": 0, "y": 80, "width": 50, "height": 50, "name": "figcraft / figcraft"})).unwrap());
+    s.execute("edit.findReplace", &json!({"find": "figcraft", "replace": "FigCraft", "layerNames": true})).unwrap();
+    assert_eq!(s.doc().unwrap().node(t).unwrap().kind.text().unwrap().characters, "FigCraft and FigCraft, FigCraft");
+    assert_eq!(s.doc().unwrap().node(f).unwrap().name, "FigCraft / FigCraft");
 }

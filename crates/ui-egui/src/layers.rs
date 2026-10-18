@@ -111,7 +111,8 @@ pub fn rail(app: &mut FigApp, ui: &mut Ui) {
             ui.painter().rect_filled(ir, CornerRadius::same(6), t.hover);
         }
         icons::paint(ui.painter(), Rect::from_center_size(ir.center(), vec2(16.0, 16.0)), icon, if active { t.accent_text } else { t.icon });
-        ui.painter().text(pos2(r.center().x, y + 38.0), Align2::CENTER_CENTER, label, regular(10.0), t.text);
+        let shown = crate::widgets::elide_font(ui, label, (r.width() - 6.0).max(0.0), regular(10.0));
+        ui.painter().text(pos2(r.center().x, y + 38.0), Align2::CENTER_CENTER, shown, regular(10.0), t.text);
         if resp.clicked() {
             match tab {
                 Some(tb) => {
@@ -147,7 +148,8 @@ pub fn left_panel(app: &mut FigApp, ui: &mut Ui) {
     } else {
         let name = app.session.doc().map(|d| d.name.clone()).unwrap_or_default();
         let nr = Rect::from_min_max(pos2(head.min.x + 14.0, head.min.y + 14.0), pos2(head.max.x - 48.0, head.min.y + 34.0));
-        if let Some(new) = crate::widgets::text_field_inline(ui, Id::new("filename"), &name, nr, semibold(13.0)) {
+        let start = std::mem::take(&mut app.ui.rename_file);
+        if let (Some(new), _) = crate::widgets::rename_field(ui, Id::new("filename"), &name, nr, semibold(13.0), start) {
             app.run("file.rename", json!({"name": new}));
         }
         ui.painter().text(pos2(head.min.x + 16.0, head.min.y + 46.0), Align2::LEFT_CENTER, tr("Drafts"), regular(11.0), t.text_secondary);
@@ -215,66 +217,77 @@ fn pages(app: &mut FigApp, ui: &mut Ui) {
     let mut move_to: Option<(NodeId, String)> = None;
     // Pages are dragged up and down the list to reorder them.
     let mut reorder = crate::list_drag::ListDrag::in_order(ui, "pages");
-    for (k, (id, name, divider)) in pages.iter().cloned().enumerate() {
-        let (r, resp) = ui.allocate_exact_size(vec2(w, 32.0), Sense::click_and_drag());
-        reorder.row_by(&resp, k, r, || if divider { tr("Divider").to_string() } else { name.clone() });
-        a11y::list_item(&resp, if divider { tr("Divider") } else { &name }, id == cur);
-        let r = r.shrink2(vec2(8.0, 0.0));
-        a11y::ring_around(ui, r, &resp);
-        let renaming = app.ui.rename_page.as_ref().is_some_and(|(i, _)| *i == id);
-        if divider && !renaming {
-            // A divider is a line between pages: it opens nothing and takes no layers.
-            ui.painter().line_segment([pos2(r.min.x + 10.0, r.center().y), pos2(r.max.x - 10.0, r.center().y)], Stroke::new(1.0, t.border));
-        } else if resp.hovered() || id == cur {
-            ui.painter().rect_filled(r, CornerRadius::same(5), t.hover);
-        }
-        if dragging.is_some()
-            && id != cur
-            && !divider
-            // The gap between rows counts too.
-            && pointer.is_some_and(|p| resp.interact_rect.expand2(vec2(0.0, 3.0)).contains(p))
-        {
-            ui.painter().rect_stroke(r, CornerRadius::same(5), Stroke::new(2.0, ACCENT), egui::StrokeKind::Inside);
-            if ui.input(|i| i.pointer.any_released()) {
-                move_to = Some((id, name.clone()));
+    // A long list scrolls in its own area, so the layers keep their room below it.
+    let max_h = pages_list_height(app.ui.pages_height, ui.available_height());
+    let mut moved = egui::ScrollArea::vertical().id_salt("pages_list").max_height(max_h).show(ui, |ui| {
+        for (k, (id, name, divider)) in pages.iter().cloned().enumerate() {
+            let (r, resp) = ui.allocate_exact_size(vec2(w, 32.0), Sense::click_and_drag());
+            reorder.row_by(&resp, k, r, || if divider { tr("Divider").to_string() } else { name.clone() });
+            a11y::list_item(&resp, if divider { tr("Divider") } else { &name }, id == cur);
+            let r = r.shrink2(vec2(8.0, 0.0));
+            a11y::ring_around(ui, r, &resp);
+            let renaming = app.ui.rename_page.as_ref().is_some_and(|(i, _)| *i == id);
+            if divider && !renaming {
+                // A divider is a line between pages: it opens nothing and takes no layers.
+                ui.painter().line_segment([pos2(r.min.x + 10.0, r.center().y), pos2(r.max.x - 10.0, r.center().y)], Stroke::new(1.0, t.border));
+            } else if resp.hovered() || id == cur {
+                ui.painter().rect_filled(r, CornerRadius::same(5), t.hover);
             }
-        }
-        if renaming {
-            let tr = Rect::from_min_max(pos2(r.min.x + 8.0, r.min.y + 4.0), pos2(r.max.x - 4.0, r.max.y - 4.0));
-            let start = ui.data_mut(|d| d.remove_temp::<bool>(page_rename_start_id())).unwrap_or(false);
-            let font = if id == cur { semibold(11.0) } else { regular(11.0) };
-            if let (Some(new), _) = crate::widgets::rename_field(ui, Id::new(("pagename", id)), &name, tr, font, start) {
-                rename_done = Some((id, new));
+            if dragging.is_some()
+                && id != cur
+                && !divider
+                // The gap between rows counts too.
+                && pointer.is_some_and(|p| resp.interact_rect.expand2(vec2(0.0, 3.0)).contains(p))
+            {
+                ui.painter().rect_stroke(r, CornerRadius::same(5), Stroke::new(2.0, ACCENT), egui::StrokeKind::Inside);
+                if ui.input(|i| i.pointer.any_released()) {
+                    move_to = Some((id, name.clone()));
+                }
             }
-        } else if !divider {
-            let font = if id == cur { semibold(11.0) } else { regular(11.0) };
-            crate::bidi::paint_name(ui.painter(), pos2(r.min.x + 10.0, r.center().y), &name, font, t.text, r.width() - 14.0);
-        }
-        if resp.clicked() && !divider {
-            select = Some(id);
-        }
-        if resp.double_clicked() {
-            app.ui.rename_page = Some((id, name.clone()));
-            // The field takes the focus next frame, once it's drawn: focusing it now would put a
-            // node that isn't there yet in the screen reader tree, which AccessKit aborts on.
-            ui.data_mut(|d| d.insert_temp(page_rename_start_id(), true));
-        }
-        crate::right::context_popup(&resp).show(|ui| {
-            if ui.button(tr("Rename page")).clicked() {
+            if renaming {
+                let tr = Rect::from_min_max(pos2(r.min.x + 8.0, r.min.y + 4.0), pos2(r.max.x - 4.0, r.max.y - 4.0));
+                let start = ui.data_mut(|d| d.remove_temp::<bool>(page_rename_start_id())).unwrap_or(false);
+                let font = if id == cur { semibold(11.0) } else { regular(11.0) };
+                if let (Some(new), _) = crate::widgets::rename_field(ui, Id::new(("pagename", id)), &name, tr, font, start) {
+                    rename_done = Some((id, new));
+                }
+            } else if !divider {
+                let font = if id == cur { semibold(11.0) } else { regular(11.0) };
+                crate::bidi::paint_name(ui.painter(), pos2(r.min.x + 10.0, r.center().y), &name, font, t.text, r.width() - 14.0);
+            }
+            if resp.clicked() && !divider {
+                select = Some(id);
+            }
+            if resp.double_clicked() {
                 app.ui.rename_page = Some((id, name.clone()));
-                ui.close();
+                // The field takes the focus next frame, once it's drawn: focusing it now would put a
+                // node that isn't there yet in the screen reader tree, which AccessKit aborts on.
+                ui.data_mut(|d| d.insert_temp(page_rename_start_id(), true));
             }
-            if ui.button(tr("Duplicate page")).clicked() {
-                app.run("page.duplicate", json!({"id": id}));
-                ui.close();
-            }
-            if ui.button(tr("Delete page")).clicked() {
-                app.run("page.delete", json!({"id": id}));
-                ui.close();
-            }
-        });
+            crate::right::context_popup(&resp).show(|ui| {
+                if ui.button(tr("Rename page")).clicked() {
+                    app.ui.rename_page = Some((id, name.clone()));
+                    ui.close();
+                }
+                if ui.button(tr("Duplicate page")).clicked() {
+                    app.run("page.duplicate", json!({"id": id}));
+                    ui.close();
+                }
+                if ui.button(tr("Delete page")).clicked() {
+                    app.run("page.delete", json!({"id": id}));
+                    ui.close();
+                }
+            });
+        }
+        reorder.finish(ui)
+    });
+    // A drop outside the list's visible area (and the row gap at its edges) isn't on a page row,
+    // even one scrolled out of view.
+    if !ui.input(|i| i.pointer.latest_pos()).is_some_and(|p| moved.inner_rect.expand2(vec2(0.0, 3.0)).contains(p)) {
+        moved.inner = None;
+        move_to = None;
     }
-    if let Some((from, to)) = reorder.finish(ui)
+    if let Some((from, to)) = moved.inner
         && let Some((id, ..)) = pages.get(from)
     {
         app.run("page.move", json!({"id": id, "index": to}));
@@ -294,7 +307,55 @@ fn pages(app: &mut FigApp, ui: &mut Ui) {
     {
         app.run("page.select", json!({"id": p}));
     }
-    crate::widgets::separator(ui);
+    // `inner_rect` is the room the list was given; a short list shrinks to its rows.
+    pages_edge(app, ui, moved.inner_rect.height().min(moved.content_size.y));
+}
+
+/// The pages list's height in a panel with `avail` below the Pages header: the height asked for
+/// (by default 40% of it), at least three rows, and leaving the layers their header and three rows.
+pub(crate) fn pages_list_height(asked: Option<f32>, avail: f32) -> f32 {
+    let least = 3.0 * ROW;
+    let most = (avail - 40.0 - 3.0 * ROW).max(least);
+    asked.filter(|h| h.is_finite()).unwrap_or(avail * 0.4).clamp(least, most)
+}
+
+/// The line between the pages and the layers: dragging it sizes the pages list (`shown`: its
+/// height now), a double-click puts back the default. The main window keeps it in the preferences.
+fn pages_edge(app: &mut FigApp, ui: &mut Ui, shown: f32) {
+    let t = Tokens::get(ui.ctx());
+    let w = ui.available_width();
+    let (line, _) = ui.allocate_exact_size(vec2(w, 1.0), Sense::hover());
+    let grab = ui.style().interaction.resize_grab_radius_side;
+    let id = Id::new("pages_edge");
+    let resp = ui.interact(line.expand2(vec2(0.0, grab)), id, Sense::click_and_drag());
+    let active = resp.hovered() || resp.dragged();
+    if active {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+    }
+    let (width, colour) = if active { (2.0, t.accent) } else { (1.0, t.border) };
+    ui.painter().line_segment([line.left_center(), line.right_center()], Stroke::new(width, colour));
+    let asked = if resp.double_clicked() {
+        Some(None)
+    } else if resp.dragged() {
+        // The edge stays under the pointer where it was grabbed.
+        if resp.drag_started() {
+            ui.data_mut(|d| d.insert_temp(id, shown));
+        }
+        let from: f32 = ui.data(|d| d.get_temp(id)).unwrap_or(shown);
+        let moved = ui.input(|i| Some(i.pointer.latest_pos()?.y - i.pointer.press_origin()?.y)).unwrap_or(0.0);
+        Some(Some(from + moved))
+    } else {
+        None
+    };
+    if let Some(h) = asked
+        && h != app.ui.pages_height
+    {
+        app.ui.pages_height = h;
+        if app.windows.current == 0 {
+            app.session.prefs.pages_height = h;
+            app.panels_unsaved = true;
+        }
+    }
 }
 
 /// A page rename just asked for by a double click: its field takes the focus when drawn (temp data).
@@ -579,6 +640,7 @@ fn search_field(app: &mut FigApp, ui: &mut Ui, t: &Tokens, w: f32, id: Id) {
             .vertical_align(egui::Align::Center)
             .desired_width(te_rect.width()),
     );
+    crate::widgets::select_all_on_focus(ui, &r, &app.ui.layer_filter);
     if r.has_focus() {
         ui.painter().rect_stroke(field, CornerRadius::same(5), Stroke::new(1.0, t.accent), egui::StrokeKind::Inside);
     }
@@ -684,7 +746,7 @@ fn layers(app: &mut FigApp, ui: &mut Ui) {
             ui.horizontal(|ui| {
                 ui.add_space(16.0);
                 let hint = if filter.is_empty() { tr("Add a frame (F) or a shape (R) to get started") } else { tr("No matching layers") };
-                crate::widgets::label(ui, hint, t.text_secondary);
+                ui.add(egui::Label::new(egui::RichText::new(hint).font(regular(11.0)).color(t.text_secondary)).wrap());
             });
         }
         // Dragging near the list's top or bottom edge scrolls it, faster closer to the edge.

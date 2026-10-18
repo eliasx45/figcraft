@@ -32,18 +32,21 @@ enum ExpressionFunction ADDITION SUBTRACTION RESOLVE_VARIANT MULTIPLY DIVIDE EQU
 enum NavigationType NAVIGATE OVERLAY
 enum TransitionType INSTANT_TRANSITION DISSOLVE SMART_ANIMATE
 enum EasingType IN_CUBIC OUT_CUBIC
+enum ConstraintType MIN CENTER MAX STRETCH SCALE
+enum LeadingTrim NONE CAP_HEIGHT
 struct GUID uint sessionID, uint localID
 struct Color float r, float g, float b, float a
 struct Vector float x, float y
 struct Matrix float m00, float m01, float m02, float m10, float m11, float m12
 struct ColorStop Color color, float position
-message Image byte[] hash, string name
-message VariableID GUID guid
+message Image byte[] hash, string name, uint dataBlob
+message AssetRef string key, string version
+message VariableID GUID guid, AssetRef assetRef
 message PropRefValue GUID defId
 message AnyValue bool boolValue, float floatValue, VariableID alias, Color colorValue, PropRefValue propRefValue, TextData textDataValue, string textValue, Expression expressionValue
 message Expression ExpressionFunction expressionFunction, VariableData[] expressionArguments
 message VariableTarget VariableID id
-message VariableSetID GUID guid
+message VariableSetID GUID guid, AssetRef assetRef
 message ConditionalActions Action[] actions, VariableData condition
 message VectorData uint vectorNetworkBlob, Vector normalizedSize, NodeChange[] styleOverrideTable
 message ConnectorEndpoint GUID endpointNodeID, Vector position, Vector relativePosition
@@ -70,7 +73,7 @@ message Event InteractionType interactionType
 message Action GUID transitionNodeID, TransitionType transitionType, float transitionDuration, EasingType easingType, ConnectionType connectionType, NavigationType navigationType, VariableTarget targetVariable, VariableData targetVariableData, VariableSetID targetVariableSetID, GUID targetVariableModeID, ConditionalActions[] conditionalActions
 message Interaction Event event, Action[] actions
 message StartingPoint string name, string position
-message NodeChange GUID guid, ParentIndex parentIndex, NodeType type, string name, bool visible, float opacity, Vector size, Matrix transform, Paint[] fillPaints, Paint[] strokePaints, float strokeWeight, float cornerRadius, bool resizeToFit, bool internalOnly, float fontSize, FontName fontName, TextData textData, uint styleID, Path[] fillGeometry, Path[] strokeGeometry, StyleType styleType, StyleId styleIdForFill, SymbolData symbolData, PropDef[] componentPropDefs, PropAssignment[] componentPropAssignments, VariableDataMap parameterConsumptionMap, SetMode[] variableSetModes, VariableID variableSetID, ResolvedType variableResolvedType, Values variableDataValues, ModeMap variableModeBySetMap, Interaction[] prototypeInteractions, StartingPoint prototypeStartingPoint, GUIDPath guidPath, StackMode stackMode, float stackSpacing, float stackHorizontalPadding, float stackVerticalPadding, uint count, float starInnerScale, VectorData vectorData, StrokeCap strokeCap, StrokeJoin strokeJoin, VectorMirror handleMirroring, ShapeWithTextType shapeWithTextType, ConnectorEndpoint connectorStart, ConnectorEndpoint connectorEnd, StrokeCap connectorStartCap, StrokeCap connectorEndCap, ConnectorLineStyle connectorLineStyle
+message NodeChange GUID guid, ParentIndex parentIndex, NodeType type, string name, bool visible, float opacity, Vector size, Matrix transform, Paint[] fillPaints, Paint[] strokePaints, float strokeWeight, float cornerRadius, bool resizeToFit, bool internalOnly, float fontSize, FontName fontName, TextData textData, uint styleID, Path[] fillGeometry, Path[] strokeGeometry, StyleType styleType, StyleId styleIdForFill, SymbolData symbolData, PropDef[] componentPropDefs, PropAssignment[] componentPropAssignments, VariableDataMap parameterConsumptionMap, SetMode[] variableSetModes, VariableID variableSetID, ResolvedType variableResolvedType, Values variableDataValues, ModeMap variableModeBySetMap, Interaction[] prototypeInteractions, StartingPoint prototypeStartingPoint, GUIDPath guidPath, StackMode stackMode, float stackSpacing, float stackHorizontalPadding, float stackVerticalPadding, uint count, float starInnerScale, VectorData vectorData, StrokeCap strokeCap, StrokeJoin strokeJoin, VectorMirror handleMirroring, ShapeWithTextType shapeWithTextType, ConnectorEndpoint connectorStart, ConnectorEndpoint connectorEnd, StrokeCap connectorStartCap, StrokeCap connectorEndCap, ConnectorLineStyle connectorLineStyle, ConstraintType horizontalConstraint, ConstraintType verticalConstraint, NodeChange[] derivedSymbolData, string key, string version, LeadingTrim leadingTrim, float[] dashPattern
 message Blob byte[] bytes
 message Message NodeChange[] nodeChanges, Blob[] blobs
 ";
@@ -281,6 +284,7 @@ fn message() -> Kv<'static> {
                 ("fillPaints", arr(vec![solid(0.0, 0.0, 0.0)])),
                 ("fontSize", f(16.0)),
                 ("fontName", font("Regular")),
+                ("leadingTrim", e("CAP_HEIGHT")),
                 ("textData", text),
             ],
         ),
@@ -388,6 +392,175 @@ fn named<'d>(doc: &'d figcraft_doc::Document, name: &str) -> &'d figcraft_doc::N
     doc.nodes().find(|n| n.name == name).unwrap_or_else(|| panic!("no layer {name}"))
 }
 
+/// The shared schema plus the grid sizing definitions only these tests use.
+fn grid_schema() -> Schema {
+    const NODE_FIELDS: &str = ", GridTrackMap gridColumns, GridTrackMap gridRows, GridTrackSizeMap gridColumnsSizing, GridTrackSizeMap gridRowsSizing, GUID gridColumnAnchor, GUID gridRowAnchor, uint gridColumnSpan, uint gridRowSpan, float gridColumnGap, float gridRowGap";
+    const TYPES: &str = "
+enum GridTrackSizingType FLEX FIXED HUG UNKNOWN
+message GridTrackSizeFunction GridTrackSizingType type, float value
+message GridTrackSize GridTrackSizeFunction minSizing, GridTrackSizeFunction maxSizing
+message GridTrackSizeEntry GUID id, GridTrackSize trackSize
+message GridTrackSizeMap GridTrackSizeEntry[] entries
+message GridTrackEntry GUID id, string position
+message GridTrackMap GridTrackEntry[] entries
+message Blob ";
+    let text = SCHEMA.replace("enum StackMode NONE HORIZONTAL VERTICAL\n", "enum StackMode NONE HORIZONTAL VERTICAL GRID\n").replacen(
+        "\nmessage Blob ",
+        &format!("{NODE_FIELDS}{TYPES}"),
+        1,
+    );
+    Schema::parse(&text).unwrap()
+}
+
+fn track_size(kind: &'static str, value: f64) -> Kv<'static> {
+    let sizing = || o(vec![("type", e(kind)), ("value", f(value))]);
+    o(vec![("minSizing", sizing()), ("maxSizing", sizing())])
+}
+
+fn ranged_track_size(min: Kv<'static>, max: Kv<'static>) -> Kv<'static> {
+    o(vec![("minSizing", min), ("maxSizing", max)])
+}
+
+fn track_map_entry(id: u64, size: Kv<'static>) -> Kv<'static> {
+    o(vec![("id", g(id)), ("trackSize", size)])
+}
+
+fn positioned_track(id: u64, position: &'static str) -> Kv<'static> {
+    o(vec![("id", g(id)), ("position", s(position))])
+}
+
+fn unpositioned_track(id: u64) -> Kv<'static> {
+    o(vec![("id", g(id))])
+}
+
+#[test]
+fn grid_tracks_import_by_guid_and_keep_track_order() {
+    let cols = arr(vec![positioned_track(13, "$"), unpositioned_track(10), positioned_track(12, "#"), unpositioned_track(11)]);
+    let rows = arr(vec![positioned_track(21, "\""), positioned_track(20, "!")]);
+    // Sizing entries intentionally differ from track order. Their GUIDs define the join.
+    let col_sizes = arr(vec![
+        track_map_entry(12, track_size("FLEX", 1.0)),
+        track_map_entry(10, track_size("FIXED", 120.0)),
+        track_map_entry(13, track_size("FLEX", 2.0)),
+        track_map_entry(11, track_size("HUG", 80.0)),
+    ]);
+    let row_sizes = arr(vec![track_map_entry(21, track_size("HUG", 30.0)), track_map_entry(20, track_size("FIXED", 50.0))]);
+    let nodes = vec![
+        node(0, None, "DOCUMENT", "Document", vec![]),
+        node(1, Some((0, "!")), "CANVAS", "Page", vec![]),
+        node(
+            2,
+            Some((1, "!")),
+            "FRAME",
+            "Grid",
+            vec![
+                ("size", xy(600.0, 300.0)),
+                ("transform", at(0.0, 0.0)),
+                ("stackMode", e("GRID")),
+                ("gridColumns", o(vec![("entries", cols)])),
+                ("gridRows", o(vec![("entries", rows)])),
+                ("gridColumnsSizing", o(vec![("entries", col_sizes)])),
+                ("gridRowsSizing", o(vec![("entries", row_sizes)])),
+                ("gridColumnGap", f(10.0)),
+                ("gridRowGap", f(12.0)),
+            ],
+        ),
+        node(
+            3,
+            Some((2, "!")),
+            "RECTANGLE",
+            "Hug child",
+            vec![
+                ("size", xy(80.0, 30.0)),
+                ("transform", at(0.0, 0.0)),
+                ("gridColumnAnchor", g(11)),
+                ("gridRowAnchor", g(21)),
+                ("gridColumnSpan", u(2)),
+                ("gridRowSpan", u(1)),
+            ],
+        ),
+    ];
+    let bytes = canvas(&grid_schema(), &o(vec![("nodeChanges", arr(nodes))]));
+    let (doc, warnings) = import(&bytes, "Grid tracks").unwrap();
+    let grid = named(&doc, "Grid").layout.as_ref().unwrap();
+    assert_eq!((grid.mode, grid.grid_columns, grid.grid_rows, grid.gap, grid.cross_gap), (figcraft_doc::LayoutMode::Grid, 4, 2, 10.0, 12.0));
+    assert_eq!(
+        grid.column_tracks,
+        vec![
+            figcraft_doc::GridTrack::fixed(120.0),
+            figcraft_doc::GridTrack::hug(),
+            figcraft_doc::GridTrack::fill(1.0),
+            figcraft_doc::GridTrack::fill(2.0),
+        ]
+    );
+    assert_eq!(grid.row_tracks, vec![figcraft_doc::GridTrack::fixed(50.0), figcraft_doc::GridTrack::hug()]);
+    let child = &named(&doc, "Hug child").child_layout;
+    assert_eq!((child.grid_column, child.grid_row, child.grid_column_span, child.grid_row_span), (Some(1), Some(1), 2, 1));
+    assert!(!warnings.iter().any(|w| w.contains("grid track")), "{warnings:?}");
+}
+
+#[test]
+fn malformed_grid_tracks_warn_and_keep_equal_track_fallbacks() {
+    let tracks = arr(vec![positioned_track(30, "!"), positioned_track(31, "\""), positioned_track(32, "#"), positioned_track(33, "$")]);
+    let sizing = arr(vec![
+        track_map_entry(30, track_size("FIXED", -1.0)),
+        track_map_entry(31, ranged_track_size(o(vec![("type", e("FLEX")), ("value", f(1.0))]), o(vec![("type", e("FLEX")), ("value", f(2.0))]))),
+        track_map_entry(33, track_size("UNKNOWN", 5.0)),
+        track_map_entry(34, track_size("FLEX", 3.0)),
+    ]);
+    let nodes = vec![
+        node(0, None, "DOCUMENT", "Document", vec![]),
+        node(1, Some((0, "!")), "CANVAS", "Page", vec![]),
+        node(
+            2,
+            Some((1, "!")),
+            "FRAME",
+            "Grid",
+            vec![
+                ("size", xy(100.0, 100.0)),
+                ("transform", at(0.0, 0.0)),
+                ("stackMode", e("GRID")),
+                ("gridColumns", o(vec![("entries", tracks)])),
+                ("gridColumnsSizing", o(vec![("entries", sizing)])),
+            ],
+        ),
+    ];
+    let bytes = canvas(&grid_schema(), &o(vec![("nodeChanges", arr(nodes))]));
+    let (doc, warnings) = import(&bytes, "Malformed grid tracks").unwrap();
+    let layout = named(&doc, "Grid").layout.as_ref().unwrap();
+    assert_eq!(layout.column_tracks, vec![figcraft_doc::GridTrack::default(); 4]);
+    assert!(warnings.iter().any(|w| w.contains("grid track sizing is unsupported or malformed")), "{warnings:?}");
+    assert!(warnings.iter().any(|w| w.contains("stale or invalid grid track sizing entries")), "{warnings:?}");
+}
+
+#[test]
+fn oversized_grid_track_lists_warn_and_use_default_tracks() {
+    let oversized: Vec<Kv<'static>> = (0..1_001).map(|i| unpositioned_track(100 + i)).collect();
+    let sizing = vec![track_map_entry(100, track_size("FIXED", 40.0))];
+    let nodes = vec![
+        node(0, None, "DOCUMENT", "Document", vec![]),
+        node(1, Some((0, "!")), "CANVAS", "Page", vec![]),
+        node(
+            2,
+            Some((1, "!")),
+            "FRAME",
+            "Grid",
+            vec![
+                ("size", xy(100.0, 100.0)),
+                ("transform", at(0.0, 0.0)),
+                ("stackMode", e("GRID")),
+                ("gridColumns", o(vec![("entries", arr(oversized))])),
+                ("gridColumnsSizing", o(vec![("entries", arr(sizing))])),
+            ],
+        ),
+    ];
+    let bytes = canvas(&grid_schema(), &o(vec![("nodeChanges", arr(nodes))]));
+    let (doc, warnings) = import(&bytes, "Oversized grid tracks").unwrap();
+    let layout = named(&doc, "Grid").layout.as_ref().unwrap();
+    assert!(layout.column_tracks.is_empty(), "{:?}", layout.column_tracks.len());
+    assert!(warnings.iter().any(|w| w.contains("grid track list exceeds 1000 entries")), "{warnings:?}");
+}
+
 #[test]
 fn kiwi_round_trip() {
     let sc = schema();
@@ -475,6 +648,7 @@ fn imports_the_fixture() {
     let NodeKind::Text(t) = &named(&doc, "Title").kind else { panic!("not text") };
     assert_eq!(t.characters, "Hi there");
     assert_eq!(t.style.font_size, 16.0);
+    assert_eq!(t.leading_trim, figcraft_doc::LeadingTrim::CapHeight, "vertical trim (#466)");
     assert_eq!(t.runs.len(), 1);
     assert_eq!((t.runs[0].start, t.runs[0].end, t.runs[0].style.font_style.as_str()), (3, 6, "Bold"));
     // The group's children keep their place on the page (group at 100, 100).
@@ -537,6 +711,53 @@ fn bare_canvas_and_zlib_chunks_open() {
     assert!(import(&out, "Z").is_ok());
 }
 
+/// The fixture message with the photo's image bytes in its own blobs, as copies written by plugins
+/// and tools carry them: the PNG goes at the end of `blobs` and `image.dataBlob` points `shift`
+/// places past it (0 is the PNG itself).
+fn message_with_image_in_blobs(shift: u64) -> Kv<'static> {
+    fn point_images_at(value: &mut Kv<'static>, blob: u64) {
+        match value {
+            Kv::Object(fields) => {
+                for (name, field) in fields.iter_mut() {
+                    match field {
+                        Kv::Object(image) if *name == "image" => image.push(("dataBlob", u(blob))),
+                        _ => point_images_at(field, blob),
+                    }
+                }
+            }
+            Kv::Array(items) => items.iter_mut().for_each(|item| point_images_at(item, blob)),
+            _ => {}
+        }
+    }
+    let mut msg = message();
+    let index = {
+        let Kv::Object(fields) = &mut msg else { panic!("the message is an object") };
+        let Some((_, Kv::Array(blobs))) = fields.iter_mut().find(|(name, _)| *name == "blobs") else { panic!("no blobs") };
+        blobs.push(o(vec![("bytes", Kv::Bytes(png()))]));
+        blobs.len() as u64 - 1
+    };
+    point_images_at(&mut msg, index + shift);
+    msg
+}
+
+#[test]
+fn a_bare_canvas_reads_images_carried_in_its_blobs() {
+    // The clipboard holds a bare canvas (no `images/`); the image comes from `image.dataBlob`.
+    let c = canvas(&schema(), &message_with_image_in_blobs(0));
+    let (doc, warnings) = import(&c, "Pasted").unwrap();
+    let photo = named(&doc, "Photo");
+    let figcraft_doc::color::PaintKind::Image(img) = &photo.fills[0].kind else { panic!("not an image fill") };
+    assert_eq!(doc.images.get(&img.image).map(|i| (i.width, i.height)), Some((2, 1)));
+    assert!(!warnings.iter().any(|w| w.contains("isn't in the file")), "{warnings:?}");
+}
+
+#[test]
+fn a_data_blob_past_the_blobs_stays_a_placeholder() {
+    let c = canvas(&schema(), &message_with_image_in_blobs(5));
+    let (_, warnings) = import(&c, "Pasted").unwrap();
+    assert!(warnings.iter().any(|w| w.contains("isn't in the file")), "{warnings:?}");
+}
+
 #[test]
 fn other_files_are_not_fig() {
     assert!(try_import(b"{\"document\": {}}", "x").is_none());
@@ -586,7 +807,7 @@ fn mangled_kiwi_never_panics() {
     }
     for cut in (0..msg.len()).step_by(3) {
         if let Ok(kv) = sc.decode_message(root, &msg[..cut]) {
-            let _ = map::to_rest(&kv, "x");
+            let _ = map::to_rest(&kv, "x", crate::rest::MAX_NODES);
         }
     }
     for _ in 0..2000 {
@@ -596,8 +817,8 @@ fn mangled_kiwi_never_panics() {
             m[i] = r.next() as u8;
         }
         if let Ok(kv) = sc.decode_message(root, &m) {
-            let (json, _) = map::to_rest(&kv, "x");
-            let _ = crate::rest::import(&json, &crate::rest::no_images);
+            let (json, _, networks) = map::to_rest(&kv, "x", crate::rest::MAX_NODES);
+            let _ = crate::rest::import_with_networks(&json, &crate::rest::no_images, networks, crate::rest::MAX_NODES);
         }
         let mut sbytes = schema_bytes.clone();
         let i = (r.next() as usize) % sbytes.len();
@@ -617,6 +838,61 @@ fn mangled_kiwi_never_panics() {
         framed.extend_from_slice(&junk);
         let _ = import(&framed, "x");
     }
+}
+
+#[test]
+fn large_files_get_a_larger_value_budget() {
+    // Small files keep the fixed floor: a few bytes can't expand into a huge tree.
+    assert_eq!(kiwi::value_budget(0), 20_000_000);
+    assert_eq!(kiwi::value_budget(1 << 20), 20_000_000);
+    // A real 400 000-layer file: an 83.5 MB canvas whose message unpacks to 334 MB and holds
+    // 30.5 million values was refused as "too many values".
+    assert!(kiwi::value_budget(83_491_232) > 30_514_899);
+    // A real 194 MB design-system file (UX4G): a 39.5 MB canvas holding 29.7 million values.
+    assert!(kiwi::value_budget(39_528_420) > 29_703_730);
+    // Still bounded by the largest canvas read.
+    assert!(kiwi::value_budget(MAX_CANVAS as usize) <= 128 << 20);
+}
+
+#[test]
+fn the_layer_cap_follows_the_file_size() {
+    // A small (or broken) file keeps the REST import's cap: instances expand into a layer per
+    // layer of their component, and a few bytes mustn't claim millions of layers.
+    assert_eq!(layer_budget(0), crate::rest::MAX_NODES);
+    assert_eq!(layer_budget(1 << 20), crate::rest::MAX_NODES);
+    // A real 894 004-layer file (an 83.5 MB canvas) stopped at 200 000 and came in with 27 of
+    // its 30 pages empty.
+    assert!(layer_budget(83_491_232) > 894_004);
+    // No file gets more than the ceiling.
+    assert_eq!(layer_budget(MAX_CANVAS as usize), MAX_FIG_NODES);
+}
+
+#[test]
+fn a_small_file_that_unpacks_large_gets_no_larger_budgets() {
+    // 40 MB of zeros in a blob pack into a few KB. Keyed to the unpacked message, they lifted the
+    // layer cap above the 231 231 layers its instances expand into; keyed to the file, the cap
+    // stays at the REST import's.
+    let mut nodes = vec![node(0, None, "DOCUMENT", "D", vec![]), node(1, Some((0, "!")), "CANVAS", "P", vec![])];
+    nodes.push(node(5, Some((1, "!")), "SYMBOL", "Main", vec![("size", xy(10.0, 10.0))]));
+    nodes.extend((10..1010).map(|i| node(i, Some((5, "!")), "RECTANGLE", "R", vec![("size", xy(1.0, 1.0))])));
+    nodes.extend((2000..2230).map(|i| node(i, Some((1, "!")), "INSTANCE", "I", vec![("symbolData", o(vec![("symbolID", g(5))]))])));
+    let blob = o(vec![("bytes", Kv::Bytes(vec![0; 40 << 20]))]);
+    let file = canvas(&schema(), &o(vec![("nodeChanges", arr(nodes)), ("blobs", arr(vec![blob]))]));
+    assert!(file.len() < 1 << 20, "{} bytes", file.len());
+    let (doc, warnings) = import(&file, "x").unwrap();
+    assert!(warnings.iter().any(|w| w.contains("more than 200000 layers")), "{warnings:?}");
+    assert!(doc.node_count() <= crate::rest::MAX_NODES + 10);
+}
+
+#[test]
+fn the_mapper_stops_at_the_layer_cap_it_is_given() {
+    let mut nodes = vec![node(0, None, "DOCUMENT", "D", vec![]), node(1, Some((0, "!")), "CANVAS", "P", vec![])];
+    nodes.extend((2..12).map(|i| node(i, Some((1, "!")), "RECTANGLE", "R", vec![("size", xy(1.0, 1.0))])));
+    let msg = o(vec![("nodeChanges", arr(nodes))]);
+    let (_, warnings, _) = map::to_rest(&msg, "x", 5);
+    assert!(warnings.iter().any(|w| w.contains("more than 5 layers")), "{warnings:?}");
+    let (_, warnings, _) = map::to_rest(&msg, "x", crate::rest::MAX_NODES);
+    assert!(!warnings.iter().any(|w| w.contains("more than")), "{warnings:?}");
 }
 
 #[test]
@@ -665,8 +941,217 @@ fn instances_inside_their_own_main_stop() {
     assert!(doc.nodes().any(|n| n.name == "Self"));
 }
 
+/// A collection from a library is named by its asset key, not a guid — also in the explicit mode
+/// map of the frames, components and instances set it on, and in the variables' collection link.
+#[test]
+fn modes_of_collections_named_by_asset_import() {
+    let modes = arr(vec![
+        o(vec![("id", g(90)), ("name", s("Dark")), ("sortPosition", s("!"))]),
+        o(vec![("id", g(91)), ("name", s("Light")), ("sortPosition", s("\""))]),
+    ]);
+    let color_value = |c| o(vec![("value", o(vec![("colorValue", c)])), ("dataType", e("COLOR"))]);
+    let values = o(vec![(
+        "entries",
+        arr(vec![
+            o(vec![("modeID", g(90)), ("variableData", color_value(rgb(0.0, 0.0, 0.0)))]),
+            o(vec![("modeID", g(91)), ("variableData", color_value(rgb(1.0, 1.0, 1.0)))]),
+        ]),
+    )]);
+    let by_asset = |key: &'static str, version: Option<&'static str>| {
+        let mut r = vec![("key", s(key))];
+        r.extend(version.map(|v| ("version", s(v))));
+        o(vec![("assetRef", o(r))])
+    };
+    let mode_map = |set: Kv<'static>| o(vec![("entries", arr(vec![o(vec![("variableSetID", set), ("variableModeID", g(91))])]))]);
+    let nodes = vec![
+        node(0, None, "DOCUMENT", "Document", vec![]),
+        node(1, Some((0, "!")), "CANVAS", "Page A", vec![]),
+        node(2, Some((0, "~")), "CANVAS", "Internal", vec![("internalOnly", Kv::Bool(true))]),
+        // The collection itself says the asset key its references name.
+        node(4, Some((2, "!")), "VARIABLE_SET", "Schema", vec![("variableSetModes", modes), ("key", s("schema-collection")), ("version", s("7"))]),
+        node(
+            5,
+            Some((2, "\"")),
+            "VARIABLE",
+            "surface",
+            vec![("variableSetID", by_asset("schema-collection", Some("7"))), ("variableResolvedType", e("COLOR")), ("variableDataValues", values)],
+        ),
+        node(
+            10,
+            Some((1, "!")),
+            "FRAME",
+            "Light section",
+            vec![("size", xy(400.0, 300.0)), ("variableModeBySetMap", mode_map(by_asset("schema-collection", Some("7"))))],
+        ),
+        node(
+            20,
+            Some((1, "\"")),
+            "SYMBOL",
+            "Button",
+            vec![("size", xy(100.0, 40.0)), ("variableModeBySetMap", mode_map(by_asset("schema-collection", None)))],
+        ),
+        node(
+            21,
+            Some((1, "#")),
+            "INSTANCE",
+            "Button copy",
+            vec![
+                ("size", xy(100.0, 40.0)),
+                ("symbolData", o(vec![("symbolID", g(20))])),
+                ("variableModeBySetMap", mode_map(by_asset("schema-collection", Some("7")))),
+            ],
+        ),
+        // One names a collection that isn't in the file: its mode is skipped, with a warning.
+        node(11, Some((1, "$")), "FRAME", "Gone", vec![("size", xy(400.0, 300.0)), ("variableModeBySetMap", mode_map(by_asset("gone", None)))]),
+    ];
+    let (doc, warnings) = import(&canvas(&schema(), &o(vec![("nodeChanges", arr(nodes))])), "x").unwrap();
+    assert_eq!(doc.variables.collections.len(), 1);
+    assert_eq!(doc.variables.variables.len(), 1);
+    assert_eq!(doc.variables.variables[0].collection, "1:4");
+    for name in ["Light section", "Button", "Button copy"] {
+        let n = named(&doc, name);
+        assert_eq!(n.var_modes.get("1:4").map(String::as_str), Some("1:91"), "{name}");
+    }
+    assert!(named(&doc, "Gone").var_modes.is_empty());
+    assert!(warnings.iter().any(|w| w.contains("variable modes of collections that aren't in the file")), "{warnings:?}");
+}
+
+#[test]
+fn resized_instances_lay_their_layers_out_by_their_constraints() {
+    let pin = |h: &'static str, v: &'static str| vec![("horizontalConstraint", e(h)), ("verticalConstraint", e(v))];
+    let layer = |id, pos, ty, name, w, h, x, y, c: Vec<(&'static str, Kv<'static>)>| {
+        node(id, Some((5, pos)), ty, name, [vec![("size", xy(w, h)), ("transform", at(x, y))], c].concat())
+    };
+    let nodes = vec![
+        node(0, None, "DOCUMENT", "D", vec![]),
+        node(1, Some((0, "!")), "CANVAS", "P", vec![]),
+        node(5, Some((1, "!")), "SYMBOL", "Logo", vec![("size", xy(132.0, 22.0)), ("transform", at(0.0, 0.0))]),
+        layer(6, "!", "ROUNDED_RECTANGLE", "Mark", 132.0, 22.0, 0.0, 0.0, pin("SCALE", "SCALE")),
+        layer(7, "\"", "ROUNDED_RECTANGLE", "Badge", 32.0, 10.0, 100.0, 12.0, pin("MAX", "MAX")),
+        layer(8, "#", "ROUNDED_RECTANGLE", "Bar", 112.0, 2.0, 10.0, 0.0, pin("STRETCH", "MIN")),
+        // A group scales its layers with it.
+        layer(11, "$", "FRAME", "Wordmark", 66.0, 22.0, 66.0, 0.0, [pin("SCALE", "SCALE"), vec![("resizeToFit", Kv::Bool(true))]].concat()),
+        node(12, Some((11, "!")), "ROUNDED_RECTANGLE", "Letter", vec![("size", xy(66.0, 22.0)), ("transform", at(0.0, 0.0))]),
+        node(
+            9,
+            Some((1, "\"")),
+            "INSTANCE",
+            "Small logo",
+            vec![("size", xy(90.0, 15.0)), ("transform", at(0.0, 100.0)), ("symbolData", o(vec![("symbolID", g(5))]))],
+        ),
+        // Derived layout the file gives wins over the constraints.
+        node(
+            10,
+            Some((1, "#")),
+            "INSTANCE",
+            "Derived logo",
+            vec![
+                ("size", xy(90.0, 15.0)),
+                ("transform", at(0.0, 200.0)),
+                ("symbolData", o(vec![("symbolID", g(5))])),
+                ("derivedSymbolData", arr(vec![o(vec![("guidPath", o(vec![("guids", arr(vec![g(6)]))])), ("size", xy(50.0, 5.0))])])),
+            ],
+        ),
+        // A size the instance overrides: the place still follows the constraints.
+        node(
+            13,
+            Some((1, "$")),
+            "INSTANCE",
+            "Resized badge",
+            vec![
+                ("size", xy(90.0, 15.0)),
+                ("transform", at(0.0, 300.0)),
+                (
+                    "symbolData",
+                    o(vec![
+                        ("symbolID", g(5)),
+                        ("symbolOverrides", arr(vec![o(vec![("guidPath", o(vec![("guids", arr(vec![g(7)]))])), ("size", xy(20.0, 10.0))])])),
+                    ]),
+                ),
+            ],
+        ),
+    ];
+    let (doc, _) = import(&canvas(&schema(), &o(vec![("nodeChanges", arr(nodes))])), "x").unwrap();
+    let box_of = |inst: &str, name: &str| {
+        let i = named(&doc, inst);
+        let n = i.children.iter().map(|c| doc.node(*c).unwrap()).find(|n| n.name == name).unwrap();
+        let t = n.transform.translation();
+        [t.x, t.y, n.width, n.height].map(|x| (x * 1e3).round() / 1e3)
+    };
+    assert_eq!(box_of("Small logo", "Mark"), [0.0, 0.0, 90.0, 15.0]);
+    assert_eq!(box_of("Small logo", "Badge"), [58.0, 5.0, 32.0, 10.0]);
+    assert_eq!(box_of("Small logo", "Bar"), [10.0, 0.0, 70.0, 2.0]);
+    // The main's own, then the instances'.
+    let mut letters: Vec<[f64; 2]> =
+        doc.nodes().filter(|n| n.name == "Letter").map(|n| [n.width, n.height].map(|x| (x * 1e3).round() / 1e3)).collect();
+    letters.sort_by(|a, b| a[0].total_cmp(&b[0]));
+    assert_eq!(letters, [[45.0, 15.0], [45.0, 15.0], [45.0, 15.0], [66.0, 22.0]]);
+    assert_eq!(box_of("Derived logo", "Mark")[2..], [50.0, 5.0]);
+    assert_eq!(box_of("Resized badge", "Badge"), [58.0, 5.0, 20.0, 10.0]);
+}
+
+#[test]
+fn nested_instances_resized_again_drop_the_layout_derived_for_their_old_size() {
+    let stretch = || vec![("horizontalConstraint", e("STRETCH")), ("verticalConstraint", e("MIN"))];
+    let nodes = vec![
+        node(0, None, "DOCUMENT", "D", vec![]),
+        node(1, Some((0, "!")), "CANVAS", "P", vec![]),
+        node(20, Some((1, "!")), "SYMBOL", "Track", vec![("size", xy(100.0, 10.0)), ("transform", at(0.0, 0.0))]),
+        node(21, Some((20, "!")), "ROUNDED_RECTANGLE", "Fill", [vec![("size", xy(100.0, 10.0)), ("transform", at(0.0, 0.0))], stretch()].concat()),
+        node(30, Some((1, "\"")), "SYMBOL", "Slider", vec![("size", xy(200.0, 50.0)), ("transform", at(0.0, 100.0))]),
+        // The nested instance is 150 wide in its main, with the layout derived for that.
+        node(
+            31,
+            Some((30, "!")),
+            "INSTANCE",
+            "Inner",
+            [
+                vec![
+                    ("size", xy(150.0, 10.0)),
+                    ("transform", at(0.0, 0.0)),
+                    ("symbolData", o(vec![("symbolID", g(20))])),
+                    (
+                        "derivedSymbolData",
+                        arr(vec![o(vec![
+                            ("guidPath", o(vec![("guids", arr(vec![g(21)]))])),
+                            ("size", xy(150.0, 10.0)),
+                            ("fillPaints", arr(vec![solid(1.0, 0.0, 0.0)])),
+                        ])]),
+                    ),
+                ],
+                stretch(),
+            ]
+            .concat(),
+        ),
+        node(
+            40,
+            Some((1, "#")),
+            "INSTANCE",
+            "Wide slider",
+            vec![("size", xy(300.0, 50.0)), ("transform", at(0.0, 200.0)), ("symbolData", o(vec![("symbolID", g(30))]))],
+        ),
+    ];
+    let (doc, _) = import(&canvas(&schema(), &o(vec![("nodeChanges", arr(nodes))])), "x").unwrap();
+    let width = |outer: &str| {
+        let inner = doc.node(named(&doc, outer).children[0]).unwrap();
+        (inner.width, doc.node(inner.children[0]).unwrap().width)
+    };
+    // In its main the derived layout holds; stretched to 250 it no longer does.
+    assert_eq!(width("Slider"), (150.0, 150.0));
+    assert_eq!(width("Wide slider"), (250.0, 250.0));
+    // What else the derived data gives (the colour a variable resolves to, say) still holds.
+    let fill = doc.node(doc.node(named(&doc, "Wide slider").children[0]).unwrap().children[0]).unwrap();
+    assert!(matches!(fill.fills.first().map(|p| &p.kind), Some(figcraft_doc::color::PaintKind::Solid { color }) if color.r == 1.0 && color.g == 0.0));
+}
+
 #[path = "tail_tests.rs"]
 mod tail;
+
+#[path = "image_filter_tests.rs"]
+mod image_filters;
+
+#[path = "text_list_tests.rs"]
+mod text_list;
 
 /// `.fig` files in the folder `FIGCRAFT_FIG_SAMPLES` names (none when it's unset).
 pub(super) fn samples() -> Vec<std::path::PathBuf> {
@@ -711,7 +1196,7 @@ fn dump_samples() {
         std::fs::write(format!("{out}/{stem}.schema.txt"), txt).unwrap();
         let msg = schema.decode_message(schema.find("Message").unwrap(), &message).unwrap();
         std::fs::write(format!("{out}/{stem}.json"), serde_json::to_string_pretty(&debug_json(&msg)).unwrap()).unwrap();
-        let (rest, _) = map::to_rest(&msg, &stem);
+        let (rest, ..) = map::to_rest(&msg, &stem, super::layer_budget(message.len()));
         std::fs::write(format!("{out}/{stem}.rest.json"), serde_json::to_string_pretty(&rest).unwrap()).unwrap();
     }
 }

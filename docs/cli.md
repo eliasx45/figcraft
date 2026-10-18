@@ -15,6 +15,10 @@ Every subcommand takes `--no-system-fonts` (or set `FIGCRAFT_NO_SYSTEM_FONTS=1`,
 app honours too) to use only the built-in fonts, for renders that come out the same on every
 machine, e.g. in CI.
 
+On Linux and other Unix systems except macOS, user fonts are read from
+`$XDG_DATA_HOME/fonts`, or `$HOME/.local/share/fonts` when `XDG_DATA_HOME` is unset,
+empty or relative. The legacy `$HOME/.fonts` directory is also scanned.
+
 The collaboration server is a binary of its own, `figcraft-server` (`cargo build --release -p
 figcraft-server`): it keeps files with share links and serves their live sessions, and its
 `key`, `files`, `links`, `reports`, `block-ip` and `check` subcommands manage them (a server can
@@ -25,7 +29,9 @@ be open to the public: [server.md](server.md#running-a-public-server)). See [ser
 ### `info <file> [--json]`
 
 Pages, node counts, top-level frames (id, type, name, size), style/variable/image counts. Repairs
-of a damaged file and import warnings go to stderr as `note:` lines (`notes` with `--json`).
+of a damaged file and import warnings go to stderr as `note:` lines (`notes` with `--json`). Fonts the
+file names that aren't installed are listed as `missing font` lines (`missingFonts: [{family,
+layers}]` with `--json`); their text renders in a fallback font.
 
 Every subcommand that reads a file also takes the public REST API file JSON (the response of
 `GET /v1/files/:key` or of its nodes endpoint, written to a `.json` file): it is imported on the fly.
@@ -48,9 +54,11 @@ page 1 "Screens": 380 nodes, 4 top-level
 - `<out>` has an image extension: one file with the given `--node`, or the whole page composited.
 - `--node` takes a layer id (`12` or `0:12`) or a layer name.
 - `--format fig` (or an `<out>` ending in `.fig`) writes the whole file as `.fig`, experimental:
-  written from public format notes and checked only by opening it again in FigCraft; other apps
-  may not open every file. What was left out (shared style links, variables, comments, Dev Mode
-  data…) is printed as `note:` lines.
+  written from public format notes, including variables with their modes and bindings and shared
+  styles with their layer links. Checked by opening it again in FigCraft and, on the example
+  documents and small test files, in other software; other apps may not open every file. What was
+  left out (comments, Dev Mode data, some bindings and settings…) is printed as `note:` lines;
+  `docs/file-format-parity.md` lists what was checked and what is unchecked.
 - The format comes from `--format`, else `<out>`'s extension, else png. `--scale` (default 1, max 64)
   applies to raster formats.
 - SVG/PDF exports with visible descendants more than 256 levels below an exported root fail with
@@ -97,7 +105,29 @@ Runs commands in a headless session (a new document, or `--in`), printing one JS
 {"command":"frame.create","ok":true,"result":{"id":2},"step":0}
 ```
 
-A failing step prints `"ok": false` with the error and exits with code 1 (nothing is saved).
+The whole script is **one undo step**, and it is **all-or-nothing**, exactly like running the same
+commands through `command.batch` (the MCP tool `batch`, the control channel, plugins): `{"$step": n}`
+in a step's params is the `id` in an earlier step's result, so a step can target a layer an earlier
+step of the same script created:
+
+```json
+[
+  {"command": "node.create", "params": {"type": "frame", "name": "Card", "width": 200, "height": 100}},
+  {"command": "node.create", "params": {"type": "text", "parent": {"$step": 0}, "text": "Hi"}}
+]
+```
+
+The result lines are printed once the script is through, so none of them reports work a later step
+took back.
+
+A failing step prints one line with `"ok": false`, the error and `"rolledBack": true`, writes
+nothing (`--out` is not saved, and the session's documents go back to how the script found them),
+and exits with code 1:
+
+```text
+{"step":1,"command":"node.set","ok":false,"error":"no such node 99999","rolledBack":true}
+```
+
 `--out` saves the result by extension like `convert`.
 
 Script formats: a JSON array of `{"command": id, "params": {...}}`, an object
@@ -128,10 +158,13 @@ figcraft-cli export dashboard.figcraft -o dashboard.png
 Every command with its label, shortcut, undoable flag (`*`) and parameter docs; `--json` for
 machines.
 
-### `mcp [--attach PORT]`
+### `mcp [--attach PORT] [--automation-read-root DIR]… [--automation-write-root DIR]…`
 
 Serve MCP on stdio: headless by default, or attached to a running app started with
-`figcraft --control PORT`. See [mcp.md](mcp.md). The headless session can host, join and publish
+`figcraft --control PORT`. See [mcp.md](mcp.md). The automation roots (each repeatable; existing
+folders) confine the files the agent's calls read (inside a read or write root) and write (inside a
+write root); everything else is refused ([mcp.md › Confining file access](mcp.md#confining-file-access)).
+With `--attach` they are refused: start the app with them instead. The headless session can host, join and publish
 live sessions (`collab.*`: without a key on a server open to the public, with `collab.serverInfo`,
 `collab.manageFile` for the owner token and `collab.report`) and use plugin directories
 (`plugin.directory.*`); the one-shot `run` can't (no network link).
@@ -145,7 +178,7 @@ size and SHA-256. The server's key comes from the address or, better, from the
 lists); it is never printed. The bundle is checked before it is sent and again by the server. See
 [plugins.md](plugins.md#plugin-directories).
 
-### `perf [--layers N[,N...]]`
+### `perf [--layers N[,N...]] [--instances N[,N...]]`
 
 Builds synthetic documents of each size (default `1000,10000` layers: screens with an auto layout
 header, a card group, button instances and a grid of shapes and text) and prints a Markdown table of
@@ -154,3 +187,11 @@ and hover, single-layer edits through the engine (fill, move, text in auto layou
 with all its instances), undo/redo, a drag preview frame, `normalize` after a one-node edit,
 `document.inspect` and select-all + move. Use a release build for meaningful numbers;
 `cargo xtask bench` runs it at 1k/10k/50k layers together with the UI frame benchmarks.
+
+`--layers` picks the document sizes (each value is clamped to 10 to 2,000,000 layers). `--instances`
+picks the component workloads (default `2000`): for each count the command builds a synthetic design
+system (about 300 components, variables and styles, nested four deep) with that many instances that
+carry overrides at every level, in one file and as a library in another. It then prints a second
+table with the build time and edits of a deep main component (icon colour, glyph size, an added
+layer) and of the 72 button mains, where all copies follow. Zeros are dropped and counts above
+100,000 are capped to 100,000; `--instances 0` skips this table.

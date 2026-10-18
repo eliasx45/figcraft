@@ -1,11 +1,12 @@
 //! Desktop services: native file dialogs, clipboard, URLs, persisted preferences.
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use figcraft_engine::{Prefs, Session};
-use figcraft_ui_egui::{FigApp, Services};
+use figcraft_ui_egui::{DialogFuture, FigApp, Services};
 use serde_json::{Value, json};
 
 pub struct Desktop {
@@ -198,15 +199,74 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     f.write_all(bytes)
 }
 
+thread_local! {
+    /// While the main window draws: a dialog parented to it, so a dialog opened from it stays in
+    /// front of it (a sheet on macOS). eframe gives other windows no handle: theirs have no parent.
+    static PARENT: RefCell<Option<rfd::AsyncFileDialog>> = const { RefCell::new(None) };
+}
+
+/// Run the main window's frame `f` with the dialogs it opens parented to `frame`'s window.
+pub fn parented<R>(frame: &eframe::Frame, f: impl FnOnce() -> R) -> R {
+    PARENT.with(|p| p.replace(Some(rfd::AsyncFileDialog::new().set_parent(frame))));
+    let r = f();
+    PARENT.with(|p| p.replace(None));
+    r
+}
+
+/// A dialog with `title`, parented to the main window while it draws.
+fn dialog(title: &str) -> rfd::AsyncFileDialog {
+    PARENT.with(|p| p.borrow().clone()).unwrap_or_default().set_title(title)
+}
+
+/// The dialog opens now; its future gives the path picked.
+fn picked(pick: impl Future<Output = Option<rfd::FileHandle>> + 'static) -> DialogFuture {
+    Box::pin(async move { pick.await.map(|f| f.path().to_path_buf()) })
+}
+
+/// How long a clipboard read may wait on the app that copied (Linux and the BSDs).
+#[cfg(all(unix, not(target_os = "macos")))]
+const CLIPBOARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Read the clipboard. On Linux and the BSDs the read runs on a helper thread with its own handle
+/// and gives up after [`CLIPBOARD_TIMEOUT`]: a Wayland read waits on the app that copied with no
+/// timeout of its own, so an app that hangs must not hang the window too.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn read_clipboard<T: Send + 'static>(_: &mut arboard::Clipboard, read: fn(&mut arboard::Clipboard) -> Option<T>) -> Option<T> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(arboard::Clipboard::new().ok().and_then(|mut c| read(&mut c)));
+    });
+    rx.recv_timeout(CLIPBOARD_TIMEOUT).ok().flatten()
+}
+
+/// Read the clipboard (the system's own reads don't wait on the app that copied).
+#[cfg(not(all(unix, not(target_os = "macos"))))]
+fn read_clipboard<T>(c: &mut arboard::Clipboard, read: fn(&mut arboard::Clipboard) -> Option<T>) -> Option<T> {
+    read(c)
+}
+
+/// Native Save as filters; other callers keep their existing combined filter.
+fn save_filters<'a>(exts: &'a [&'a str]) -> Vec<(&'static str, &'a [&'a str])> {
+    if exts == ["figcraft", "fig"] {
+        vec![("FigCraft (.figcraft)", &exts[..1]), (figcraft_ui_egui::i18n::tr(".fig (experimental)"), &exts[1..])]
+    } else {
+        vec![("File", exts)]
+    }
+}
+
 impl Services for Desktop {
-    fn pick_open(&mut self, title: &str, exts: &[&str]) -> Option<PathBuf> {
-        rfd::FileDialog::new().set_title(title).add_filter("Supported files", exts).pick_file()
+    fn pick_open(&mut self, title: &str, exts: &[&str]) -> DialogFuture {
+        picked(dialog(title).add_filter("Supported files", exts).pick_file())
     }
-    fn pick_save(&mut self, title: &str, name: &str, exts: &[&str]) -> Option<PathBuf> {
-        rfd::FileDialog::new().set_title(title).set_file_name(name).add_filter("File", exts).save_file()
+    fn pick_save(&mut self, title: &str, name: &str, exts: &[&str]) -> DialogFuture {
+        let mut dialog = dialog(title).set_file_name(name);
+        for (label, extensions) in save_filters(exts) {
+            dialog = dialog.add_filter(label, extensions);
+        }
+        picked(dialog.save_file())
     }
-    fn pick_folder(&mut self, title: &str) -> Option<PathBuf> {
-        rfd::FileDialog::new().set_title(title).pick_folder()
+    fn pick_folder(&mut self, title: &str) -> DialogFuture {
+        picked(dialog(title).pick_folder())
     }
     fn clipboard_set_text(&mut self, s: &str) {
         if let Some(c) = self.clipboard.as_mut() {
@@ -214,10 +274,10 @@ impl Services for Desktop {
         }
     }
     fn clipboard_get_text(&mut self) -> Option<String> {
-        self.clipboard.as_mut()?.get_text().ok()
+        read_clipboard(self.clipboard.as_mut()?, |c| c.get_text().ok())
     }
     fn clipboard_get_html(&mut self) -> Option<String> {
-        self.clipboard.as_mut()?.get().html().ok()
+        read_clipboard(self.clipboard.as_mut()?, |c| c.get().html().ok())
     }
     fn clipboard_images(
         &mut self,
@@ -231,7 +291,7 @@ impl Services for Desktop {
         }
     }
     fn clipboard_get_image(&mut self) -> Option<(u32, u32, Vec<u8>)> {
-        let img = self.clipboard.as_mut()?.get_image().ok()?;
+        let img = read_clipboard(self.clipboard.as_mut()?, |c| c.get_image().ok())?;
         let (w, h) = (u32::try_from(img.width).ok()?, u32::try_from(img.height).ok()?);
         // Refuse absurd sizes (and mismatched buffers) rather than allocate.
         if w == 0 || h == 0 || u64::from(w) * u64::from(h) > 100_000_000 || img.bytes.len() != (w as usize) * (h as usize) * 4 {
@@ -255,6 +315,8 @@ impl Services for Desktop {
     fn emergency_save(&mut self, session: &Session) {
         if let Some(r) = crate::recovery::lock(&self.recovery).as_mut() {
             r.write(session, true);
+            // Earlier runs' copies now covered go, so the next start doesn't open them twice.
+            r.settle(session);
         }
     }
     fn reduce_motion(&self) -> bool {
@@ -278,4 +340,25 @@ pub fn window_icon() -> Option<egui::IconData> {
     let img = image::load_from_memory(bytes).ok()?.to_rgba8();
     let (w, h) = img.dimensions();
     Some(egui::IconData { rgba: img.into_raw(), width: w, height: h })
+}
+
+#[cfg(test)]
+mod save_filter_tests {
+    use super::save_filters;
+
+    #[test]
+    fn native_and_fig_save_filters_are_separate_with_native_first() {
+        let extensions = ["figcraft", "fig"];
+        assert_eq!(
+            save_filters(&extensions),
+            vec![("FigCraft (.figcraft)", &extensions[..1]), (figcraft_ui_egui::i18n::tr(".fig (experimental)"), &extensions[1..])]
+        );
+    }
+
+    #[test]
+    fn other_save_filters_keep_one_combined_group() {
+        for extensions in [&["figcraft"][..], &["fig"][..], &["png"][..], &["png", "jpg", "webp"][..], &[][..]] {
+            assert_eq!(save_filters(extensions), vec![("File", extensions)]);
+        }
+    }
 }
