@@ -259,10 +259,16 @@ fn changed_areas(doc: &Document, page: NodeId, id: NodeId, out: &mut Vec<Rect>) 
     Some(())
 }
 
+/// Whether an image both documents hold under one key has other bytes in `new`: a missing-image
+/// placeholder relinked under its own hash. Its layers keep their paints, so none shows as changed.
+fn images_replaced(old: &Document, new: &Document) -> bool {
+    new.images.iter().any(|(k, n)| old.images.get(k).is_some_and(|o| !Arc::ptr_eq(&o.bytes, &n.bytes) && o.bytes != n.bytes))
+}
+
 /// Page areas that differ between `old` and `new` on `page` (see [`crate::tiles::changed`]):
 /// where changed layers were and are, what paints from them, and grainy layers they touch whole.
 pub(crate) fn changed_page_areas(old: &Document, new: &Document, page: NodeId) -> Option<Vec<Rect>> {
-    if old.color_profile != new.color_profile {
+    if old.color_profile != new.color_profile || images_replaced(old, new) {
         return None;
     }
     let (so, sn) = (sensitive(old), sensitive(new));
@@ -308,6 +314,9 @@ fn patch(last: Frame, doc: &Arc<Document>, page: NodeId, view: &View, px: (i64, 
     }
     // Layers that changed, where they were and where they are now.
     if !Arc::ptr_eq(&last.doc, doc) {
+        if images_replaced(&last.doc, doc) {
+            return None;
+        }
         let mut areas = Vec::new();
         for id in doc.changed_ids(&last.doc, MAX_CHANGED)? {
             // shortcut: an edited pattern source redraws the whole view; patch the patterned layers' areas when that shows up in profiles.

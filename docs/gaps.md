@@ -99,7 +99,17 @@ No alpha blockers: the alpha gate in [`roadmap.md`](roadmap.md#alpha-gate) passe
   posts per row came out as two) no longer do. Checked on that clipboard's design data offline;
   then (2026-10-18) the same paste in the app: the layers now paste at once and their linked
   images fill in as they download (all of them loaded); before, the paste waited for every
-  image and was cancelled by any change meanwhile, or pasted without images.
+  image and was cancelled by any change meanwhile, or pasted without images. The third paste
+  in the app showed images that had loaded still drawn as placeholders until that part of the
+  canvas was redrawn (an image filled in under its own key changes no layer, so the canvas and
+  its tiles missed it; they now redraw), a glowing icon PNG with transparent corners glowing
+  square (drop shadows that hide behind the layer were cut out by its rectangle; image layers
+  now cut them out by their pixels, as in Figma), and zoomed-out views of a page of large
+  photos slow to render (each photo kept at full size, over the 512 MB image cache, so redraws
+  decoded them again; zoomed out, each now draws from a copy halved to its size on screen,
+  which the cache holds). Measured: a first render of that
+  page went from 12.5 to 9.3 s at 5% and 55 to 44 s at 22% (one process per render, so decoding
+  dominates); later redraws not measured.
   The export was checked in other software
   on our example documents and small test files only.
 - **Evidence:** fixtures generated in code (`crates/format/src/fig/tests.rs` and `tail_tests.rs`: kiwi
@@ -468,6 +478,7 @@ No alpha blockers: the alpha gate in [`roadmap.md`](roadmap.md#alpha-gate) passe
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-18 | minor | Gap 1, third real paste: images filled in after a paste redraw at once (canvas and tiles); image layers' drop shadows show through their transparent pixels; zoomed-out photos draw from copies their size on screen (halved, cached per level). Ranking and hours unchanged |
 | 2026-10-18 | minor | Gap 7, first step of a GPU canvas: a canvas tile cache. Between canvas renders the render thread paints 512-pixel tiles at power-of-two zoom levels (the level below the view's over twice its size, coarser levels wider, one level showing the whole page), through a `TilePainter` interface (the CPU painter today), and the canvas keeps them as GPU textures (256 at most, least recently drawn dropped). When the zoom changes, every part of the screen is drawn from the sharpest image there is, the last canvas render or a tile, so zooming far out or back in shows the page at once, softer until the exact render lands, instead of a small image on a blank page or a blocky preview (skipped when tiles are as sharp). Edits mark only the tiles they touch stale; tiles are asked for between edits, never while a button is held, and ask for no frames of their own. At rest nothing changes: the exact render draws the whole view. Measured: stitched tiles equal a render of their area up to anti-aliasing (tests); a 28k-layer page zoomed from 150% to 12% shows every screen in the first frame (screenshot). Not measured: input-to-frame latency, GPU memory in use. Gap 7 30–60 h → 27–55 h |
 | 2026-10-18 | minor | Gap 1, second real paste: copies naming more than 256 images no longer fall back to a paste without images; instances keep the mains carried on the copy's hidden page; colours bound to library variables (named by key) keep their binding and mode, also in `.fig` files; wrapped rows tolerate float rounding. Ranking and hours unchanged |
 | 2026-10-18 | minor | Gap 1: a real Figma paste of a page of photos came across mostly as grey boxes. Images now download six at a time (two minutes, 512 MB), missing ones keep their hash behind a hatched placeholder, the import report covers pastes with how many images didn't load and why, and File ▸ Relink missing images… fills them in from a `.fig` copy or a folder. Tested on synthetic clipboard HTML only; ranking and hours unchanged |

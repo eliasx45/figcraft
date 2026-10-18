@@ -287,3 +287,29 @@ fn overflowing_text_is_drawn_while_its_box_is_out_of_view() {
     let dark = pix.data().as_chunks::<4>().0.iter().filter(|c| c[0] < 128).count();
     assert!(dark > 20, "glyphs drawn: {dark}");
 }
+
+fn png(rgb: [u8; 3]) -> figcraft_doc::ImageData {
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([rgb[0], rgb[1], rgb[2], 255])).write_to(&mut out, image::ImageFormat::Png).unwrap();
+    figcraft_doc::ImageData { bytes: Arc::new(out.into_inner()), width: 4, height: 4 }
+}
+
+#[test]
+fn an_image_relinked_under_its_own_key_redraws() {
+    // A pasted image's placeholder is filled in under the same key: no layer changes.
+    let s = scene(false);
+    let mut r = Retained::default();
+    let placeholder = edit(&s.doc, |d| {
+        d.images.insert("pasted".into(), png([200, 200, 200]));
+        d.get_mut(s.rect).unwrap().fills = vec![Paint::image("pasted".to_string(), figcraft_color::ImageScaleMode::Fill)];
+    });
+    check(&mut r, &placeholder, s.page, &view(0.0, 0.0, 1.0));
+    let filled = edit(&placeholder, |d| {
+        d.images.insert("pasted".into(), png([20, 160, 60]));
+    });
+    crate::images::forget("pasted");
+    assert!(crate::tiles::changed(&placeholder, &filled, s.page).is_none(), "tiles redraw everything");
+    assert_eq!(check(&mut r, &filled, s.page, &view(0.0, 0.0, 1.0)), Work::Full);
+    let same = edit(&filled, |_| {});
+    assert!(crate::tiles::changed(&filled, &same, s.page).is_some_and(|a| a.is_empty()), "unchanged images change nothing");
+}
