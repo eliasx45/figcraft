@@ -55,6 +55,7 @@ pub fn cell_pixmap(doc: &Document, pt: &PatternPaint, w: f64, h: f64, scale: f64
         outlined: &[],
         skip: &[],
         lod: false,
+        canvas: false,
         under: None,
         time,
         bounds: &bounds,

@@ -196,10 +196,17 @@ impl Lines {
 /// Replace every pixel with `color` (non-premultiplied RGBA 0..1) at the pixel's alpha × color alpha.
 pub fn tint(p: &mut Pixmap, color: [f32; 4]) {
     let [r, g, b, a] = color;
-    for px in p.data_mut().as_chunks_mut::<4>().0 {
-        let alpha = f32::from(px.get(3).copied().unwrap_or(0)) / 255.0 * a;
+    // Each of the 256 alphas' pixel, worked out once (it was a good part of a large shadow).
+    let mut table = [[0u8; 4]; 256];
+    for (i, px) in table.iter_mut().enumerate() {
+        let alpha = i as f32 / 255.0 * a;
         let q = |c: f32| (c * alpha * 255.0).round().clamp(0.0, 255.0) as u8;
-        px.copy_from_slice(&[q(r), q(g), q(b), (alpha * 255.0).round().clamp(0.0, 255.0) as u8]);
+        *px = [q(r), q(g), q(b), (alpha * 255.0).round().clamp(0.0, 255.0) as u8];
+    }
+    for px in p.data_mut().as_chunks_mut::<4>().0 {
+        if let Some(t) = table.get(usize::from(px[3])) {
+            *px = *t;
+        }
     }
 }
 

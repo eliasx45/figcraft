@@ -30,6 +30,9 @@ pub struct Ctx<'a, 'd> {
     pub skip: &'a [NodeId],
     /// Approximate what's too small to see in detail (canvas previews; see [`crate::lod`]).
     pub lod: bool,
+    /// Drawn for the canvas, which draws the same layers again at one zoom (bands, tiles, pans):
+    /// soft shadows are kept between renders ([`crate::soft`]).
+    pub canvas: bool,
     /// The surfaces under the one being drawn into, when it is an isolated layer (for backdrops).
     pub under: Option<&'a Under<'a>>,
     /// Seconds into animated GIFs (0: their first frame; only the presenter plays them).
@@ -675,21 +678,37 @@ thread_local! {
 }
 
 /// Where node `n`'s soft drop shadows are cast from: its shape drawn `k` times smaller over the
-/// view and the shadows' margin (a shadow only needs the layer's alpha: the shape, its layer blur
-/// and texture; not its colours, backdrop or inner shadows), drawn when first asked for, then
-/// halved again for each shadow blurred enough to be cast smaller still.
+/// shadows' reach (a shadow only needs the layer's alpha: the shape, its layer blur and texture;
+/// not its colours, backdrop or inner shadows), drawn when first asked for, then halved again for
+/// each shadow blurred enough to be cast smaller still. Over the node's whole footprint, the copy
+/// and the casts are kept between renders ([`crate::soft`]); a footprint too large for that is
+/// drawn over this pixmap's view of it alone.
 struct SoftCaster<'c, 'a, 'd> {
     ctx: &'c Ctx<'a, 'd>,
     n: &'c Node,
-    xf: Affine,
     k: u32,
-    /// The device pixels the copy covers; `None` when the shadows miss the view.
-    region: Option<IntRect>,
     depth: usize,
-    /// The copies so far, each half the size of the one before (`k`, `2k`, …), with their local →
-    /// copy pixels transforms.
-    copies: Vec<(Pixmap, Affine)>,
+    /// The copies and casts, and which of their pixels each gives; none when the shadows miss
+    /// the view.
+    parts: Vec<SoftPart>,
+    /// Where the entries' device pixels lie on the pixmap.
+    anchor: (i32, i32),
 }
+
+/// One entry of a [`SoftCaster`]: the copies and casts, its kept ticket (to report its size by)
+/// and the device pixels whose shadow it gives (the rest of its copy is the shadows' reach).
+struct SoftPart {
+    entry: Arc<Mutex<crate::soft::Entry>>,
+    kept: Option<crate::soft::Ticket>,
+    out: IntRect,
+}
+
+/// The most pixels a kept copy holds (a node larger than this on screen at its factor is kept in
+/// [`SOFT_CELL_PX`] cells; one whose cells are larger still casts for each render's view of it).
+const MAX_KEPT_COPY_PX: f64 = 4_194_304.0;
+/// The device pixels a kept cell of a large node gives the shadows of (a cell's copy reaches
+/// past it by the shadows' reach). Bands, tiles and pans at one zoom share them.
+const SOFT_CELL_PX: i32 = 2048;
 
 impl<'c, 'a, 'd> SoftCaster<'c, 'a, 'd> {
     fn new(ctx: &'c Ctx<'a, 'd>, n: &'c Node, xf: Affine, dev: Rect, (pw, ph): (u32, u32), k: u32, depth: usize) -> Self {
@@ -710,68 +729,230 @@ impl<'c, 'a, 'd> SoftCaster<'c, 'a, 'd> {
                 .filter(|m| m.is_finite())
                 .fold(0.0, f64::max);
         let m = (m * ctx.scale).min(MAX_EFFECT_MARGIN_PX);
-        let r = dev.intersect(Rect::new(0.0, 0.0, f64::from(pw), f64::from(ph)).inflate(m, m));
         // Whole pixels from a floored origin, which can lie above or left of `pix` (in the margin).
-        let (x0, y0) = (snap_px(r.x0).floor(), snap_px(r.y0).floor());
-        let (w, h) = (snap_px(r.x1).ceil() - x0, snap_px(r.y1).ceil() - y0);
-        let region = (x0.is_finite() && y0.is_finite() && w >= 1.0 && h >= 1.0)
-            .then(|| IntRect::from_xywh(x0 as i32, y0 as i32, w as u32, h as u32))
-            .flatten();
-        SoftCaster { ctx, n, xf, k, region, depth, copies: Vec::new() }
+        let whole = |r: Rect| {
+            let (x0, y0) = (snap_px(r.x0).floor(), snap_px(r.y0).floor());
+            let (w, h) = (snap_px(r.x1).ceil() - x0, snap_px(r.y1).ceil() - y0);
+            let fits = x0.abs() < 1e9 && y0.abs() < 1e9 && w >= 1.0 && h >= 1.0 && w < 1e9 && h < 1e9;
+            fits.then(|| IntRect::from_xywh(x0 as i32, y0 as i32, w as u32, h as u32)).flatten()
+        };
+        let none = SoftCaster { ctx, n, k, depth, parts: Vec::new(), anchor: (0, 0) };
+        let view = Rect::new(0.0, 0.0, f64::from(pw), f64::from(ph));
+        // Kept: in pixels from the whole pixel nearest the node's origin (a render elsewhere at
+        // this zoom finds it a whole number of pixels away; within half a pixel, which a blur of
+        // 16 or more doesn't show).
+        let c = xf.as_coeffs();
+        let (ax, ay) = ((snap_px(c[4]) + 0.5).floor(), (snap_px(c[5]) + 0.5).floor());
+        let fits = |r: IntRect| {
+            let kf = f64::from(k.max(1));
+            let (w, h) = ((f64::from(r.width()) / kf).ceil(), (f64::from(r.height()) / kf).ceil());
+            w <= 16_384.0 && h <= 16_384.0 && w * h <= MAX_KEPT_COPY_PX
+        };
+        // Only on the canvas (exports and thumbnails are drawn once), and not while a prototype
+        // plays GIFs (each frame is drawn at its own time, never again).
+        if ctx.canvas
+            && ctx.skip.is_empty()
+            && ctx.time == 0.0
+            && ctx.outlined.is_empty()
+            && !ctx.outline_mode
+            && ax.abs() < 1e9
+            && ay.abs() < 1e9
+            && let Some(region) = whole(Rect::new(dev.x0 - ax, dev.y0 - ay, dev.x1 - ax, dev.y1 - ay).inflate(m, m))
+        {
+            let to_rect = |r: IntRect| Rect::new(f64::from(r.x()), f64::from(r.y()), f64::from(r.right()), f64::from(r.bottom()));
+            // What of it this pixmap shows, in the entries' pixels.
+            let seen = to_rect(region).intersect(Rect::new(-ax, -ay, f64::from(pw) - ax, f64::from(ph) - ay));
+            if seen.is_zero_area() {
+                return none;
+            }
+            let anchor = (ax as i32, ay as i32);
+            let axf = Affine::translate((-ax, -ay)) * xf;
+            let key = |cell| crate::soft::Key { scale: ctx.scale, linear: [c[0], c[1], c[2], c[3]], k, lod: ctx.lod, cell };
+            let part = |cell, copy: IntRect, out: IntRect| {
+                let (entry, t) = crate::soft::shared(ctx.doc, n, &key(cell), || crate::soft::Entry::new(copy, axf));
+                SoftPart { entry, kept: Some(t), out }
+            };
+            if fits(region) {
+                return SoftCaster { parts: vec![part(None, region, region)], anchor, ..none };
+            }
+            // In cells: each gives its square of the footprint, from a copy reaching the shadows'
+            // reach past it, its origin on a whole number of the largest factor's pixels (cells
+            // side by side draw their copies' shared pixels alike).
+            let cell = f64::from(SOFT_CELL_PX);
+            let (cx0, cy0) = ((seen.x0 / cell).floor() as i32, (seen.y0 / cell).floor() as i32);
+            let (cx1, cy1) = (((seen.x1 / cell).ceil() as i32).max(cx0 + 1), ((seen.y1 / cell).ceil() as i32).max(cy0 + 1));
+            let mut parts = Vec::new();
+            for cy in cy0..cy1.min(cy0 + 16) {
+                for cx in cx0..cx1.min(cx0 + 16) {
+                    let sq = Rect::new(f64::from(cx) * cell, f64::from(cy) * cell, f64::from(cx + 1) * cell, f64::from(cy + 1) * cell);
+                    let Some(out) = whole(sq.intersect(to_rect(region))) else { continue };
+                    let reach = sq.inflate(m, m).intersect(to_rect(region));
+                    let snap = |v: f64| (v / 64.0).floor() * 64.0;
+                    let Some(copy) = whole(Rect::new(snap(reach.x0), snap(reach.y0), reach.x1, reach.y1)) else { continue };
+                    if !fits(copy) {
+                        parts.clear();
+                        break;
+                    }
+                    parts.push(part(Some((cx, cy)), copy, out));
+                }
+            }
+            if !parts.is_empty() {
+                return SoftCaster { parts, anchor, ..none };
+            }
+        }
+        let Some(region) = whole(dev.intersect(view.inflate(m, m))) else { return none };
+        let entry = Arc::new(Mutex::new(crate::soft::Entry::new(region, xf)));
+        SoftCaster { parts: vec![SoftPart { entry, kept: None, out: region }], ..none }
     }
 
-    /// The copy drawn `k` times smaller (a power of two from `self.k`), its local → copy pixels
-    /// transform and its factor (smaller when the copies can't be halved that far).
-    fn copy(&mut self, k: u32) -> Option<(&Pixmap, Affine, u32)> {
-        let region = self.region?;
-        let copies = &mut self.copies;
-        if copies.is_empty() {
-            let k = f64::from(self.k);
-            let (w, h) = ((f64::from(region.width()) / k).ceil() as u32, (f64::from(region.height()) / k).ceil() as u32);
-            let xf = Affine::scale(1.0 / k) * Affine::translate((-f64::from(region.x()), -f64::from(region.y()))) * self.xf;
-            let mut p = Pixmap::new(w.clamp(1, 16_384), h.clamp(1, 16_384))?;
-            let ctx = Ctx { scale: self.ctx.scale / k, under: None, ..*self.ctx };
-            draw_content(&ctx, &mut p, self.n, xf, self.depth, None);
+    /// Shadow `s`'s alpha cast from the copy, the factor it was cast smaller by and the device
+    /// pixels it covers on the pixmap; cast when first asked for.
+    fn cast(&self, part: &SoftPart, s: &figcraft_doc::Shadow) -> Option<(Arc<Pixmap>, u32, IntRect)> {
+        let entry = &part.entry;
+        let key = crate::soft::shadow_key(s);
+        // Held while the copy is drawn, so renders in parallel wait for it rather than draw it
+        // too. Nothing under it runs on rayon (it would deadlock: a waiting thread could be
+        // handed a task that waits on this lock); a child's own entry is locked below this one.
+        let mut e = entry.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let before = e.bytes();
+        if !e.casts.iter().any(|c| c.0 == key) {
+            self.cast_all(&mut e, s);
+        }
+        let cast = e.casts.iter().find(|c| c.0 == key).map(|(_, p, k)| (p.clone(), *k));
+        let r = e.region;
+        let after = e.bytes();
+        drop(e);
+        if let Some(t) = part.kept.filter(|_| after != before) {
+            crate::soft::note(t, after);
+        }
+        let (small, k) = cast?;
+        let region = IntRect::from_xywh(r.x().saturating_add(self.anchor.0), r.y().saturating_add(self.anchor.1), r.width(), r.height())?;
+        Some((small, k, region))
+    }
+
+    /// Cast `first` and every other soft drop shadow of the node not cast yet into `e`, side by
+    /// side on threads of their own (renders in parallel wait for the entry meanwhile).
+    fn cast_all(&self, e: &mut crate::soft::Entry, first: &figcraft_doc::Shadow) {
+        let scale = self.ctx.scale;
+        let mut todo: Vec<&figcraft_doc::Shadow> = vec![first];
+        for x in self.n.effects.iter().filter(|x| x.visible) {
+            if let EffectKind::DropShadow(s) = &x.kind
+                && shadow::soft_factor(s, scale) > 1
+                && !todo.iter().any(|t| crate::soft::shadow_key(t) == crate::soft::shadow_key(s))
+                && !e.casts.iter().any(|c| c.0 == crate::soft::shadow_key(s))
+            {
+                todo.push(s);
+            }
+        }
+        // The copies each needs first, then the casts from them.
+        for s in &todo {
+            self.copy(e, shadow::soft_factor(s, scale));
+        }
+        let (doc, n, copies, base) = (self.ctx.doc, self.n, &e.copies, self.k);
+        let one = |s: &figcraft_doc::Shadow| {
+            let (copy, xf, k) = soft_level(copies, base, shadow::soft_factor(s, scale))?;
+            let caster = shadow::Caster::new(doc, n, copy, xf, scale / f64::from(k));
+            Some((crate::soft::shadow_key(s), Arc::new(shadow::cast_alpha(&caster, s)?), k))
+        };
+        let made: Vec<Option<(u64, Arc<Pixmap>, u32)>> = if todo.len() == 1 {
+            todo.iter().map(|s| one(s)).collect()
+        } else {
+            std::thread::scope(|sc| {
+                let jobs: Vec<_> = todo.iter().map(|s| (*s, std::thread::Builder::new().spawn_scoped(sc, || one(s)).ok())).collect();
+                jobs.into_iter().map(|(s, job)| job.and_then(|j| j.join().ok()).unwrap_or_else(|| one(s))).collect()
+            })
+        };
+        #[cfg(test)]
+        crate::soft::CASTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).extend(todo.iter().map(|s| s.radius.to_bits()));
+        e.casts.extend(made.into_iter().flatten());
+    }
+
+    /// Make sure `e` holds the copy drawn `k` times smaller (see [`soft_level`]). The first is
+    /// drawn in stripes side by side on threads of their own: a large layer's copy took long.
+    fn copy(&self, e: &mut crate::soft::Entry, k: u32) {
+        let region = e.region;
+        if e.copies.is_empty() {
+            let kf = f64::from(self.k);
+            let (w, h) = ((f64::from(region.width()) / kf).ceil() as u32, (f64::from(region.height()) / kf).ceil() as u32);
+            let (w, h) = (w.clamp(1, 16_384), h.clamp(1, 16_384));
+            let xf = Affine::scale(1.0 / kf) * Affine::translate((-f64::from(region.x()), -f64::from(region.y()))) * e.xf;
+            let Some(mut p) = Pixmap::new(w, h) else { return };
+            let c = *self.ctx;
+            let (doc, n, depth, scale) = (c.doc, self.n, self.depth, c.scale / kf);
+            let (outline_mode, outline, outlined, skip, lod, canvas, time) = (c.outline_mode, c.outline, c.outlined, c.skip, c.lod, c.canvas, c.time);
+            // Rows `y0..y0 + rows` of the copy.
+            let stripe = |y0: u32, rows: u32| {
+                let mut s = Pixmap::new(w, rows)?;
+                let bounds = Bounds::default();
+                let ctx = Ctx { doc, scale, outline_mode, outline, outlined, skip, lod, canvas, under: None, time, bounds: &bounds };
+                draw_content(&ctx, &mut s, n, Affine::translate((0.0, -f64::from(y0))) * xf, depth, None);
+                Some(s)
+            };
+            let stripes = (h / 128).clamp(1, 8);
+            let rows = h.div_ceil(stripes);
+            let parts: Vec<(u32, Option<Pixmap>)> = std::thread::scope(|sc| {
+                let jobs: Vec<_> = (0..stripes)
+                    .map(|i| i * rows)
+                    .filter(|y0| *y0 < h)
+                    .map(|y0| {
+                        let r = rows.min(h - y0);
+                        (y0, r, std::thread::Builder::new().spawn_scoped(sc, move || stripe(y0, r)).ok())
+                    })
+                    .collect();
+                jobs.into_iter().map(|(y0, r, job)| (y0, job.and_then(|j| j.join().ok()).unwrap_or_else(|| stripe(y0, r)))).collect()
+            });
+            let put = PixmapPaint { blend_mode: tiny_skia::BlendMode::Source, ..Default::default() };
+            for (y0, part) in parts {
+                if let Some(part) = part {
+                    p.draw_pixmap(0, y0 as i32, part.as_ref(), &put, Transform::identity(), None);
+                }
+            }
+            let ctx = Ctx { scale, under: None, ..c };
             layer_effects(&ctx, &mut p, self.n, self.n.id, xf);
-            copies.push((p, xf));
+            e.copies.push((p, xf));
         }
         let level = (k.max(self.k) / self.k.max(1)).ilog2() as usize;
-        while copies.len() <= level {
-            let Some((last, xf)) = copies.last() else { break };
+        while e.copies.len() <= level {
+            let Some((last, xf)) = e.copies.last() else { break };
             let Some(half) = crate::fx::half(last) else { break };
             let xf = Affine::scale(0.5) * *xf;
-            copies.push((half, xf));
+            e.copies.push((half, xf));
         }
-        let level = level.min(copies.len().saturating_sub(1));
-        copies.get(level).map(|(p, xf)| (p, *xf, self.k << level))
     }
 
     /// Composite shadow `s` cast from the copy onto `pix` (opacity `op`), scaled back up, hidden
     /// behind `cover` (the full-size layer's cover and where it lies on `pix`) unless it shows
     /// behind the layer.
     fn draw(&mut self, pix: &mut Pixmap, s: &figcraft_doc::Shadow, op: f32, cover: Option<(&Pixmap, (i32, i32))>) {
-        let Some(region) = self.region else { return };
-        let (doc, n, scale) = (self.ctx.doc, self.n, self.ctx.scale);
-        let Some((copy, xf, k)) = self.copy(shadow::soft_factor(s, scale)) else { return };
-        let caster = shadow::Caster::new(doc, n, copy, xf, scale / f64::from(k));
-        let Some(small) = shadow::cast_alpha(&caster, s) else { return };
-        // Back up to full size where it lands on `pix`.
-        let Some(on) = int_rect(
-            Rect::new(f64::from(region.x()), f64::from(region.y()), f64::from(region.right()), f64::from(region.bottom())),
-            (pix.width(), pix.height()),
-        ) else {
-            return;
-        };
-        let at = ((on.x() - region.x()).unsigned_abs(), (on.y() - region.y()).unsigned_abs());
-        let Some(mut sh) = crate::fx::upscale_alpha(&small, k, at, on.width(), on.height()) else { return };
-        if !s.show_behind
-            && let Some((c, (cx, cy))) = cover
-        {
-            crate::fx::mask_by_at(&mut sh, c, (on.x() - cx, on.y() - cy), true);
+        for part in &self.parts {
+            let Some((small, k, region)) = self.cast(part, s) else { continue };
+            // Back up to full size where its pixels land on `pix`.
+            let out = part.out;
+            let (ox, oy) = (out.x().saturating_add(self.anchor.0), out.y().saturating_add(self.anchor.1));
+            let Some(on) = int_rect(
+                Rect::new(f64::from(ox), f64::from(oy), f64::from(ox) + f64::from(out.width()), f64::from(oy) + f64::from(out.height())),
+                (pix.width(), pix.height()),
+            ) else {
+                continue;
+            };
+            let at = ((on.x() - region.x()).unsigned_abs(), (on.y() - region.y()).unsigned_abs());
+            let Some(mut sh) = crate::fx::upscale_alpha(&small, k, at, on.width(), on.height()) else { continue };
+            if !s.show_behind
+                && let Some((c, (cx, cy))) = cover
+            {
+                crate::fx::mask_by_at(&mut sh, c, (on.x() - cx, on.y() - cy), true);
+            }
+            crate::fx::tint(&mut sh, shadow::color4(s.color));
+            composite(pix, (on.x(), on.y()), &sh, op, s.blend);
         }
-        crate::fx::tint(&mut sh, shadow::color4(s.color));
-        composite(pix, (on.x(), on.y()), &sh, op, s.blend);
     }
+}
+
+/// The copy of `copies` (drawn `base`, `2 base`, … times smaller) drawn `k` times smaller, its
+/// local → copy pixels transform and its factor (smaller when the copies weren't halved that far).
+fn soft_level(copies: &[(Pixmap, Affine)], base: u32, k: u32) -> Option<(&Pixmap, Affine, u32)> {
+    let level = ((k.max(base) / base.max(1)).ilog2() as usize).min(copies.len().saturating_sub(1));
+    copies.get(level).map(|(p, xf)| (p, *xf, base << level))
 }
 
 /// Node `n`'s backdrop effects through its backdrop outline `sh`, for its `size` layer at `at` on

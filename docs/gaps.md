@@ -306,10 +306,13 @@ No alpha blockers: the alpha gate in [`roadmap.md`](roadmap.md#alpha-gate) passe
   slowest view went 87 s → 3.6 s, another 23 s → 2.4 s. Drop shadows blurred by 16+ device pixels
   are cast from a copy of the layer drawn 2–64× smaller (its alpha only), so the full-size layer
   only covers the view, not the shadows' margin of up to 2048 pixels; a shadow's spread is linear
-  in the layer's pixels (was × the spread). Next symptom → fix: still seconds on such a page → share
-  one cast of each shadow between the render's bands and tiles (each band now casts it over its own
-  rows plus the shadow's reach, ~10× the work; 4–8 h), then the background blurs (about a quarter of
-  what is left), then GPU shaders.
+  in the layer's pixels (was × the spread). The casts are kept between renders at one zoom (in
+  2048-pixel cells for very large layers, drawn and cast on threads of their own), so the canvas's
+  bands, its tiles and pans share them: on the same page a scroll's render went 2.6 s → 1.95 s and
+  1.7 s → 0.9 s; the first render at a new zoom only ~10 % (3.5 s → 3.1 s: the cells' copies of such
+  large layers are most of it). Next symptom → fix: still seconds right after a zoom on such a page →
+  the background blurs (about a quarter of what is left) and the large layers' content, then GPU
+  shaders (10–20 h).
 
 ### 8. Platform QA: Linux and the browser left
 - **Missing:** regular runs on Linux and the browser; real screen readers; a repeat of the Windows
@@ -508,6 +511,7 @@ No alpha blockers: the alpha gate in [`roadmap.md`](roadmap.md#alpha-gate) passe
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-19 | patch | Gap 7: soft drop shadows are kept between renders at one zoom (per layer, or per 2048-pixel cell of a very large one), shared by the canvas's bands, tiles and pans; an entry is dropped when anything below the layer changes. The owner's page: a scroll's render 2.6 → 1.95 s and 1.7 → 0.9 s, the first at a new zoom 3.5 → 3.1 s. Ranks and hours unchanged |
 | 2026-10-19 | patch | Gap 7: large drop shadows on the CPU: blurred by 16+ device pixels they are cast from a copy drawn up to 64× smaller, and the layer no longer reaches as far as they do; spread is linear in the layer's pixels. The owner's page zoomed in: 87 s → 3.6 s. Ranks and hours unchanged |
 | 2026-10-19 | minor | Gap 7: the desktop app's GPU canvas is on by default (gap 7): Preferences ▸ Draw the canvas on the GPU (`pref.gpuCanvas`, from the next start) turns it off, `FIGCRAFT_GPU_TILES=0` or `=1` overrides it for one run; the CPU still paints effects, masks, pattern fills and anything the device can't run. Ranks and hours unchanged |
 | 2026-10-19 | patch | Gap 7: the GPU canvas measured on macOS (M1 Max, Metal): pixels within a mean 0.35/255 of the CPU's, 0.4 cores instead of 2.1 while zooming at the same 120 fps, a sharp image after a zoom step ~10 ms later than the CPU's (vello's scene encoding). Ranks and hours unchanged |

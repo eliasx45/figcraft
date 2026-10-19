@@ -21,6 +21,7 @@ pub mod paint;
 pub mod pattern;
 pub mod retained;
 pub mod shadow;
+mod soft;
 pub mod tiles;
 
 pub use draw::{node_outline, paint_bounds, stroke_fill, subtree_outline, ts_path, vector_mask_outline};
@@ -181,6 +182,7 @@ pub fn render_view_single(doc: &Document, page: NodeId, view: &View, opts: &Opti
         outlined: &opts.outlined,
         skip: &opts.skip,
         lod,
+        canvas: opts.lod,
         under: None,
         time: 0.0,
         bounds: &bounds,
@@ -214,6 +216,7 @@ fn nodes_into(doc: &Document, ids: &[NodeId], view: &View, pix: &mut Pixmap, tim
         outlined: &[],
         skip: &[],
         lod: false,
+        canvas: false,
         under: None,
         time,
         bounds: &bounds,
