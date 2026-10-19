@@ -1,7 +1,7 @@
-//! Canvas tiles painted on the GPU (`figcraft-render-gpu`, vello) on the window's own wgpu device,
-//! when asked for with `FIGCRAFT_GPU_TILES=1`. Off by default until it measures better than the
-//! CPU painter (`docs/gaps.md`, gap 7); the CPU paints whatever the GPU can't, and everything
-//! when the device can't run vello's compute shaders (an OpenGL fallback, say).
+//! Canvas tiles painted on the GPU (`figcraft-render-gpu`, vello) on the window's own wgpu device:
+//! on unless Preferences ▸ Draw the canvas on the GPU is off (`pref.gpuCanvas`);
+//! `FIGCRAFT_GPU_TILES=0` or `=1` overrides it for one run. The CPU paints whatever the GPU can't,
+//! and everything when the device can't run vello's compute shaders (an OpenGL fallback, say).
 
 use std::sync::Arc;
 
@@ -28,14 +28,24 @@ impl NativeTextures for Textures {
     }
 }
 
-/// Whether `FIGCRAFT_GPU_TILES` asks for GPU tiles.
+/// Whether a switch says yes.
 fn wanted(v: Option<&str>) -> bool {
     v.is_some_and(|v| matches!(v.trim(), "1" | "true" | "on" | "yes"))
 }
 
-/// Install the GPU tile painter when it's asked for and the window draws with wgpu.
-pub fn install(cc: &eframe::CreationContext<'_>) {
-    if !wanted(std::env::var("FIGCRAFT_GPU_TILES").ok().as_deref()) {
+/// Whether the GPU paints: `FIGCRAFT_GPU_TILES` when it's a yes or a no, else the preference.
+fn on(env: Option<&str>, pref: bool) -> bool {
+    match env.map(str::trim) {
+        Some("0" | "false" | "off" | "no") => false,
+        Some(v) if wanted(Some(v)) => true,
+        _ => pref,
+    }
+}
+
+/// Install the GPU tile painter when it's on and the window draws with wgpu.
+pub fn install(cc: &eframe::CreationContext<'_>, pref: bool) {
+    if !on(std::env::var("FIGCRAFT_GPU_TILES").ok().as_deref(), pref) {
+        log::info!("GPU canvas off: the CPU draws the canvas");
         return;
     }
     let Some(rs) = &cc.wgpu_render_state else {
@@ -62,5 +72,14 @@ mod tests {
     fn only_a_yes_turns_gpu_tiles_on() {
         assert!(super::wanted(Some("1")) && super::wanted(Some(" on ")));
         assert!(!super::wanted(None) && !super::wanted(Some("0")) && !super::wanted(Some("")));
+    }
+
+    #[test]
+    fn the_environment_overrides_the_preference_only_when_it_says_yes_or_no() {
+        use super::on;
+        assert!(on(None, true) && !on(None, false));
+        assert!(!on(Some("0"), true) && !on(Some(" off"), true));
+        assert!(on(Some("1"), false));
+        assert!(on(Some(""), true) && !on(Some("maybe"), false));
     }
 }

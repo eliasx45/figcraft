@@ -194,6 +194,7 @@ fn main() -> eframe::Result {
     // The interface language from the first frame on, and for the message when the window can't
     // open (no frame then).
     figcraft_ui_egui::i18n::set(&session.prefs.language, figcraft_ui_egui::Services::system_language(&svc).as_deref());
+    let gpu_canvas = session.prefs.gpu_canvas;
     let mut fig = FigApp::new(session, Box::new(svc));
     fig.automation_roots = roots;
     fig.ui.home = false;
@@ -243,7 +244,7 @@ fn main() -> eframe::Result {
                 let _ = with_app(|fig| fig.ui.title_bar = figcraft_ui_egui::TitleBar::Native);
                 _cc.egui_ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
             }
-            gpu_tiles::install(_cc);
+            gpu_tiles::install(_cc, gpu_canvas);
             Ok(Box::new(App {
                 queue,
                 ctx_slot,

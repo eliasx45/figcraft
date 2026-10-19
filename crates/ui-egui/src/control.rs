@@ -442,6 +442,9 @@ pub fn handle(app: &mut FigApp, ctx: &Context, method: &str, p: &Value) -> Resul
             if let Some(h) = p.get("palette").and_then(Value::as_bool) {
                 crate::menus::set_palette(&mut app.ui, h);
             }
+            if let Some(h) = p.get("preferences").and_then(Value::as_bool) {
+                app.ui.preferences = h;
+            }
             // true / false, or a top-level menu to open it at ("Plugins").
             match p.get("mainMenu") {
                 Some(Value::Bool(h)) => app.ui.main_menu = *h,

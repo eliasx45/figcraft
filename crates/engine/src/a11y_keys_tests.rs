@@ -42,6 +42,17 @@ fn region_commands_ask_the_ui_to_move_the_keyboard() {
 }
 
 #[test]
+fn the_gpu_canvas_is_on_unless_turned_off() {
+    let mut s = Session::new();
+    assert!(s.prefs.gpu_canvas);
+    assert_eq!(s.execute("pref.gpuCanvas", &json!({})).unwrap()["on"], false);
+    assert_eq!(serde_json::to_value(&s.prefs).unwrap()["gpu_canvas"], false);
+    // Settings saved before it existed read as on.
+    let old: crate::Prefs = serde_json::from_value(json!({"theme": "dark"})).unwrap();
+    assert!(old.gpu_canvas);
+}
+
+#[test]
 fn reduce_motion_is_a_preference_that_persists() {
     let mut s = Session::new();
     assert!(!s.prefs.reduce_motion);

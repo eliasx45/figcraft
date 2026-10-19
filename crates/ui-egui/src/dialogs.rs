@@ -225,6 +225,13 @@ pub fn show(app: &mut FigApp, ctx: &Context) {
             if !cfg!(target_arch = "wasm32") && crate::widgets::checkbox(ui, prefs.auto_save, tr("Save files automatically")) {
                 toggles.push("pref.autoSave");
             }
+            // The browser draws with the CPU painter only.
+            if !cfg!(target_arch = "wasm32") {
+                if crate::widgets::checkbox(ui, prefs.gpu_canvas, tr("Draw the canvas on the GPU")) {
+                    toggles.push("pref.gpuCanvas");
+                }
+                crate::widgets::label(ui, tr("Takes effect the next time FigCraft starts."), t.text_secondary);
+            }
             for c in toggles {
                 app.run(c, json!({}));
             }

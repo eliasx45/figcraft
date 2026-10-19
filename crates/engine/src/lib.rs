@@ -636,6 +636,9 @@ pub struct Prefs {
     /// Files that have a path are saved by themselves a few seconds after they change (the app's
     /// timer; off: only File ▸ Save writes them).
     pub auto_save: bool,
+    /// The desktop app draws the canvas on the GPU (vello), the CPU only what the GPU can't; off:
+    /// the CPU draws it all. Read when the app starts.
+    pub gpu_canvas: bool,
     /// `figcraft://` invite links open this app (`collab.registerLinks`); `None`: on for installed
     /// builds, off for development builds.
     pub invite_links: Option<bool>,
@@ -702,6 +705,7 @@ impl Default for Prefs {
             user_name: cmd::comment::DEFAULT_AUTHOR.into(),
             reduce_motion: false,
             auto_save: false,
+            gpu_canvas: true,
             invite_links: None,
             plugins: Vec::new(),
             plugin_settings: BTreeMap::new(),
