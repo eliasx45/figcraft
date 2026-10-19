@@ -21,6 +21,8 @@ log = { workspace = true }
 # vello 0.11 is on wgpu 30, the version eframe 0.36 uses; peniko/kurbo 0.13 are already in the tree.
 vello = "0.11"
 pollster = "0.4"
+# Top-level layers are built on every core (their images turn into pixels then).
+rayon = "1"
 
 [dev-dependencies]
 figcraft-engine = { workspace = true }

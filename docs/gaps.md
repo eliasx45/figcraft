@@ -269,7 +269,8 @@ No alpha blockers: the alpha gate in [`roadmap.md`](roadmap.md#alpha-gate) passe
   paints the tiles (a 4×4 block of tiles per GPU pass) and the canvas image itself, straight into
   textures the window shows (nothing is read back); images are drawn from the pyramid level of
   the zoom and small text is greeked as on the CPU. The CPU paints what vello can't draw yet
-  (effects, masks, pattern fills: only the tiles or views they're in), outline and focus views,
+  (pattern fills, texture, glass, masks directly on the page: only the tiles or views they're in;
+  other effects and masks since 2026-10-19, below), outline and focus views,
   soft proof, Display P3 files and transparent pages, and everything until vello's shaders have
   compiled (in the background: seconds on Direct3D 12). Measured on Windows (RTX 4060 laptop,
   i9-14900HX with 32 threads, Direct3D 12, a 28k-layer page): tiles equal the CPU's to a mean
@@ -277,7 +278,7 @@ No alpha blockers: the alpha gate in [`roadmap.md`](roadmap.md#alpha-gate) passe
   ~100 fps; a sharp image after a zoom step 9–44 ms against 17–44 ms (most of it is vello
   encoding the scene on the CPU); idle CPU unchanged. `cargo run -p figcraft-render-gpu --release
   --example bench` compares the painters. Then (2026-10-19) on macOS (M1 Max, Metal, same page): a mean 0.35/255 from the CPU's; 0.4 cores instead of 2.1 while zooming at the same 120 fps; a sharp image after a zoom step 33–42 ms against the CPU's usual ~26 ms, so caching the scene encoding comes first there. Left: the browser (WebGPU) checked, GPU
-  memory measured, the scene encoding cached, effects as shaders, then on by default.
+  memory measured, the scene encoding cached (effects as shaders and on by default: done).
 - **Landed (2026-10-18):** a canvas tile cache (`figcraft_render::tiles`, `crates/ui-egui/src/tiles.rs`):
   512-pixel tiles at power-of-two zoom levels, painted between canvas renders through a
   `TilePainter` (CPU today) and kept as GPU textures (at most 256). A zoom draws each part of the
@@ -315,9 +316,31 @@ No alpha blockers: the alpha gate in [`roadmap.md`](roadmap.md#alpha-gate) passe
   the canvas's bands overlap by the widest background blur reaching the view, not the document's
   (a frame with a wide blur elsewhere made every view render on one thread): the sharp render
   after a zoom onto chat screenshots under a blurred frame went 2.6 s → 0.6 s at 100 %, 3.0 s →
-  1.5 s at 200 %, 2.6 s → 0.95 s half off a frame. Next symptom → fix: still ~1.5 s zoomed in on
-  large screenshots → drawing the large images (two 2300×4200 screenshots are most of what is
-  left; each band samples them at full size), then GPU shaders (10–20 h).
+  1.5 s at 200 %, 2.6 s → 0.95 s half off a frame.
+- **Landed (2026-10-19): effects on the GPU** (`crates/render-gpu/src/effects.rs`, `fx.wgsl`,
+  `grain.wgsl`). Drop shadows, inner shadows, layer blurs, background blurs and noise no longer send
+  the GPU canvas to the CPU: a layer with effects is drawn on its own into a texture, smaller by
+  the factor its blur allows (as the CPU's soft shadows), compute passes blur, spread and tint it
+  (noise is hashed per grain cell exactly as the CPU does), and the page scene draws the results
+  as images where the CPU composites them. They belong to a tile level, so zoom steps within a
+  level and pans reuse them. The page scene is now built only where something is shown (and under
+  the background blurs there), on every core, its images prepared in parallel and those more than
+  half a view away left out until they come near; layers the GPU still can't draw (masks, pattern
+  fills, texture, glass) are found without building them, so such a view goes to the CPU at once.
+  Masks inside layers are drawn on the GPU too (vector, alpha and luminance). Every scene vello
+  renders now draws an invisible gradient: vello 0.11 made its image atlas again, empty, after a
+  scene without images, gradients or glyphs, and then drew the images it took for uploaded as
+  nothing (blank cards and squares on the GPU canvas; `images_still_draw_after_a_tile_without_any`).
+  GPU vs CPU on the effect and mask scenes of `tests/parity.rs`: a mean 0.02–0.35/255; the owner's
+  page tiles a mean 0.21/255 (at most 10). The owner's page (RTX 4060 laptop, Vulkan, 2400×1800),
+  the sharp image after a zoom on the GPU against the CPU: 0.46 s vs 0.91 s at 100 %, 0.10 vs
+  1.5 s at 200 %, 0.53 vs 1.8 s half off a frame, 0.38 vs 1.7 s on a frame; then 4–8 ms for each
+  zoom step within the level and 0.1–0.2 s for a new level. Before this the GPU painter built
+  every top-level layer of the page at each new level, images and all (≈11 s on that page, where
+  535 images overflow the 512 MB image cache), before falling back. Left: the whole page in view
+  at a new level (2.4 s, CPU 1.6 s: every layer is built), pattern fills, texture and glass,
+  progressive blurs, masks directly on the page, a background blur seeing its own layer's drop
+  shadows when it lies inside a layer with effects, macOS measured.
 
 ### 8. Platform QA: Linux and the browser left
 - **Missing:** regular runs on Linux and the browser; real screen readers; a repeat of the Windows
@@ -516,6 +539,7 @@ No alpha blockers: the alpha gate in [`roadmap.md`](roadmap.md#alpha-gate) passe
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-19 | patch | Gap 7: drop shadows, inner shadows, layer and background blurs, noise and masks drawn on the GPU (compute passes over a smaller copy, kept per tile level); the GPU scene built only where shown, on every core, far images left out, CPU-only layers found without building; images no longer vanish after a render without any (a vello atlas bug). The owner's page: the sharp image after a zoom 0.9–1.8 s → 0.1–0.5 s, zoom steps within a level 4–8 ms. Ranks and hours unchanged |
 | 2026-10-19 | patch | Gap 7: background and layer blurs of 16+ device pixels are blurred from a smaller copy (at most 2/255 off), and the canvas's bands overlap by the blurs reaching the view only. The owner's page, the sharp render after a zoom: 2.6 → 0.6 s at 100 %, 3.0 → 1.5 s at 200 %. Ranks and hours unchanged |
 | 2026-10-19 | patch | Gap 7: soft drop shadows are kept between renders at one zoom (per layer, or per 2048-pixel cell of a very large one), shared by the canvas's bands, tiles and pans; an entry is dropped when anything below the layer changes. The owner's page: a scroll's render 2.6 → 1.95 s and 1.7 → 0.9 s, the first at a new zoom 3.5 → 3.1 s. Ranks and hours unchanged |
 | 2026-10-19 | patch | Gap 7: large drop shadows on the CPU: blurred by 16+ device pixels they are cast from a copy drawn up to 64× smaller, and the layer no longer reaches as far as they do; spread is linear in the layer's pixels. The owner's page zoomed in: 87 s → 3.6 s. Ranks and hours unchanged |

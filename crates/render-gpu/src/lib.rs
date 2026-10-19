@@ -2,12 +2,14 @@
 //! painting the canvas's tiles ([`figcraft_render::tiles`]).
 //!
 //! The CPU renderer (`figcraft-render`) stays the reference and the fallback: a tile that shows
-//! something this doesn't draw yet (effects, masks, pattern fills: see [`Fallback`]) is painted on
-//! the CPU, and so is a whole batch in an outline view. Exports, the CLI and MCP never come here.
+//! something this doesn't draw yet (masks, pattern fills, the rarer effects: see [`Fallback`]) is
+//! painted on the CPU, and so is a whole batch in an outline view. Exports, the CLI and MCP never
+//! come here. Drop shadows, layer blurs and background blurs are made on the GPU ([`effects`]).
 //!
 //! The page scene is kept per top-level layer in page coordinates: a tile is the layers over it
 //! through the tile's transform, and an edit rebuilds only the top-level layers it touched.
 
+pub mod effects;
 pub mod scene;
 
 use std::collections::{HashMap, HashSet};
@@ -34,6 +36,8 @@ pub struct Gpu {
     queue: wgpu::Queue,
     renderer: Renderer,
     target: Option<Target>,
+    /// The effects' compute passes (`None`: they failed to build; layers with effects fall back).
+    fx: Option<effects::Pipelines>,
     /// The adapter's name and backend (for reports).
     pub adapter: String,
 }
@@ -79,7 +83,87 @@ impl Gpu {
             },
         )
         .map_err(|e| e.to_string())?;
-        Ok(Self { device, queue, renderer, target: None, adapter })
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let fx = effects::Pipelines::new(&device);
+        let fx = match pollster::block_on(scope.pop()) {
+            Some(e) => {
+                log::warn!("gpu canvas: effects: {e}; layers with effects paint on the CPU");
+                None
+            }
+            None => Some(fx),
+        };
+        Ok(Self { device, queue, renderer, target: None, fx, adapter })
+    }
+
+    /// Make the textures of `fx`'s passes (`backdrop`: what lies under it, in page coordinates, over
+    /// `base`) and have the scene's images draw them.
+    fn make(&mut self, fx: &effects::FxNode, backdrop: Option<&Scene>, base: figcraft_color::Color) -> Result<(), Fallback> {
+        let Some(pipes) = &self.fx else { return Err("GPU effects unavailable") };
+        let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        // Each source drawn once per factor.
+        let mut sources: Vec<((effects::Source, u32), wgpu::Texture)> = Vec::new();
+        let mut made = Vec::with_capacity(fx.passes.len());
+        for p in &fx.passes {
+            let key = (p.source, p.k);
+            let shared = sources.iter().find(|(k, _)| *k == key).filter(|_| p.shape.is_none());
+            let src = match shared {
+                _ if matches!(p.kind, effects::Kind::Noise(_)) => None,
+                Some((_, t)) => Some(t.clone()),
+                None => {
+                    let (scene, under) = match (&p.shape, p.source) {
+                        (Some(shape), _) => (shape, figcraft_color::Color::TRANSPARENT),
+                        (None, effects::Source::Content) => (&fx.content, figcraft_color::Color::TRANSPARENT),
+                        (None, effects::Source::Backdrop) => (backdrop.ok_or("no backdrop")?, base),
+                    };
+                    let mut sc = Scene::new();
+                    keep_atlas(&mut sc);
+                    sc.append(scene, Some(fx.to_texture(p.k)));
+                    let (width, height) = (p.image.width, p.image.height);
+                    let t = self.device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("figcraft-fx-source"),
+                        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+                        view_formats: &[],
+                    });
+                    let view = t.create_view(&wgpu::TextureViewDescriptor::default());
+                    let params = RenderParams {
+                        base_color: vello::peniko::Color::new([under.r, under.g, under.b, under.a]),
+                        width,
+                        height,
+                        antialiasing_method: AaConfig::Area,
+                    };
+                    self.renderer.render_to_texture(&self.device, &self.queue, &sc, &view, &params).map_err(|e| {
+                        log::warn!("gpu canvas: effects: {e}");
+                        "GPU render failed"
+                    })?;
+                    if p.shape.is_none() {
+                        sources.push((key, t.clone()));
+                    }
+                    Some(t)
+                }
+            };
+            let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("figcraft-fx") });
+            let t = pipes.run(&self.device, &self.queue, &mut enc, &p.kind, src.as_ref(), (p.image.width, p.image.height)).ok_or("no source")?;
+            // Submitted before the next source is drawn: the content shows the inner shadows made
+            // first (their images are in it).
+            self.queue.submit([enc.finish()]);
+            let at =
+                wgpu::TexelCopyTextureInfoBase { texture: t.clone(), mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All };
+            self.renderer.override_image(&p.image, Some(at));
+            made.push(t);
+        }
+        if let Some(e) = pollster::block_on(scope.pop()) {
+            log::warn!("gpu canvas: effects: {e}");
+            return Err("GPU error");
+        }
+        if let Ok(mut m) = fx.made.lock() {
+            *m = Some(made);
+        }
+        Ok(())
     }
 
     fn target(&mut self) -> &Target {
@@ -302,9 +386,37 @@ fn cut(data: &[u8], col: u32, row: u32) -> Option<Pixmap> {
     Some(pix)
 }
 
-/// A top-level layer's scene, the page area it paints (`None`: anywhere) and whether it holds
-/// pixels made for the scale it was built at ([`Builder::sampled`]).
-type Part = Result<(Scene, Option<Rect>, bool), Fallback>;
+/// A top-level layer's scene, or why the GPU can't draw it.
+type Part = Result<Built, Fallback>;
+
+/// A top-level layer of the kept scene: built only once something shows it (building one turns
+/// its images into pixels, and a page can hold hundreds that don't fit in memory together).
+enum Slot {
+    Built(Box<Part>),
+    /// Not built yet; the page area it paints (`None`: anywhere).
+    Pending(Option<Rect>),
+}
+
+impl Slot {
+    fn built(&self) -> Option<&Part> {
+        match self {
+            Slot::Built(p) => Some(p.as_ref()),
+            Slot::Pending(_) => None,
+        }
+    }
+}
+
+struct Built {
+    scene: Scene,
+    /// The page area it paints (`None`: anywhere).
+    at: Option<Rect>,
+    /// Whether it holds pixels made for the scale it was built at ([`Builder::sampled`]).
+    sampled: bool,
+    /// The page area it shows as it is (`None`: all of it); images elsewhere are left out.
+    covers: Option<Rect>,
+    /// Its layers with effects, each after those inside it.
+    fx: Vec<Arc<effects::FxNode>>,
+}
 
 /// What the kept scene was built from.
 struct Kept {
@@ -314,8 +426,10 @@ struct Kept {
     fonts: u64,
     /// The scale (a tile level's) the sampled parts were built at.
     scale: f64,
+    /// Whether too small to read is approximated.
+    lod: bool,
     /// Each top-level layer's scene (or why it can't be drawn), in page order.
-    parts: Vec<(NodeId, Part)>,
+    parts: Vec<(NodeId, Slot)>,
 }
 
 /// How the tiles of the last batch were painted (`ui.inspect`, benchmarks).
@@ -327,10 +441,23 @@ pub struct Counts {
     /// Milliseconds: bringing the page scene up to date, building the blocks' scenes, vello's
     /// encoding and submission, waiting for the GPU, and cutting the pixels into tiles.
     pub scene_ms: f64,
+    /// Making the effects' textures.
+    pub fx_ms: f64,
     pub compose_ms: f64,
     pub submit_ms: f64,
     pub wait_ms: f64,
     pub cut_ms: f64,
+}
+
+/// Every scene rendered draws an invisible gradient. vello 0.11 shrinks its image atlas to 1×1
+/// for a scene without images, gradients or glyphs, and the next scene's images that it still
+/// takes for uploaded then draw as nothing (the atlas texture was made again, empty).
+fn keep_atlas(sc: &mut Scene) {
+    use vello::{kurbo, peniko};
+    let clear = peniko::Color::new([0.0, 0.0, 0.0, 0.0]);
+    let stops = [peniko::ColorStop::from((0.0, clear)), peniko::ColorStop::from((1.0, clear))];
+    let grad = peniko::Gradient::new_linear((0.0, 0.0), (1.0, 0.0)).with_stops(stops.as_slice());
+    sc.fill(peniko::Fill::NonZero, kurbo::Affine::IDENTITY, &grad, None, &kurbo::Rect::new(0.0, 0.0, 1.0, 1.0));
 }
 
 /// Paints canvas tiles on the GPU, and on the CPU where it can't.
@@ -347,6 +474,8 @@ pub struct GpuTilePainter {
     pub counts: Counts,
     /// Tiles stay on the GPU where they can ([`Painted::Native`]).
     native: bool,
+    /// The effect images whose textures the renderer draws, until their layer goes.
+    overrides: Vec<(std::sync::Weak<effects::FxNode>, Vec<vello::peniko::ImageData>)>,
 }
 
 /// A GPU every window's painter shares; `None` until its shaders are ready (painters paint on
@@ -391,6 +520,7 @@ impl GpuTilePainter {
             last_fallback: None,
             counts: Counts::default(),
             native: false,
+            overrides: Vec::new(),
         }
     }
 
@@ -427,30 +557,198 @@ impl GpuTilePainter {
         let dirty = old.as_ref().and_then(|k| if Arc::ptr_eq(&k.doc, doc) { Some(HashSet::new()) } else { dirty_tops(&k.doc, doc, page) });
         let rescaled = old.as_ref().is_some_and(|k| k.scale.to_bits() != scale.to_bits());
         let mut reuse: HashMap<NodeId, Part> = match (old, &dirty) {
-            (Some(k), Some(_)) => k.parts.into_iter().collect(),
+            (Some(k), Some(_)) => k.parts.into_iter().filter_map(|(id, s)| if let Slot::Built(p) = s { Some((id, *p)) } else { None }).collect(),
             _ => HashMap::new(),
         };
-        let images = &mut self.images;
         // What's too small to read is approximated only in zoomed-out views.
         let lod = lod && scale <= figcraft_render::lod::MAX_SCALE;
         let kids = doc.node(page).map(|p| p.children.as_slice()).unwrap_or_default();
+        // A mask among the page's own layers clips the top-level layers over it, which are built
+        // apart: those views go to the CPU.
+        let looked: Vec<Option<&figcraft_doc::Node>> = kids.iter().map(|c| doc.node(*c)).collect();
+        let masked: HashSet<NodeId> = Document::paint_runs_of(&looked, false)
+            .into_iter()
+            .filter(|r| looked.get(r.start).copied().flatten().is_some_and(|m| m.is_mask && m.visible))
+            .flat_map(|r| kids.get(r).unwrap_or_default().iter().copied())
+            .collect();
+        let mut rebuilt = false;
         let parts = kids
             .iter()
             .map(|c| {
                 let cached = if dirty.as_ref().is_some_and(|d| !d.contains(c)) { reuse.remove(c) } else { None };
                 // Pixels made for another scale are made again.
-                let cached = cached.filter(|p| !(rescaled && matches!(p, Ok((_, _, true)))));
-                let part = cached.unwrap_or_else(|| {
-                    let mut b = Builder { doc, skip, images, scale, sampled: false, lod };
-                    let mut sc = Scene::new();
-                    b.node(&mut sc, *c, figcraft_geom::Affine::IDENTITY, 0)
+                let cached = cached.filter(|p| !(rescaled && matches!(p, Ok(Built { sampled: true, .. }))));
+                // A background blur sees the top-level layers before its own: once one of them is
+                // built again, it is made again.
+                if masked.contains(c) {
+                    return (*c, Slot::Built(Box::new(Err("masks on the page"))));
+                }
+                match cached {
+                    Some(part) => {
+                        if rebuilt && let Ok(b) = &part {
+                            for fx in b.fx.iter().filter(|f| f.prefix.is_some()) {
+                                if let Ok(mut m) = fx.made.lock() {
+                                    *m = None;
+                                }
+                            }
+                        }
+                        (*c, Slot::Built(Box::new(part)))
+                    }
+                    None => {
+                        rebuilt = true;
                         // A page unit of margin for anti-aliasing.
-                        .map(|()| (sc, figcraft_render::paint_bounds(doc, *c).map(|r| r.inflate(1.0, 1.0)), b.sampled))
-                });
-                (*c, part)
+                        (*c, Slot::Pending(figcraft_render::paint_bounds(doc, *c).map(|r| r.inflate(1.0, 1.0))))
+                    }
+                }
             })
             .collect();
-        self.kept = Some(Kept { doc: doc.clone(), page, skip: skip.to_vec(), fonts, scale, parts });
+        self.kept = Some(Kept { doc: doc.clone(), page, skip: skip.to_vec(), fonts, scale, lod, parts });
+    }
+
+    /// Build the kept scene's top-level layers over `shown` (or build them again where they left
+    /// out images there), and those under the background blurs there (what they blur). `whole`:
+    /// for one image of all of `shown`, which a layer the GPU can't draw sends to the CPU anyway,
+    /// so none is built then; why is returned.
+    fn build_over(&mut self, shown: &[Rect], whole: bool) -> Option<Fallback> {
+        let first = shown.first()?;
+        let mut rects = shown.to_vec();
+        let all = shown.iter().fold(*first, |a, r| a.union(*r));
+        // Images within half a view of what is shown are drawn too, so a pan doesn't build again.
+        let area = all.inflate(all.width() / 2.0, all.height() / 2.0);
+        let inside = |c: &Rect, r: &Rect| c.x0 <= r.x0 && c.y0 <= r.y0 && c.x1 >= r.x1 && c.y1 >= r.y1;
+        // A layer built for a backdrop can hold another background blur (a few rounds at most).
+        for _ in 0..4 {
+            use rayon::prelude::*;
+            let k = self.kept.as_mut()?;
+            let (doc, scale, lod) = (k.doc.clone(), k.scale, k.lod);
+            let todo: Vec<(usize, NodeId, Option<Rect>)> = k
+                .parts
+                .iter()
+                .enumerate()
+                .filter_map(|(i, (c, slot))| {
+                    let (at, covers) = match slot {
+                        Slot::Pending(at) => (*at, None),
+                        Slot::Built(p) => match p.as_ref() {
+                            Ok(b) if b.covers.is_some() => (b.at, b.covers),
+                            _ => return None,
+                        },
+                    };
+                    let wanted: Vec<&Rect> = rects.iter().filter(|x| at.is_none_or(|r| overlaps(&r, x))).collect();
+                    let missing = match covers {
+                        None => matches!(slot, Slot::Pending(_)) && !wanted.is_empty(),
+                        Some(c) => wanted.iter().any(|x| !inside(&c, &x.intersect(at.unwrap_or(**x)))),
+                    };
+                    missing.then_some((i, *c, at))
+                })
+                .collect();
+            if todo.is_empty() {
+                return None;
+            }
+            // Layers the GPU can't draw are found without building them.
+            let mut cpu = None;
+            let todo: Vec<(usize, NodeId, Option<Rect>)> = todo
+                .into_iter()
+                .filter(|(i, c, at)| match scene::cpu_only(&doc, *c) {
+                    Some(why) => {
+                        if let Some((_, slot)) = k.parts.get_mut(*i) {
+                            *slot = Slot::Built(Box::new(Err(why)));
+                        }
+                        if at.is_none_or(|r| shown.iter().any(|x| overlaps(&r, x))) {
+                            cpu = Some(why);
+                        }
+                        false
+                    }
+                    None => true,
+                })
+                .collect();
+            if whole && cpu.is_some() {
+                return cpu;
+            }
+            // On every core: their images turn into pixels first (a layer is built on one thread,
+            // and one can hold dozens of large images), then the layers are built.
+            let near: Vec<(&figcraft_color::Paint, f64, f64, f64)> = todo
+                .iter()
+                .flat_map(|(_, c, _)| doc.subtree(*c))
+                .filter_map(|id| doc.node(id))
+                .filter(|n| n.visible && doc.world_bounds(n.id).is_some_and(|b| overlaps(&b, &area)))
+                .flat_map(|n| {
+                    let s = doc.world_transform(n.id).determinant().abs().sqrt() * scale;
+                    n.fills
+                        .iter()
+                        .chain(&n.strokes)
+                        .filter(|p| p.visible && matches!(p.kind, figcraft_color::PaintKind::Image(_)))
+                        .map(move |p| (p, n.width, n.height, s))
+                })
+                .collect();
+            near.par_iter().for_each(|(p, w, h, s)| {
+                let _ = figcraft_render::paint::prepare_at(p, *w, *h, *s, &doc, 0.0);
+            });
+            let skip = &k.skip;
+            let built: Vec<(usize, Part, Images)> = todo
+                .into_par_iter()
+                .map(|(i, c, at)| {
+                    let mut images = Images::default();
+                    let mut b = Builder {
+                        doc: &doc,
+                        skip,
+                        images: &mut images,
+                        scale,
+                        sampled: false,
+                        lod,
+                        top: c,
+                        fx: Vec::new(),
+                        open: 0,
+                        in_fx: 0,
+                        under: None,
+                        area: Some(area),
+                        partial: false,
+                    };
+                    let mut sc = Scene::new();
+                    let part = b.node(&mut sc, c, figcraft_geom::Affine::IDENTITY, 0).map(|()| Built {
+                        scene: sc,
+                        at,
+                        sampled: b.sampled,
+                        covers: b.partial.then_some(area),
+                        fx: b.fx,
+                    });
+                    (i, part, images)
+                })
+                .collect();
+            // A layer built again (with more of its images) changes what the background blurs of
+            // the layers after it see.
+            let mut again = usize::MAX;
+            for (i, part, images) in built {
+                if let Some((_, slot)) = k.parts.get_mut(i) {
+                    if matches!(slot, Slot::Built(_)) {
+                        again = again.min(i);
+                    }
+                    *slot = Slot::Built(Box::new(part));
+                }
+                self.images.absorb(images);
+            }
+            for (_, slot) in k.parts.iter().skip(again.saturating_add(1)) {
+                for fx in slot.built().and_then(|p| p.as_ref().ok()).map(|b| b.fx.as_slice()).unwrap_or_default() {
+                    if fx.prefix.is_some()
+                        && let Ok(mut m) = fx.made.lock()
+                    {
+                        *m = None;
+                    }
+                }
+            }
+            let more: Vec<Rect> = k
+                .parts
+                .iter()
+                .filter_map(|(_, s)| s.built()?.as_ref().ok())
+                .flat_map(|b| b.fx.iter())
+                .filter(|f| f.prefix.is_some() && shown.iter().any(|x| overlaps(&f.region, x)) && !rects.contains(&f.region))
+                .map(|f| f.region)
+                .collect();
+            if more.is_empty() {
+                return None;
+            }
+            rects.extend(more);
+        }
+        None
     }
 
     /// What tile `key` needs: `Ok(false)` nothing is over it (only the background), `Ok(true)`
@@ -459,9 +757,13 @@ impl GpuTilePainter {
     fn classify(&self, doc: &Document, key: &TileKey) -> Result<bool, Fallback> {
         let shown = key.rect();
         let mut any = false;
-        for (id, part) in self.kept.iter().flat_map(|k| k.parts.iter()) {
-            match part {
-                Ok((_, at, _)) => any |= at.is_none_or(|r| overlaps(&r, &shown)),
+        for (id, slot) in self.kept.iter().flat_map(|k| k.parts.iter()) {
+            let Slot::Built(part) = slot else {
+                // Built before its tiles are classified ([`Self::build_over`]): elsewhere.
+                continue;
+            };
+            match &**part {
+                Ok(b) => any |= b.at.is_none_or(|r| overlaps(&r, &shown)),
                 Err(why) => {
                     let reach = figcraft_render::paint_bounds(doc, *id).map(|r| r.inflate(2.0 / key.scale(), 2.0 / key.scale()));
                     if reach.is_none_or(|r| overlaps(&r, &shown)) {
@@ -477,15 +779,104 @@ impl GpuTilePainter {
     /// draw that are over it).
     fn compose(&mut self, view: &View) {
         self.frame.reset();
+        keep_atlas(&mut self.frame);
         let xf = view.transform();
         let shown = view.page_rect();
-        for (_, part) in self.kept.iter().flat_map(|k| k.parts.iter()) {
-            if let Ok((sc, at, _)) = part
-                && at.is_none_or(|r| overlaps(&r, &shown))
+        for (_, slot) in self.kept.iter().flat_map(|k| k.parts.iter()) {
+            if let Some(Ok(b)) = slot.built()
+                && b.at.is_none_or(|r| overlaps(&r, &shown))
             {
-                self.frame.append(sc, Some(xf));
+                self.frame.append(&b.scene, Some(xf));
             }
         }
+    }
+
+    /// Make the effect textures the layers over `shown` draw, and those of the layers under the
+    /// background blurs there (what they blur), in page order; forget those of layers gone.
+    fn prepare(&mut self, shown: &Rect, base: figcraft_color::Color) -> Result<(), Fallback> {
+        let Some(kept) = &self.kept else { return Ok(()) };
+        let Ok(mut gpu) = self.gpu.lock() else { return Err("GPU not ready") };
+        let Some(gpu) = gpu.as_mut() else { return Err("GPU not ready") };
+        self.overrides.retain(|(fx, images)| {
+            let alive = fx.strong_count() > 0;
+            if !alive {
+                for im in images {
+                    gpu.renderer.override_image(im, None);
+                }
+            }
+            alive
+        });
+        // Every layer with effects in page order (each after those inside it), with its top-level
+        // layer's place.
+        let all: Vec<(usize, &Arc<effects::FxNode>)> = kept
+            .parts
+            .iter()
+            .enumerate()
+            .filter_map(|(i, (_, slot))| Some((i, slot.built()?.as_ref().ok()?)))
+            .flat_map(|(i, b)| b.fx.iter().map(move |f| (i, f)))
+            .collect();
+        // Those over `shown`, and what they are made from first: the layers with effects inside
+        // them (drawn in their content) and, for a background blur, those under it.
+        let mut wanted: Vec<bool> = all.iter().map(|(_, f)| overlaps(&f.region, shown)).collect();
+        for i in (0..all.len()).rev() {
+            if !wanted.get(i).copied().unwrap_or(false) {
+                continue;
+            }
+            let Some(&(part, f)) = all.get(i) else { continue };
+            let inside: HashSet<NodeId> = kept.doc.subtree(f.id).into_iter().collect();
+            for (j, (p, g)) in all.iter().enumerate().take(i) {
+                if ((*p == part && inside.contains(&g.id)) || (f.prefix.is_some() && overlaps(&g.region, &f.region)))
+                    && let Some(w) = wanted.get_mut(j)
+                {
+                    *w = true;
+                }
+            }
+        }
+        for ((i, fx), want) in all.iter().zip(&wanted) {
+            if !want {
+                continue;
+            }
+            let (i, fx) = (*i, *fx);
+            if let Ok(m) = fx.made.lock()
+                && let Some(textures) = m.as_ref()
+            {
+                // Made: copied into the renderer's image atlas again (an entry there can be
+                // stale: written from another render's textures before these were made).
+                for (p, t) in fx.passes.iter().zip(textures) {
+                    let at = wgpu::TexelCopyTextureInfoBase {
+                        texture: t.clone(),
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    };
+                    gpu.renderer.override_image(&p.image, Some(at));
+                }
+                continue;
+            }
+            let backdrop = match &fx.prefix {
+                Some(prefix) => {
+                    let mut sc = Scene::new();
+                    for (id, earlier) in kept.parts.iter().take(i) {
+                        match earlier.built() {
+                            Some(Ok(e)) if e.at.is_none_or(|r| overlaps(&r, &fx.region)) => sc.append(&e.scene, None),
+                            // What it blurs the GPU can't draw: the view goes to the CPU.
+                            Some(Err(why)) if figcraft_render::paint_bounds(&kept.doc, *id).is_none_or(|r| overlaps(&r, &fx.region)) => {
+                                return Err(why);
+                            }
+                            _ => {}
+                        }
+                    }
+                    sc.append(prefix, None);
+                    Some(sc)
+                }
+                None => None,
+            };
+            gpu.make(fx, backdrop.as_ref(), base)?;
+            if !self.overrides.iter().any(|(f, _)| std::ptr::eq(f.as_ptr(), Arc::as_ptr(fx))) {
+                self.overrides.push((Arc::downgrade(fx), fx.passes.iter().map(|p| p.image.clone()).collect()));
+            }
+        }
+        Ok(())
     }
 
     /// Paint the tiles of one block (`level`, block column and row) on the GPU; `None` when the
@@ -497,6 +888,11 @@ impl GpuTilePainter {
         let rows = (keys.iter().map(|k| k.y).max()? - y0 + 1).clamp(1, BLOCK) as u32;
         let first = TileKey { level, x: x0, y: y0 }.view();
         let view = View { width: cols * TILE_PX, height: rows * TILE_PX, ..first };
+        self.build_over(&[view.page_rect()], false);
+        if let Err(why) = self.prepare(&view.page_rect(), base) {
+            self.last_fallback = Some(why);
+            return None;
+        }
         let t = std::time::Instant::now();
         self.compose(&view);
         self.counts.compose_ms += ms(t);
@@ -536,10 +932,15 @@ impl GpuTilePainter {
         let scale = figcraft_render::tiles::level_at_least(view.scale).map_or(view.scale, figcraft_render::tiles::level_scale);
         let t = std::time::Instant::now();
         self.update(doc, page, &opts.skip, scale, opts.lod);
-        self.counts.scene_ms = ms(t);
         let shown = view.page_rect();
-        for (id, part) in self.kept.iter().flat_map(|k| k.parts.iter()) {
-            if let Err(why) = part {
+        if let Some(why) = self.build_over(&[shown], true) {
+            self.counts.scene_ms = ms(t);
+            self.last_fallback = Some(why);
+            return None;
+        }
+        self.counts.scene_ms = ms(t);
+        for (id, slot) in self.kept.iter().flat_map(|k| k.parts.iter()) {
+            if let Some(Err(why)) = slot.built() {
                 let reach = figcraft_render::paint_bounds(doc, *id).map(|r| r.inflate(2.0 / view.scale, 2.0 / view.scale));
                 if reach.is_none_or(|r| overlaps(&r, &shown)) {
                     self.last_fallback = Some(why);
@@ -547,6 +948,12 @@ impl GpuTilePainter {
                 }
             }
         }
+        let t = std::time::Instant::now();
+        if let Err(why) = self.prepare(&shown, base) {
+            self.last_fallback = Some(why);
+            return None;
+        }
+        self.counts.fx_ms = ms(t);
         let t = std::time::Instant::now();
         self.compose(view);
         self.counts.compose_ms = ms(t);
@@ -606,6 +1013,8 @@ impl TilePainter for GpuTilePainter {
             let scale = self.kept.as_ref().map(|k| k.scale).or(tiles.first().map(TileKey::scale)).unwrap_or(1.0);
             let t = std::time::Instant::now();
             self.update(doc, page, &opts.skip, scale, opts.lod);
+            let rects: Vec<Rect> = tiles.iter().map(TileKey::rect).collect();
+            self.build_over(&rects, false);
             self.counts.scene_ms = ms(t);
         }
         let base = Self::base(doc, page, opts);

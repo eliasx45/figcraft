@@ -2000,6 +2000,7 @@ dependencies = [
  "figcraft-text",
  "log",
  "pollster 0.4.0",
+ "rayon",
  "tiny-skia 0.12.0",
  "vello",
 ]

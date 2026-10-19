@@ -1,16 +1,20 @@
 //! The scene graph as a vello scene, in page coordinates. Mirrors `figcraft_render::draw` for
 //! the subset the GPU draws; anything else is a [`Fallback`] and the frame renders on the CPU.
+//! Drop shadows, layer blurs and background blurs are images the scene draws, made on the GPU
+//! before it renders ([`crate::effects`]).
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use figcraft_color::{BlendMode, Color, Gradient, GradientKind, Paint, PaintKind};
-use figcraft_doc::{Document, Node, NodeId, NodeKind, StrokeAlign};
+use figcraft_doc::{Document, EffectKind, Node, NodeId, NodeKind, Shadow, StrokeAlign};
 use figcraft_geom::{Affine, BezPath, Rect, Shape};
 use figcraft_render::paint::{Prepared, prepare_at};
 use figcraft_render::{FillRule, Pixmap};
 use vello::Scene;
 use vello::peniko::{self, Blob, Compose, Extend, Fill, ImageAlphaType, ImageBrush, ImageData, ImageFormat, ImageQuality, ImageSampler, Mix};
+
+use crate::effects::{self, FxNode, Kind, Pass, Source};
 
 /// Why a frame falls back to the CPU renderer.
 pub type Fallback = &'static str;
@@ -28,6 +32,14 @@ impl AsRef<[u8]> for PixBytes {
 }
 
 impl Images {
+    /// Take in the images `other` made (built on another thread).
+    pub fn absorb(&mut self, other: Images) {
+        if self.0.len() + other.0.len() > 512 {
+            self.0.clear();
+        }
+        self.0.extend(other.0);
+    }
+
     fn get(&mut self, p: &Arc<Pixmap>) -> ImageData {
         // The map holds the Arc, so its address can't be reused while the entry lives.
         let key = Arc::as_ptr(p) as usize;
@@ -63,6 +75,135 @@ pub struct Builder<'a> {
     /// Approximate what's too small to read at `scale`, as the CPU's canvas previews do
     /// (`figcraft_render::lod`: text greeked into bars).
     pub lod: bool,
+    /// The top-level layer being built.
+    pub top: NodeId,
+    /// The layers with effects built so far, each after those inside it.
+    pub fx: Vec<Arc<FxNode>>,
+    /// Layers pushed and not yet popped in the top-level layer's scene.
+    pub open: usize,
+    /// How deep inside the content of layers with effects the build is (`0`: in the top-level
+    /// layer's scene).
+    pub in_fx: usize,
+    /// Inside a layer with effects whose content holds a background blur: what lies under that
+    /// content in its top-level layer (page coordinates).
+    pub under: Option<Scene>,
+    /// Where images are drawn (`None`: everywhere); those outside it are left out.
+    pub area: Option<Rect>,
+    /// Whether an image was left out (the scene then shows only `area` as it is).
+    pub partial: bool,
+}
+
+/// Why the GPU can't draw top-level layer `top`, found without building it: what the build would
+/// stop at, through the layers it draws (hidden ones and a boolean's operands aren't).
+pub fn cpu_only(doc: &Document, top: NodeId) -> Option<Fallback> {
+    let mut stack = vec![(top, 0usize)];
+    while let Some((id, depth)) = stack.pop() {
+        let Some(n) = doc.node(id) else { continue };
+        if depth > 256 || !n.visible || n.opacity <= 0.0 {
+            continue;
+        }
+        // A mask among the page's own layers masks other top-level layers (built apart).
+        if n.is_mask && id == top {
+            return Some("masks");
+        }
+        if n.fills.iter().chain(&n.strokes).any(|p| p.visible && matches!(p.kind, PaintKind::Pattern(_))) {
+            return Some("pattern fills");
+        }
+        if n.effects.iter().any(|e| e.visible && matches!(e.kind, EffectKind::Texture(_) | EffectKind::Glass(_))) {
+            return Some("effects (texture, glass)");
+        }
+        let kids = match n.kind {
+            NodeKind::Page { .. } | NodeKind::Group => true,
+            NodeKind::Text(_) | NodeKind::BooleanOp { .. } => false,
+            _ => !n.hides_contents(),
+        };
+        if kids {
+            stack.extend(n.children.iter().map(|c| (*c, depth + 1)));
+        }
+    }
+    None
+}
+
+/// `sc` as drawn so far, with its `open` layers closed.
+fn closed(sc: &Scene, open: usize) -> Scene {
+    let mut c = sc.clone();
+    for _ in 0..open {
+        c.pop_layer();
+    }
+    c
+}
+
+/// Bytes an effect's image stands for until its texture replaces them: zeros (transparent),
+/// shared by every image, so a scene drawn before its effects were made shows none of them.
+struct Zeros(usize);
+
+impl AsRef<[u8]> for Zeros {
+    fn as_ref(&self) -> &[u8] {
+        static Z: OnceLock<Vec<u8>> = OnceLock::new();
+        let z = Z.get_or_init(|| vec![0; effects::MAX_SIDE as usize * effects::MAX_SIDE as usize * 4]);
+        z.get(..self.0).unwrap_or_default()
+    }
+}
+
+/// A new image of `w`×`h` an effect's texture will replace.
+fn placeholder(w: u32, h: u32, premultiplied: bool) -> ImageData {
+    ImageData {
+        data: Blob::new(Arc::new(Zeros(w as usize * h as usize * 4))),
+        format: ImageFormat::Rgba8,
+        alpha_type: if premultiplied { ImageAlphaType::AlphaPremultiplied } else { ImageAlphaType::Alpha },
+        width: w,
+        height: h,
+    }
+}
+
+/// `outlines` (local, through `xf` to the page) grown or shrunk by `spread` local units, in white:
+/// their fill, and a band twice the spread wide along them with mitred joins drawn over it (to
+/// grow) or cut out of it (to shrink), as `figcraft_render::shadow::spread_alpha` does.
+fn spread_shape(outlines: &[figcraft_render::shadow::Outline], spread: f64, xf: Affine, region: Rect) -> Scene {
+    let white = peniko::Color::new([1.0, 1.0, 1.0, 1.0]);
+    let mut sc = Scene::new();
+    for (path, rule) in outlines {
+        sc.fill(fill_rule(*rule), xf, white, None, path);
+    }
+    let band = vello::kurbo::Stroke::new(spread.abs() * 2.0).with_join(vello::kurbo::Join::Miter).with_miter_limit(figcraft_doc::SPREAD_MITER_LIMIT);
+    let shrink = spread < 0.0;
+    if shrink {
+        sc.push_layer(Fill::NonZero, peniko::BlendMode::new(Mix::Normal, Compose::DestOut), 1.0, Affine::IDENTITY, &region);
+    }
+    for (path, _) in outlines {
+        sc.stroke(&band, xf, white, None, path);
+    }
+    if shrink {
+        sc.pop_layer();
+    }
+    sc
+}
+
+/// An effect drawn over a node's fills through its outline (an inner shadow).
+struct OverFill<'a> {
+    pass: &'a Pass,
+    path: &'a BezPath,
+    rule: FillRule,
+    /// Local → page.
+    xf: Affine,
+    region: Rect,
+    scale: f64,
+}
+
+impl OverFill<'_> {
+    fn draw(&self, sc: &mut Scene) {
+        let (brush, bxf) = fx_brush(self.region, self.scale, self.pass);
+        sc.push_layer(fill_rule(self.rule), Mix::Normal, 1.0, self.xf, self.path);
+        sc.fill(Fill::NonZero, Affine::IDENTITY, &brush, Some(bxf), &self.region);
+        sc.pop_layer();
+    }
+}
+
+/// The page area a pass's image covers and the brush that draws it there (image pixels → page).
+fn fx_brush(fx_region: Rect, scale: f64, p: &Pass) -> (peniko::Brush, Affine) {
+    let sampler = ImageSampler { x_extend: Extend::Pad, y_extend: Extend::Pad, quality: ImageQuality::Medium, alpha: 1.0 };
+    let xf = Affine::translate((fx_region.x0, fx_region.y0)) * Affine::scale(f64::from(p.k.max(1)) / scale);
+    (peniko::Brush::Image(ImageBrush { image: p.image.clone(), sampler }), xf)
 }
 
 fn pc(c: Color) -> peniko::Color {
@@ -131,6 +272,7 @@ impl Builder<'_> {
             return self.node(sc, id, parent, 0);
         }
         for c in doc.node(page).map(|p| p.children.as_slice()).unwrap_or_default() {
+            self.top = *c;
             self.node(sc, *c, Affine::IDENTITY, 0)?;
         }
         Ok(())
@@ -149,37 +291,369 @@ impl Builder<'_> {
         if n.is_mask {
             return Err("masks");
         }
-        if n.effects.iter().any(|e| e.visible) {
-            return Err("effects (shadows, blurs, glass, noise, texture)");
-        }
         let xf = parent_xf * n.transform;
+        if n.effects.iter().any(|e| e.visible) {
+            return self.with_effects(sc, n, xf, depth);
+        }
         let layer = n.opacity < 0.999 || !normal(n.blend);
         if layer {
             // An isolated group over what the node paints (page coordinates).
             let b = figcraft_render::paint_bounds(doc, id).unwrap_or(Rect::ZERO).inflate(1.0, 1.0);
             sc.push_layer(Fill::NonZero, mode(n.blend), n.opacity.clamp(0.0, 1.0), Affine::IDENTITY, &b);
+            self.open += 1;
         }
-        self.content(sc, n, xf, depth)?;
+        let r = self.content(sc, n, xf, depth, &[]);
         if layer {
             sc.pop_layer();
+            self.open -= 1;
+        }
+        r
+    }
+
+    /// A node with effects (`draw::draw_layer`): its drop shadows under it, then in its layer
+    /// the blurred backdrop through its shape, its content (inner shadows over its fills; blurred,
+    /// with a layer blur) and its grains.
+    fn with_effects(&mut self, sc: &mut Scene, n: &Node, xf: Affine, depth: usize) -> Result<(), Fallback> {
+        let doc = self.doc;
+        let mut shadows: Vec<&Shadow> = Vec::new();
+        let mut inners: Vec<&Shadow> = Vec::new();
+        let mut noises: Vec<&figcraft_doc::Noise> = Vec::new();
+        // Blurs one after another blur as one Gaussian (their variances add).
+        let mut layer_var = 0.0;
+        let mut back = None;
+        for e in n.effects.iter().filter(|e| e.visible) {
+            match &e.kind {
+                EffectKind::DropShadow(s) => shadows.push(s),
+                EffectKind::InnerShadow(s) => inners.push(s),
+                // The CPU blurs grains drawn before a layer blur.
+                EffectKind::LayerBlur(b) if !b.is_progressive() && noises.is_empty() => layer_var += (b.sanitized().radius / 2.0).powi(2),
+                EffectKind::BackgroundBlur(b) if !b.is_progressive() && back.is_none() => back = Some(b.sanitized().radius / 2.0),
+                EffectKind::Noise(nz) => noises.push(nz),
+                _ => return Err("effects (texture, glass, progressive or repeated background blurs, noise under a layer blur)"),
+            }
+        }
+        let back = back.filter(|s| *s > 0.0);
+        if back.is_some() && layer_var > 0.0 {
+            return Err("a background blur with a layer blur");
+        }
+        let scale = self.scale;
+        if !(scale.is_finite() && scale > 0.0) {
+            return Err("scale");
+        }
+        // Everything the node and its effects paint, in page units, out to whole pixels (grains
+        // land on the pixels the CPU draws them on).
+        let Some(r) = figcraft_render::paint_bounds(doc, n.id).map(|r| r.inflate(1.0, 1.0)) else { return Ok(()) };
+        let region =
+            Rect::new((r.x0 * scale).floor() / scale, (r.y0 * scale).floor() / scale, (r.x1 * scale).ceil() / scale, (r.y1 * scale).ceil() / scale);
+        // The scene's pixels (effects drawn smaller) belong to its scale.
+        self.sampled = true;
+        let pass = |source, kind_of: &dyn Fn(f64) -> Kind, sigma_page: f64, premultiplied: bool, shape: Option<Scene>| -> Result<Pass, Fallback> {
+            let mut k = effects::factor(sigma_page * scale);
+            let mut size = effects::texture_size(region, scale, k);
+            while size.is_none() && k < 64 {
+                k *= 2;
+                size = effects::texture_size(region, scale, k);
+            }
+            let (w, h) = size.ok_or("an effect too large for the GPU")?;
+            let px = scale / f64::from(k);
+            Ok(Pass { source, kind: kind_of(px), k, shape, image: placeholder(w, h, premultiplied) })
+        };
+        let shape = figcraft_render::node_outline(doc, n);
+        let is_group = matches!(n.kind, NodeKind::Group);
+        // Inner shadows of a layer that is one outline: what lies outside it (shrunk by the spread)
+        // at the offset, blurred, over the fills and through the outline.
+        let mut inner_passes = Vec::new();
+        if !is_group && let Some((path, rule)) = &shape {
+            for s in &inners {
+                let sigma = s.radius.max(0.0) / 2.0;
+                let spread = if s.spread.is_finite() { s.spread } else { 0.0 };
+                let at = Affine::translate(s.offset) * xf;
+                let cast = spread_shape(&[(path.clone(), *rule)], -spread, at, region);
+                let color = s.color;
+                inner_passes.push(pass(
+                    Source::Content,
+                    &|px| Kind::Shadow { sigma: sigma * px, spread: 0.0, color, inside: true },
+                    sigma,
+                    false,
+                    Some(cast),
+                )?);
+            }
+        }
+        let over: Vec<OverFill> = inner_passes
+            .iter()
+            .filter_map(|p| shape.as_ref().map(|(path, rule)| OverFill { pass: p, path, rule: *rule, xf, region, scale }))
+            .collect();
+        // The content on its own (layers with effects inside it are made first, and drawn as
+        // their images in it).
+        let mut content = Scene::new();
+        // A background blur inside sees what lies under this layer, then the content before it.
+        // (Its drop shadows aren't made yet then: they are missing from what it blurs.)
+        let nested_back = doc.subtree(n.id).iter().skip(1).any(|c| doc.node(*c).is_some_and(figcraft_render::backdrop::has_effects));
+        let under = nested_back.then(|| {
+            let mut u = Scene::new();
+            if let Some(o) = &self.under {
+                u.append(o, None);
+            }
+            u.append(&closed(sc, self.open), None);
+            u
+        });
+        let under = std::mem::replace(&mut self.under, under);
+        let open = std::mem::replace(&mut self.open, 0);
+        self.in_fx += 1;
+        let built = self.content(&mut content, n, xf, depth, &over);
+        self.in_fx -= 1;
+        self.open = open;
+        self.under = under;
+        built?;
+        drop(over);
+        // A group's inner shadows: cast from around what its layers draw together, over them.
+        let mut group_inner = Vec::new();
+        if is_group {
+            for s in &inners {
+                let sigma = s.radius.max(0.0) / 2.0;
+                let spread = if s.spread.is_finite() { s.spread } else { 0.0 };
+                let mut cast = Scene::new();
+                cast.append(&content, Some(Affine::translate(s.offset)));
+                let color = s.color;
+                group_inner.push(pass(
+                    Source::Content,
+                    &|px| Kind::Shadow { sigma: sigma * px, spread: -spread * px, color, inside: true },
+                    sigma,
+                    false,
+                    Some(cast),
+                )?);
+            }
+        }
+
+        // A spread moves the outline of a layer that is one (`figcraft_render::shadow`); other
+        // layers spread their pixels.
+        let silhouette = if shadows.iter().any(|s| s.spread != 0.0) { figcraft_render::shadow::silhouette(doc, n) } else { None };
+        let mut shadow_passes = Vec::new();
+        for s in &shadows {
+            // A shadow cast from a blurred layer: the two blurs as one.
+            let sigma = ((s.radius.max(0.0) / 2.0).powi(2) + layer_var).sqrt();
+            let color = s.color;
+            let cast = silhouette.as_ref().filter(|_| s.spread != 0.0 && s.spread.is_finite()).map(|o| spread_shape(o, s.spread, xf, region));
+            let spread = if cast.is_some() { 0.0 } else { s.spread };
+            shadow_passes.push(pass(
+                Source::Content,
+                &|px| Kind::Shadow { sigma: sigma * px, spread: spread * px, color, inside: false },
+                sigma,
+                false,
+                cast,
+            )?);
+        }
+        let blurred = if layer_var > 0.0 {
+            let sigma = layer_var.sqrt();
+            Some(pass(Source::Content, &|px| Kind::Blur { sigma: sigma * px }, sigma, true, None)?)
+        } else {
+            None
+        };
+        let backdrop = match back {
+            Some(sigma) => Some(pass(Source::Backdrop, &|px| Kind::Blur { sigma: sigma * px }, sigma, true, None)?),
+            None => None,
+        };
+        let mut noise_passes = Vec::new();
+        for nz in &noises {
+            let density = if nz.density.is_finite() { nz.density.clamp(0.0, 1.0) as f32 } else { 0.0 };
+            if density <= 0.0 {
+                continue;
+            }
+            let (gx, gy) = nz.grain();
+            let (gx, gy) = (gx * 2.0, gy * 2.0);
+            let tex = Affine::scale(scale) * Affine::translate((-region.x0, -region.y0)) * xf;
+            let det = tex.determinant();
+            if !(det.is_finite() && det.abs() > 1e-12) {
+                continue;
+            }
+            let cells = (Affine::scale_non_uniform(1.0 / gx, 1.0 / gy) * tex.inverse()).as_coeffs();
+            let g = effects::Grains {
+                cells,
+                seed: n.id.0 as u32,
+                mode: match nz.mode {
+                    figcraft_doc::NoiseMode::Mono => 0,
+                    figcraft_doc::NoiseMode::Duo => 1,
+                    figcraft_doc::NoiseMode::Multi => 2,
+                },
+                density,
+                c1: nz.color.sanitized(),
+                c2: nz.secondary.sanitized(),
+                multi_alpha: if nz.opacity.is_finite() { nz.opacity.clamp(0.0, 1.0) } else { 0.0 },
+            };
+            let (w, h) = effects::texture_size(region, scale, 1).ok_or("noise too large for the GPU")?;
+            noise_passes.push((Pass { source: Source::Content, kind: Kind::Noise(g), k: 1, shape: None, image: placeholder(w, h, true) }, nz.blend));
+        }
+
+        let op = n.opacity.clamp(0.0, 1.0);
+        let cover = figcraft_render::shadow::hiding_cover(doc, n);
+        for (s, p) in shadows.iter().zip(&shadow_passes) {
+            let at = Affine::translate(s.offset);
+            let (brush, bxf) = fx_brush(region, scale, p);
+            sc.push_layer(Fill::NonZero, mode(s.blend), op, at, &region);
+            sc.fill(Fill::NonZero, at, &brush, Some(bxf), &region);
+            if !s.show_behind {
+                // Hidden behind what the layer's paints cover (or its pixels).
+                let moved = Rect::new(region.x0 + s.offset.0, region.y0 + s.offset.1, region.x1 + s.offset.0, region.y1 + s.offset.1);
+                sc.push_layer(Fill::NonZero, peniko::BlendMode::new(Mix::Normal, Compose::DestOut), 1.0, Affine::IDENTITY, &region.union(moved));
+                match (&cover, &blurred) {
+                    (Some(outlines), _) => {
+                        for (path, rule) in outlines {
+                            sc.fill(fill_rule(*rule), xf, peniko::Color::new([1.0, 1.0, 1.0, 1.0]), None, path);
+                        }
+                    }
+                    (None, Some(b)) => {
+                        let (brush, bxf) = fx_brush(region, scale, b);
+                        sc.fill(Fill::NonZero, Affine::IDENTITY, &brush, Some(bxf), &region);
+                    }
+                    (None, None) => sc.append(&content, None),
+                }
+                sc.pop_layer();
+            }
+            sc.pop_layer();
+        }
+        let layer = op < 0.999 || !normal(n.blend);
+        if layer {
+            sc.push_layer(Fill::NonZero, mode(n.blend), op, Affine::IDENTITY, &region);
+            self.open += 1;
+        }
+        let mut prefix = None;
+        if let Some(p) = &backdrop {
+            // What lies under it in its top-level layer: everything drawn so far, layers closed.
+            let mut pre = Scene::new();
+            if let Some(u) = &self.under {
+                pre.append(u, None);
+            }
+            pre.append(&closed(sc, self.open), None);
+            prefix = Some(pre);
+            if let Some((path, rule)) = figcraft_render::backdrop::outline(doc, n) {
+                let (brush, bxf) = fx_brush(region, scale, p);
+                sc.push_layer(fill_rule(rule), Mix::Normal, 1.0, xf, &path);
+                sc.fill(Fill::NonZero, Affine::IDENTITY, &brush, Some(bxf), &region);
+                sc.pop_layer();
+            }
+        }
+        // What the layer's pixels are now: hides grains and group inner shadows outside them.
+        let pixels = |sc: &mut Scene| match &blurred {
+            Some(b) => {
+                let (brush, bxf) = fx_brush(region, scale, b);
+                sc.fill(Fill::NonZero, Affine::IDENTITY, &brush, Some(bxf), &region);
+            }
+            None => sc.append(&content, None),
+        };
+        pixels(sc);
+        let dest_in = peniko::BlendMode::new(Mix::Normal, Compose::DestIn);
+        for p in &group_inner {
+            let (brush, bxf) = fx_brush(region, scale, p);
+            sc.push_layer(Fill::NonZero, Mix::Normal, 1.0, Affine::IDENTITY, &region);
+            sc.fill(Fill::NonZero, Affine::IDENTITY, &brush, Some(bxf), &region);
+            sc.push_layer(Fill::NonZero, dest_in, 1.0, Affine::IDENTITY, &region);
+            sc.append(&content, None);
+            sc.pop_layer();
+            sc.pop_layer();
+        }
+        for (p, blend) in &noise_passes {
+            // Grains at the alpha of the pixels under them, blended with the noise's mode.
+            let (brush, bxf) = fx_brush(region, scale, p);
+            let brush = match brush {
+                peniko::Brush::Image(mut im) => {
+                    im.sampler.quality = ImageQuality::Low;
+                    peniko::Brush::Image(im)
+                }
+                b => b,
+            };
+            sc.push_layer(Fill::NonZero, mode(*blend), 1.0, Affine::IDENTITY, &region);
+            sc.fill(Fill::NonZero, Affine::IDENTITY, &brush, Some(bxf), &region);
+            sc.push_layer(Fill::NonZero, dest_in, 1.0, Affine::IDENTITY, &region);
+            pixels(sc);
+            sc.pop_layer();
+            sc.pop_layer();
+        }
+        if layer {
+            sc.pop_layer();
+            self.open -= 1;
+        }
+        // Made in this order: inner shadows are in the content the others are made from.
+        let mut passes = inner_passes;
+        passes.extend(group_inner);
+        passes.extend(shadow_passes);
+        passes.extend(blurred);
+        passes.extend(backdrop);
+        passes.extend(noise_passes.into_iter().map(|(p, _)| p));
+        self.fx.push(Arc::new(FxNode { id: n.id, top: self.top, content, prefix, region, scale, passes, made: Mutex::new(None) }));
+        Ok(())
+    }
+
+    /// A node's children in paint order (`draw::draw_children`): a visible mask and the layers
+    /// over it up to the next mask in a group of their own, clipped by the mask.
+    fn children(&mut self, sc: &mut Scene, n: &Node, xf: Affine, depth: usize) -> Result<(), Fallback> {
+        let doc = self.doc;
+        let kids: Vec<Option<&Node>> = n.children.iter().map(|c| doc.node(*c)).collect();
+        for run in Document::paint_runs_of(&kids, n.layout.as_ref().is_some_and(|l| l.reverse_z)) {
+            let Some(&c) = n.children.get(run.start) else { continue };
+            match kids.get(run.start).copied().flatten() {
+                Some(m) if m.is_mask && m.visible => self.masked(sc, m, n.children.get(run.start + 1..run.end).unwrap_or(&[]), xf, depth)?,
+                _ => self.node(sc, c, xf, depth + 1)?,
+            }
         }
         Ok(())
     }
 
-    fn children(&mut self, sc: &mut Scene, n: &Node, xf: Affine, depth: usize) -> Result<(), Fallback> {
-        for c in &n.children {
+    /// `content` clipped by mask `m` (`draw::draw_masked`): drawn in a group, then the mask as if
+    /// it weren't one (a vector mask: its outline, opaque) keeping the group's pixels by its alpha or
+    /// brightness.
+    fn masked(&mut self, sc: &mut Scene, m: &Node, content: &[NodeId], xf: Affine, depth: usize) -> Result<(), Fallback> {
+        let doc = self.doc;
+        let Some(b) = content.iter().filter_map(|c| figcraft_render::paint_bounds(doc, *c)).reduce(|a, b| a.union(b)) else { return Ok(()) };
+        let b = b.inflate(1.0, 1.0);
+        let mut m2 = m.clone();
+        m2.is_mask = false;
+        let mxf = xf * m2.transform;
+        sc.push_layer(Fill::NonZero, Mix::Normal, 1.0, Affine::IDENTITY, &b);
+        self.open += 1;
+        for c in content {
             self.node(sc, *c, xf, depth + 1)?;
         }
+        match m.mask_type {
+            figcraft_doc::MaskType::Vector => {
+                sc.push_layer(Fill::NonZero, peniko::BlendMode::new(Mix::Normal, Compose::DestIn), 1.0, Affine::IDENTITY, &b);
+                if let Some((outline, rule)) = figcraft_render::vector_mask_outline(doc, &m2, depth + 1) {
+                    sc.fill(fill_rule(rule), mxf, peniko::Color::new([1.0, 1.0, 1.0, 1.0]), None, &outline);
+                }
+            }
+            kind => {
+                if kind == figcraft_doc::MaskType::Luminance {
+                    sc.push_luminance_mask_layer(Fill::NonZero, 1.0, Affine::IDENTITY, &b);
+                } else {
+                    sc.push_layer(Fill::NonZero, peniko::BlendMode::new(Mix::Normal, Compose::DestIn), 1.0, Affine::IDENTITY, &b);
+                }
+                let faded = m2.opacity < 0.999;
+                if faded {
+                    sc.push_layer(Fill::NonZero, Mix::Normal, m2.opacity.clamp(0.0, 1.0), Affine::IDENTITY, &b);
+                }
+                let r = self.content(sc, &m2, mxf, depth + 1, &[]);
+                if faded {
+                    sc.pop_layer();
+                }
+                r?;
+            }
+        }
+        sc.pop_layer();
+        sc.pop_layer();
+        self.open -= 1;
         Ok(())
     }
 
-    /// Fills, children (clipped), strokes and text of a node (`draw::draw_content`).
-    fn content(&mut self, sc: &mut Scene, n: &Node, xf: Affine, depth: usize) -> Result<(), Fallback> {
+    /// Fills, `over` them, children (clipped), strokes and text of a node (`draw::draw_content`).
+    fn content(&mut self, sc: &mut Scene, n: &Node, xf: Affine, depth: usize, over: &[OverFill]) -> Result<(), Fallback> {
         let doc = self.doc;
         let (w, h) = (n.width, n.height);
         match &n.kind {
             NodeKind::Page { .. } | NodeKind::Group => self.children(sc, n, xf, depth),
-            NodeKind::Text(_) => self.text(sc, n, xf),
+            NodeKind::Text(_) => {
+                self.text(sc, n, xf)?;
+                over.iter().for_each(|o| o.draw(sc));
+                Ok(())
+            }
             _ => {
                 let closed = figcraft_doc::geometry::is_closed(n) || matches!(n.kind, NodeKind::BooleanOp { .. });
                 let clips = n.clip && n.kind.is_frame_like() && !n.children.is_empty();
@@ -187,6 +661,7 @@ impl Builder<'_> {
                 if closed && let Some((path, rule)) = &outline {
                     self.fills(sc, path, *rule, &n.fills, w, h, xf)?;
                 }
+                over.iter().for_each(|o| o.draw(sc));
                 if !matches!(n.kind, NodeKind::BooleanOp { .. }) && !n.children.is_empty() && !n.hides_contents() {
                     if clips {
                         // The CPU draws clipped children into a layer of their own: an isolated group.
@@ -194,8 +669,11 @@ impl Builder<'_> {
                             Some((p, _)) if n.corners.uniform() != Some(0.0) => sc.push_layer(Fill::NonZero, Mix::Normal, 1.0, xf, p),
                             _ => sc.push_layer(Fill::NonZero, Mix::Normal, 1.0, xf, &n.local_rect()),
                         }
-                        self.children(sc, n, xf, depth)?;
+                        self.open += 1;
+                        let r = self.children(sc, n, xf, depth);
                         sc.pop_layer();
+                        self.open -= 1;
+                        r?;
                     } else {
                         self.children(sc, n, xf, depth)?;
                     }
@@ -307,6 +785,17 @@ impl Builder<'_> {
             }
             // Pattern cells are drawn at the zoom they show at: not in a zoom-independent scene.
             PaintKind::Pattern(_) => Err("pattern fills"),
+            // An image far from what is shown waits (turning it into pixels is the costly part of
+            // a build): the scene covers only `area` until it is built again.
+            PaintKind::Image(_)
+                if self.area.is_some_and(|a| {
+                    let b = figcraft_geom::transform_rect_bbox(xf, Rect::new(0.0, 0.0, w, h));
+                    !(b.x0 < a.x1 && a.x0 < b.x1 && b.y0 < a.y1 && a.y0 < b.y1)
+                }) =>
+            {
+                self.partial = true;
+                Ok(None)
+            }
             // Images and diamond gradients: the CPU renderer's pixmap, sampled on the GPU.
             _ => match self.sample(p, w, h, scale) {
                 Some(Prepared::Pattern { pixmap, mode, quality, opacity, transform }) => {
