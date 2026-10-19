@@ -512,8 +512,21 @@ impl FontDb {
         v
     }
 
+    /// Whether `family` (lowercase) is loaded or indexed.
+    fn known(&self, key: &str) -> bool {
+        self.families.contains_key(key) || self.pending.contains_key(key)
+    }
+
+    /// The family drawn for `family`: itself when it's there, else the family that holds it today
+    /// ([`stand_in`]) when that one is.
+    fn name(&self, family: &str) -> String {
+        let key = family.to_lowercase();
+        stand_in(&key).filter(|s| !self.known(&key) && self.known(s)).map_or_else(|| family.to_string(), str::to_string)
+    }
+
     /// Style names of a family, by weight then italic.
     pub fn styles(&mut self, family: &str) -> Vec<String> {
+        let family = &self.name(family);
         self.load_family(family, None);
         let Some((_, idx)) = self.families.get(&family.to_lowercase()) else { return vec![] };
         // (weight, italic, order in the font, name): named instances keep the font's order.
@@ -537,8 +550,7 @@ impl FontDb {
     }
 
     pub fn has_family(&self, family: &str) -> bool {
-        let k = family.to_lowercase();
-        self.families.contains_key(&k) || self.pending.contains_key(&k)
+        self.known(&self.name(family).to_lowercase())
     }
 
     /// Read a system family's faces from disk; with `only`, just the face nearest that style (the
@@ -586,6 +598,7 @@ impl FontDb {
 
     /// The best face for `family` + `style` (exact style name, else nearest weight/italic).
     pub fn find(&mut self, family: &str, style: &str) -> Option<Arc<Face>> {
+        let family = &self.name(family);
         self.load_family(family, None);
         self.best(family, style)
     }
@@ -594,6 +607,7 @@ impl FontDb {
     /// `style`: a fallback for missing characters needs one face, not every file of a CJK family
     /// (10–20 MB each). The family's other faces load when it is used by name.
     pub fn find_one(&mut self, family: &str, style: &str) -> Option<Arc<Face>> {
+        let family = &self.name(family);
         if !self.families.contains_key(&family.to_lowercase()) {
             self.load_family(family, Some(style));
         }
@@ -845,6 +859,17 @@ fn faces_in(bytes: &[u8]) -> Vec<(u32, String, String)> {
 pub fn find_face(family: &str, style: &str) -> Option<Arc<Face>> {
     let mut db = db().write().unwrap_or_else(std::sync::PoisonError::into_inner);
     db.find(family, style).or_else(|| db.default_face())
+}
+
+/// The family (lowercase) that holds `family` (lowercase) today, for files that name one Apple no
+/// longer ships on its own: SF Pro Text and SF Pro Display are optical sizes of the variable SF Pro
+/// (and SF Compact's of SF Compact), whose `opsz` axis follows the font size.
+fn stand_in(family: &str) -> Option<&'static str> {
+    match family {
+        "sf pro text" | "sf pro display" => Some("sf pro"),
+        "sf compact text" | "sf compact display" => Some("sf compact"),
+        _ => None,
+    }
 }
 
 /// All family names known to the global db.

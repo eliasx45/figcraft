@@ -31,6 +31,24 @@ fn find_one_reads_only_the_nearest_style() {
 }
 
 #[test]
+fn sf_pro_text_and_display_are_drawn_with_sf_pro_when_only_it_is_installed() {
+    // Apple ships SF Pro as one variable font today; files name SF Pro Text (or Display).
+    let entry = |s: &str| Pending { path: format!("no-such-dir/{s}.ttf").into(), index: 0, style: s.into() };
+    let mut db = FontDb::default();
+    db.pending.insert("sf pro".into(), ("SF Pro".into(), vec![entry("Regular"), entry("Semibold")]));
+    assert!(db.has_family("SF Pro Text") && db.has_family("sf pro display"), "not missing");
+    assert!(!db.has_family("SF Pro Rounded") && !db.has_family("Inter"));
+    // Looking it up reads SF Pro's face.
+    db.find_one("SF Pro Text", "Semibold");
+    assert_eq!(db.pending.get("sf pro").map(|(_, v)| v.len()), Some(1));
+    // A file's own SF Pro Text, when installed, is used as it is.
+    db.pending.insert("sf pro text".into(), ("SF Pro Text".into(), vec![entry("Regular")]));
+    assert_eq!(db.name("SF Pro Text"), "SF Pro Text");
+    db.pending.remove("sf pro text");
+    assert_eq!(db.name("SF Pro Text"), "sf pro");
+}
+
+#[test]
 fn system_fonts_are_scanned_once() {
     // Racing callers (the desktop's background scan, on-demand lookups, tests) share one walk.
     let threads: Vec<_> = (0..4).map(|_| std::thread::spawn(scan_system_fonts)).collect();

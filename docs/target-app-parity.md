@@ -640,6 +640,7 @@ Carried over from the ROADMAP's "Shipped so far" (2026-10-10). The test count th
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-19 | patch | Text row: files that name SF Pro Text or SF Pro Display draw with the variable SF Pro (its optical size follows the font size) when only that is installed, as Apple ships it today, instead of listing them as missing fonts. Grade unchanged |
 | 2026-10-19 | minor | Performance row: the desktop app's GPU canvas is on by default (gap 7): Preferences ▸ Draw the canvas on the GPU (`pref.gpuCanvas`, from the next start) turns it off, `FIGCRAFT_GPU_TILES=0` or `=1` overrides it for one run; the CPU still paints effects, masks, pattern fills and anything the device can't run; measured on macOS too (M1 Max: 0.4 cores instead of 2.1 while zooming). Grade and hours unchanged |
 | 2026-10-18 | minor | Performance row: an opt-in GPU canvas (gap 7, `FIGCRAFT_GPU_TILES=1`): vello on the window's wgpu device paints the tiles and the canvas image, the CPU what it can't draw; measured on Windows only (RTX 4060 laptop, 28k layers): 0.6 cores instead of 3.6 while zooming, a sharp image 9–44 ms against 17–44 ms. Score unchanged (off by default, macOS unmeasured); 27–55 h → 15–35 h, full target ~265–517 h → ~253–497 h |
 | 2026-10-18 | minor | Performance row: a canvas tile cache (gap 7) shows a new zoom at once from tiles kept as GPU textures; rendering unchanged. 30–60 h → 27–55 h, full target ~268–522 h → ~265–517 h; percentages unchanged |
