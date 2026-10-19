@@ -294,6 +294,13 @@ No alpha blockers: the alpha gate in [`roadmap.md`](roadmap.md#alpha-gate) passe
 - **Impact:** large files and effect-heavy designs; battery on laptops.
 - **Estimate:** 15–35 h: the GPU canvas checked on macOS and in the browser and on by default
   (4–12 h), then effects (blurs, shadows, glass, noise) as GPU shaders held to the CPU renderer.
+- **Deferred (2026-10-19, owner's call):** on a fast Mac the CPU keeps up, so the next steps wait
+  for a symptom. Symptom → fix: a zoom that stays soft for a moment on a page far beyond 28k layers
+  → cache vello's scene encoding between zoom steps (2–4 h; read `submit` in `ui.inspect` →
+  `canvas.tiles.painting.viewReport` first; at best it matches the CPU here, ~15–20 ms of the
+  ~35 ms is frame latency); fans or battery while zooming → GPU canvas on by default (5× less
+  CPU); slow pages full of shadows, blurs, glass or noise → effects as GPU shaders (10–20 h, the
+  one step that would be substantially faster than the CPU).
 
 ### 8. Platform QA: Linux and the browser left
 - **Missing:** regular runs on Linux and the browser; real screen readers; a repeat of the Windows
