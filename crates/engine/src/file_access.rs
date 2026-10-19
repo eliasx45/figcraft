@@ -79,8 +79,10 @@ impl Roots {
     }
 }
 
-/// Whether `path`, made absolute with its `.` and `..` taken by name (no file system), lies in one
-/// of `roots` (as resolved, or as shown without Windows' `\\?\` prefix).
+/// Whether `path`, made absolute with its `.` and `..` taken by name, lies in one of `roots` (as
+/// resolved, or as shown without Windows' `\\?\` prefix). Its nearest existing folder is resolved
+/// too, so a path spelled through a link above the roots (macOS's `/var` for `/private/var`)
+/// counts; the part below that folder, the link that can't be resolved, is taken by name.
 fn lexically_inside(path: &Path, roots: &[PathBuf]) -> bool {
     let Ok(abs) = std::path::absolute(path) else { return false };
     let mut lexical = PathBuf::new();
@@ -93,7 +95,20 @@ fn lexically_inside(path: &Path, roots: &[PathBuf]) -> bool {
             c => lexical.push(c),
         }
     }
-    roots.iter().any(|r| lexical.starts_with(r) || lexical.starts_with(shown(r)))
+    let mut base = lexical.as_path();
+    let mut rest = Vec::new();
+    let resolved = loop {
+        let Some(parent) = base.parent() else { break None };
+        if let Some(name) = base.file_name() {
+            rest.push(name);
+        }
+        base = parent;
+        if let Ok(mut b) = std::fs::canonicalize(base) {
+            b.extend(rest.iter().rev());
+            break Some(b);
+        }
+    };
+    roots.iter().any(|r| [Some(&lexical), resolved.as_ref()].into_iter().flatten().any(|p| p.starts_with(r) || p.starts_with(shown(r))))
 }
 
 /// Whether `path` lies in the app's own folder `folder`, both resolved (links and `..` followed);
