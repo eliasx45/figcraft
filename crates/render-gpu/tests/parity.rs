@@ -414,3 +414,23 @@ fn images_still_draw_after_a_tile_without_any() {
     }
     assert_eq!(gp.counts.cpu, 0, "{:?}", gp.last_fallback);
 }
+
+#[test]
+#[ignore = "needs a GPU adapter"]
+fn a_device_error_is_logged_not_fatal() {
+    // wgpu panics on a device error by default: on the window's device, shared with the painter,
+    // a resize racing a submit took the app down.
+    use vello::wgpu;
+    let instance = wgpu::Instance::default();
+    let Ok(adapter) = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())) else { return };
+    let Ok((device, _queue)) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())) else { return };
+    figcraft_render_gpu::log_device_errors(&device);
+    // Mapped for reading and writing at once: a validation error.
+    let _ = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: 4,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::MAP_WRITE,
+        mapped_at_creation: false,
+    });
+    let _ = device.poll(wgpu::PollType::wait_indefinitely());
+}

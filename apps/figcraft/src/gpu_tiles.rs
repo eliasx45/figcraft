@@ -53,6 +53,9 @@ pub fn install(cc: &eframe::CreationContext<'_>, pref: bool) {
         return;
     };
     let (device, queue) = (rs.device.clone(), rs.queue.clone());
+    // The painter submits on the window's device from its own thread: a device error (a resize
+    // racing a submit, say) is logged, not fatal.
+    figcraft_render_gpu::log_device_errors(&device);
     // `FIGCRAFT_GPU_TILES_COPY=1` brings the pixels back through the CPU instead (for measuring).
     if !wanted(std::env::var("FIGCRAFT_GPU_TILES_COPY").ok().as_deref()) {
         figcraft_ui_egui::render_worker::set_native_textures(Box::new(Textures { device: device.clone(), renderer: rs.renderer.clone() }));

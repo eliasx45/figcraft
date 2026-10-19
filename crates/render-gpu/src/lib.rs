@@ -64,8 +64,7 @@ impl Gpu {
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { label: Some("figcraft-gpu-tiles"), ..Default::default() }))
                 .map_err(|e| e.to_string())?;
-        // wgpu panics on device errors by default; a tile must not take the app down.
-        device.on_uncaptured_error(Arc::new(|e| log::error!("gpu tiles: {e}")));
+        log_device_errors(&device);
         Self::shared(device, queue, format!("{} ({:?})", info.name, info.backend))
     }
 
@@ -481,6 +480,14 @@ pub struct GpuTilePainter {
 /// A GPU every window's painter shares; `None` until its shaders are ready (painters paint on
 /// the CPU meanwhile).
 pub type SharedGpu = Arc<std::sync::Mutex<Option<Gpu>>>;
+
+/// Log `device`'s errors instead of panicking (wgpu's default). Call it on the window's device
+/// when the painter shares it: the painter submits from its own thread, and a window resize that
+/// reconfigures the surface while it does fails ("Failed to wait for GPU to come idle"), which
+/// took the app down; the surface is configured again on the next frame.
+pub fn log_device_errors(device: &wgpu::Device) {
+    device.on_uncaptured_error(Arc::new(|e| log::error!("gpu: {e}")));
+}
 
 /// A [`SharedGpu`] on `device`, made on a thread of its own: vello compiles its shaders then,
 /// which takes seconds on some backends (Direct3D 12), and no render waits for that.
