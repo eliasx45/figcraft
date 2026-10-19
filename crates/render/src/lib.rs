@@ -474,6 +474,8 @@ mod retained_tests;
 #[cfg(test)]
 mod rtl_list_tests;
 #[cfg(test)]
+mod soft_shadow_tests;
+#[cfg(test)]
 mod solo_tests;
 #[cfg(test)]
 mod spread_tests;

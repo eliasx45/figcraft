@@ -412,21 +412,33 @@ pub(crate) fn bounds_within<'a>(
 /// How far (document units) effects that read outside a node's paint bounds reach: blurs, glass,
 /// drop shadows and texture. Culling and partial renders keep this much margin.
 pub fn effect_margin(n: &Node) -> f64 {
+    n.effects.iter().filter(|e| e.visible).map(|e| margin_of(n, e)).filter(|m| m.is_finite()).fold(0.0, f64::max)
+}
+
+/// [`effect_margin`] without the drop shadows cast from a smaller copy at `scale` ([`soft_shadows`]):
+/// what the full-size layer needs around the view.
+fn layer_margin(n: &Node, scale: f64) -> f64 {
     n.effects
         .iter()
         .filter(|e| e.visible)
-        .map(|e| match &e.kind {
-            EffectKind::LayerBlur(b) => b.max_radius() * 2.0,
-            EffectKind::BackgroundBlur { .. } | EffectKind::Glass(_) => e.backdrop_radius() * 2.0,
-            EffectKind::DropShadow(s) => s.radius * 2.0 + s.spread.abs() * figcraft_doc::SPREAD_MITER_LIMIT + s.offset.0.abs() + s.offset.1.abs(),
-            EffectKind::Texture(t) => t.radius.abs(),
-            // A group's inner shadows are cast from around its pixels: a layer cut off at the
-            // view would cast one from the cut.
-            EffectKind::InnerShadow(s) if matches!(n.kind, NodeKind::Group) => s.radius * 2.0 + s.spread.abs() + s.offset.0.abs() + s.offset.1.abs(),
-            _ => 0.0,
-        })
+        .filter(|e| !matches!(&e.kind, EffectKind::DropShadow(s) if shadow::soft_factor(s, scale) > 1))
+        .map(|e| margin_of(n, e))
         .filter(|m| m.is_finite())
         .fold(0.0, f64::max)
+}
+
+/// How far past node `n` effect `e` paints or reads (document units).
+fn margin_of(n: &Node, e: &figcraft_doc::Effect) -> f64 {
+    match &e.kind {
+        EffectKind::LayerBlur(b) => b.max_radius() * 2.0,
+        EffectKind::BackgroundBlur { .. } | EffectKind::Glass(_) => e.backdrop_radius() * 2.0,
+        EffectKind::DropShadow(s) => s.radius * 2.0 + s.spread.abs() * figcraft_doc::SPREAD_MITER_LIMIT + s.offset.0.abs() + s.offset.1.abs(),
+        EffectKind::Texture(t) => t.radius.abs(),
+        // A group's inner shadows are cast from around its pixels: a layer cut off at the
+        // view would cast one from the cut.
+        EffectKind::InnerShadow(s) if matches!(n.kind, NodeKind::Group) => s.radius * 2.0 + s.spread.abs() + s.offset.0.abs() + s.offset.1.abs(),
+        _ => 0.0,
+    }
 }
 
 /// Everything node `id` can paint, in page coordinates: its paint bounds (glyphs of overflowing
@@ -518,10 +530,31 @@ fn draw_layer(ctx: &Ctx, pix: &mut Pixmap, n: &Node, parent_xf: Affine, depth: u
     // Isolated layer covering the node's paint bounds, clipped to the visible area + margin. Its
     // origin can be negative (inside the margin); the size counts from there, or a layer starting
     // above or left of the pixmap came out short by the margin (a band missing at its far edge).
+    // Soft drop shadows are cast from their own smaller copy over their own margin, so the layer
+    // only reaches as far as the other effects need.
+    let soft = soft_shadows(n, ctx.scale);
+    let view = if soft.is_some() {
+        let m = (layer_margin(n, ctx.scale) * ctx.scale).min(MAX_EFFECT_MARGIN_PX);
+        Rect::new(0.0, 0.0, f64::from(pw), f64::from(ph)).inflate(m, m)
+    } else {
+        view
+    };
     let vis = dev.intersect(view);
     let (x0, y0) = (vis.x0.floor(), vis.y0.floor());
     let (w, h) = (vis.x1.ceil() - x0, vis.y1.ceil() - y0);
     if !(x0.is_finite() && y0.is_finite() && w >= 1.0 && h >= 1.0) {
+        // Off the view, only its soft shadows can reach in (nothing of the layer to hide them).
+        if let Some(k) = soft {
+            let op = n.opacity.clamp(0.0, 1.0);
+            let mut cast = SoftCaster::new(ctx, n, xf, dev, (pw, ph), k, depth);
+            for e in n.effects.iter().filter(|e| e.visible) {
+                if let EffectKind::DropShadow(s) = &e.kind
+                    && shadow::soft_factor(s, ctx.scale) > 1
+                {
+                    cast.draw(pix, s, op, None);
+                }
+            }
+        }
         return;
     }
     let (lx, ly) = (x0 as i32, y0 as i32);
@@ -594,10 +627,12 @@ fn draw_layer(ctx: &Ctx, pix: &mut Pixmap, n: &Node, parent_xf: Affine, depth: u
             c
         });
         let caster = shadow::Caster::new(ctx.doc, n, content.as_ref().unwrap_or(&layer), lxf, ctx.scale);
+        let mut soft_cast = soft.map(|k| SoftCaster::new(ctx, n, xf, dev, (pw, ph), k, depth));
         for e in n.effects.iter().filter(|e| e.visible) {
-            if let EffectKind::DropShadow(s) = &e.kind
-                && let Some(sh) = shadow::drop_shadow(&caster, s)
-            {
+            let EffectKind::DropShadow(s) = &e.kind else { continue };
+            if let Some(c) = soft_cast.as_mut().filter(|_| shadow::soft_factor(s, ctx.scale) > 1) {
+                c.draw(pix, s, op, Some((caster.cover.as_ref().unwrap_or(caster.layer), (lx, ly))));
+            } else if let Some(sh) = shadow::drop_shadow(&caster, s) {
                 composite(pix, (lx, ly), &sh, op, s.blend);
             }
         }
@@ -611,6 +646,132 @@ fn draw_layer(ctx: &Ctx, pix: &mut Pixmap, n: &Node, parent_xf: Affine, depth: u
         layer_effects(ctx, &mut layer, n, id, lxf);
     }
     composite(pix, (lx, ly), &layer, op, n.blend);
+}
+
+/// The factor node `n`'s soft drop shadows are cast smaller by at `scale` (the smallest of theirs;
+/// see [`shadow::soft_factor`]), or `None` when every drop shadow is cast at full size.
+fn soft_shadows(n: &Node, scale: f64) -> Option<u32> {
+    #[cfg(test)]
+    if EXACT_SHADOWS.with(std::cell::Cell::get) {
+        return None;
+    }
+    n.effects
+        .iter()
+        .filter(|e| e.visible)
+        .filter_map(|e| if let EffectKind::DropShadow(s) = &e.kind { Some(shadow::soft_factor(s, scale)) } else { None })
+        .filter(|k| *k > 1)
+        .min()
+}
+
+#[cfg(test)]
+pub(crate) fn soft_factor_of(n: &Node, scale: f64) -> Option<u32> {
+    soft_shadows(n, scale)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Cast every drop shadow at full size (to compare the soft ones with).
+    pub(crate) static EXACT_SHADOWS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Where node `n`'s soft drop shadows are cast from: its shape drawn `k` times smaller over the
+/// view and the shadows' margin (a shadow only needs the layer's alpha: the shape, its layer blur
+/// and texture; not its colours, backdrop or inner shadows), drawn when first asked for, then
+/// halved again for each shadow blurred enough to be cast smaller still.
+struct SoftCaster<'c, 'a, 'd> {
+    ctx: &'c Ctx<'a, 'd>,
+    n: &'c Node,
+    xf: Affine,
+    k: u32,
+    /// The device pixels the copy covers; `None` when the shadows miss the view.
+    region: Option<IntRect>,
+    depth: usize,
+    /// The copies so far, each half the size of the one before (`k`, `2k`, …), with their local →
+    /// copy pixels transforms.
+    copies: Vec<(Pixmap, Affine)>,
+}
+
+impl<'c, 'a, 'd> SoftCaster<'c, 'a, 'd> {
+    fn new(ctx: &'c Ctx<'a, 'd>, n: &'c Node, xf: Affine, dev: Rect, (pw, ph): (u32, u32), k: u32, depth: usize) -> Self {
+        // As far as the soft shadows reach (the other effects are drawn on the full-size layer),
+        // cast from a shape blurred or textured from as far again.
+        let moved = n
+            .effects
+            .iter()
+            .filter(|e| e.visible && matches!(e.kind, EffectKind::LayerBlur(_) | EffectKind::Texture(_)))
+            .map(|e| margin_of(n, e))
+            .filter(|m| m.is_finite())
+            .fold(0.0, f64::max);
+        let m = moved
+            + n.effects
+                .iter()
+                .filter(|e| e.visible && matches!(&e.kind, EffectKind::DropShadow(s) if shadow::soft_factor(s, ctx.scale) > 1))
+                .map(|e| margin_of(n, e))
+                .filter(|m| m.is_finite())
+                .fold(0.0, f64::max);
+        let m = (m * ctx.scale).min(MAX_EFFECT_MARGIN_PX);
+        let r = dev.intersect(Rect::new(0.0, 0.0, f64::from(pw), f64::from(ph)).inflate(m, m));
+        // Whole pixels from a floored origin, which can lie above or left of `pix` (in the margin).
+        let (x0, y0) = (snap_px(r.x0).floor(), snap_px(r.y0).floor());
+        let (w, h) = (snap_px(r.x1).ceil() - x0, snap_px(r.y1).ceil() - y0);
+        let region = (x0.is_finite() && y0.is_finite() && w >= 1.0 && h >= 1.0)
+            .then(|| IntRect::from_xywh(x0 as i32, y0 as i32, w as u32, h as u32))
+            .flatten();
+        SoftCaster { ctx, n, xf, k, region, depth, copies: Vec::new() }
+    }
+
+    /// The copy drawn `k` times smaller (a power of two from `self.k`), its local → copy pixels
+    /// transform and its factor (smaller when the copies can't be halved that far).
+    fn copy(&mut self, k: u32) -> Option<(&Pixmap, Affine, u32)> {
+        let region = self.region?;
+        let copies = &mut self.copies;
+        if copies.is_empty() {
+            let k = f64::from(self.k);
+            let (w, h) = ((f64::from(region.width()) / k).ceil() as u32, (f64::from(region.height()) / k).ceil() as u32);
+            let xf = Affine::scale(1.0 / k) * Affine::translate((-f64::from(region.x()), -f64::from(region.y()))) * self.xf;
+            let mut p = Pixmap::new(w.clamp(1, 16_384), h.clamp(1, 16_384))?;
+            let ctx = Ctx { scale: self.ctx.scale / k, under: None, ..*self.ctx };
+            draw_content(&ctx, &mut p, self.n, xf, self.depth, None);
+            layer_effects(&ctx, &mut p, self.n, self.n.id, xf);
+            copies.push((p, xf));
+        }
+        let level = (k.max(self.k) / self.k.max(1)).ilog2() as usize;
+        while copies.len() <= level {
+            let Some((last, xf)) = copies.last() else { break };
+            let Some(half) = crate::fx::half(last) else { break };
+            let xf = Affine::scale(0.5) * *xf;
+            copies.push((half, xf));
+        }
+        let level = level.min(copies.len().saturating_sub(1));
+        copies.get(level).map(|(p, xf)| (p, *xf, self.k << level))
+    }
+
+    /// Composite shadow `s` cast from the copy onto `pix` (opacity `op`), scaled back up, hidden
+    /// behind `cover` (the full-size layer's cover and where it lies on `pix`) unless it shows
+    /// behind the layer.
+    fn draw(&mut self, pix: &mut Pixmap, s: &figcraft_doc::Shadow, op: f32, cover: Option<(&Pixmap, (i32, i32))>) {
+        let Some(region) = self.region else { return };
+        let (doc, n, scale) = (self.ctx.doc, self.n, self.ctx.scale);
+        let Some((copy, xf, k)) = self.copy(shadow::soft_factor(s, scale)) else { return };
+        let caster = shadow::Caster::new(doc, n, copy, xf, scale / f64::from(k));
+        let Some(small) = shadow::cast_alpha(&caster, s) else { return };
+        // Back up to full size where it lands on `pix`.
+        let Some(on) = int_rect(
+            Rect::new(f64::from(region.x()), f64::from(region.y()), f64::from(region.right()), f64::from(region.bottom())),
+            (pix.width(), pix.height()),
+        ) else {
+            return;
+        };
+        let at = ((on.x() - region.x()).unsigned_abs(), (on.y() - region.y()).unsigned_abs());
+        let Some(mut sh) = crate::fx::upscale_alpha(&small, k, at, on.width(), on.height()) else { return };
+        if !s.show_behind
+            && let Some((c, (cx, cy))) = cover
+        {
+            crate::fx::mask_by_at(&mut sh, c, (on.x() - cx, on.y() - cy), true);
+        }
+        crate::fx::tint(&mut sh, shadow::color4(s.color));
+        composite(pix, (on.x(), on.y()), &sh, op, s.blend);
+    }
 }
 
 /// Node `n`'s backdrop effects through its backdrop outline `sh`, for its `size` layer at `at` on

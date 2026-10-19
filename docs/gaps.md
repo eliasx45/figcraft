@@ -301,6 +301,15 @@ No alpha blockers: the alpha gate in [`roadmap.md`](roadmap.md#alpha-gate) passe
   `canvas.tiles.painting.viewReport` first; at best it matches the CPU here, ~15–20 ms of the
   ~35 ms is frame latency); slow pages full of shadows, blurs, glass or noise → effects as GPU shaders (10–20 h, the
   one step that would be substantially faster than the CPU).
+- **Effects on the CPU (2026-10-19, measured on the owner's page: 2453 layers, 168 drop shadows
+  blurred up to 851, frames up to 22510 wide, 2400×1800 at 36 % on a 16-thread laptop):** the
+  slowest view went 87 s → 3.6 s, another 23 s → 2.4 s. Drop shadows blurred by 16+ device pixels
+  are cast from a copy of the layer drawn 2–64× smaller (its alpha only), so the full-size layer
+  only covers the view, not the shadows' margin of up to 2048 pixels; a shadow's spread is linear
+  in the layer's pixels (was × the spread). Next symptom → fix: still seconds on such a page → share
+  one cast of each shadow between the render's bands and tiles (each band now casts it over its own
+  rows plus the shadow's reach, ~10× the work; 4–8 h), then the background blurs (about a quarter of
+  what is left), then GPU shaders.
 
 ### 8. Platform QA: Linux and the browser left
 - **Missing:** regular runs on Linux and the browser; real screen readers; a repeat of the Windows
@@ -499,6 +508,7 @@ No alpha blockers: the alpha gate in [`roadmap.md`](roadmap.md#alpha-gate) passe
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-19 | patch | Gap 7: large drop shadows on the CPU: blurred by 16+ device pixels they are cast from a copy drawn up to 64× smaller, and the layer no longer reaches as far as they do; spread is linear in the layer's pixels. The owner's page zoomed in: 87 s → 3.6 s. Ranks and hours unchanged |
 | 2026-10-19 | minor | Gap 7: the desktop app's GPU canvas is on by default (gap 7): Preferences ▸ Draw the canvas on the GPU (`pref.gpuCanvas`, from the next start) turns it off, `FIGCRAFT_GPU_TILES=0` or `=1` overrides it for one run; the CPU still paints effects, masks, pattern fills and anything the device can't run. Ranks and hours unchanged |
 | 2026-10-19 | patch | Gap 7: the GPU canvas measured on macOS (M1 Max, Metal): pixels within a mean 0.35/255 of the CPU's, 0.4 cores instead of 2.1 while zooming at the same 120 fps, a sharp image after a zoom step ~10 ms later than the CPU's (vello's scene encoding). Ranks and hours unchanged |
 | 2026-10-18 | minor | Gap 7: an opt-in GPU canvas (`FIGCRAFT_GPU_TILES=1`): vello on the window's wgpu device paints tiles and the canvas image into the window's textures, the CPU paints what it can't draw; measured on Windows (RTX 4060 laptop, 28k layers): 0.6 cores instead of 3.6 while zooming at the same frame rate, a sharp image 9–44 ms against 17–44 ms, tiles equal to the CPU's to a mean 0.31/255. Gap 7 27–55 h → 15–35 h |

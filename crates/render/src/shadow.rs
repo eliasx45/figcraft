@@ -140,7 +140,7 @@ pub(crate) fn whole_px(v: f64) -> i32 {
     if v.is_finite() { v.round().clamp(-100_000.0, 100_000.0) as i32 } else { 0 }
 }
 
-fn color4(c: figcraft_color::Color) -> [f32; 4] {
+pub(crate) fn color4(c: figcraft_color::Color) -> [f32; 4] {
     let c = c.sanitized();
     [c.r, c.g, c.b, c.a]
 }
@@ -189,6 +189,22 @@ impl<'a> Caster<'a> {
 /// behind the layer) hidden behind the layer: behind what its paints cover, translucent parts
 /// included, or (layers that aren't one outline) behind its pixels.
 pub fn drop_shadow(c: &Caster, s: &Shadow) -> Option<Pixmap> {
+    let mut sh = cast(c, s)?;
+    if !s.show_behind {
+        fx::mask_by(&mut sh, c.cover.as_ref().unwrap_or(c.layer), true);
+    }
+    Some(sh)
+}
+
+/// [`drop_shadow`] before the layer hides it: offset, spread, blurred and tinted.
+pub fn cast(c: &Caster, s: &Shadow) -> Option<Pixmap> {
+    let mut sh = cast_alpha(c, s)?;
+    fx::tint(&mut sh, color4(s.color));
+    Some(sh)
+}
+
+/// [`cast`] before it is tinted: the shadow's alpha, in every channel.
+pub fn cast_alpha(c: &Caster, s: &Shadow) -> Option<Pixmap> {
     let (w, h) = (c.layer.width(), c.layer.height());
     let (dx, dy) = (s.offset.0 * c.scale, s.offset.1 * c.scale);
     let spread = if s.spread.is_finite() { s.spread } else { 0.0 };
@@ -202,12 +218,20 @@ pub fn drop_shadow(c: &Caster, s: &Shadow) -> Option<Pixmap> {
             out
         }
     };
-    fx::blur(&mut sh, s.radius / 2.0 * c.scale);
-    fx::tint(&mut sh, color4(s.color));
-    if !s.show_behind {
-        fx::mask_by(&mut sh, c.cover.as_ref().unwrap_or(c.layer), true);
-    }
+    fx::blur_alpha(&mut sh, s.radius / 2.0 * c.scale);
     Some(sh)
+}
+
+/// How many times smaller a drop shadow can be cast without showing it: blurred by `sigma` device
+/// pixels, it keeps no detail finer than a few pixels, so a copy drawn smaller by a power of two up
+/// to an eighth of `sigma` (at most 64) blurs to the same shadow. 1: cast it at full size.
+pub fn soft_factor(s: &Shadow, scale: f64) -> u32 {
+    let sigma = s.radius / 2.0 * scale;
+    if !(sigma.is_finite() && sigma >= 16.0) {
+        return 1;
+    }
+    let k = (sigma / 8.0).min(64.0);
+    1 << (k.log2().floor() as u32)
 }
 
 /// An inner shadow in a `w` × `h` layer whose `shape` maps through `xf`: everything outside the
@@ -251,7 +275,7 @@ pub fn inner_shadow_of(cover: &Pixmap, scale: f64, s: &Shadow) -> Option<Pixmap>
 /// spread), `pad` pixels larger each way than the layer, whose pixels `cover` the shape.
 fn inner_from(mut big: Pixmap, pad: u32, cover: &Pixmap, scale: f64, s: &Shadow) -> Option<Pixmap> {
     fx::invert_alpha(&mut big);
-    fx::blur(&mut big, s.radius / 2.0 * scale);
+    fx::blur_alpha(&mut big, s.radius / 2.0 * scale);
     let mut out = Pixmap::new(cover.width(), cover.height())?;
     let pad = i32::try_from(pad).ok()?;
     out.draw_pixmap(
