@@ -118,19 +118,49 @@ pub fn render_view(doc: &Document, page: NodeId, view: &View, opts: &Options) ->
     render_view_single(doc, page, view, opts)
 }
 
+/// The largest background blur or glass radius of the layers on `page` whose backdrop reaches
+/// into `view` (the document's largest one only bounds it: a wide blur elsewhere on the page
+/// doesn't make this view's bands overlap more).
+#[cfg(not(target_arch = "wasm32"))]
+fn backdrop_blur_near(doc: &Document, page: NodeId, view: &View) -> f64 {
+    let most = max_backdrop_blur(doc);
+    if most <= 0.0 || !(view.scale.is_finite() && view.scale > 0.0) {
+        return most.max(0.0);
+    }
+    let s = view.scale;
+    let seen =
+        figcraft_geom::Rect::new(view.origin.0, view.origin.1, view.origin.0 + f64::from(view.width) / s, view.origin.1 + f64::from(view.height) / s);
+    let mut near = 0.0_f64;
+    for n in doc.nodes() {
+        let r = n.effects.iter().map(figcraft_doc::Effect::backdrop_radius).fold(0.0, f64::max);
+        if r.is_nan() || r <= near || doc.page_of(n.id) != Some(page) {
+            continue;
+        }
+        let reach = backdrop_reach(r, s) / s;
+        // A layer whose bounds can't be worked out counts as reaching.
+        if draw::paint_bounds(doc, n.id).is_none_or(|b| !b.inflate(reach, reach).intersect(seen).is_zero_area()) {
+            near = r;
+        }
+    }
+    near
+}
+
 /// Render `view` as `bands` horizontal bands in parallel. Bands overlap by what background blurs
-/// read and each keeps only its own rows, so a backdrop never ends at a band's edge. `None` when a
-/// blur reaches past a whole band (every band would render most of the view: render it in one
-/// piece instead).
+/// in view read and each keeps only its own rows, so a backdrop never ends at a band's edge.
+/// `None` when that overlap reaches past a quarter of the view (every band would render most of
+/// it: render it in one piece instead); up to there, the bands' overlap costs more work in all
+/// but less time.
 #[cfg(not(target_arch = "wasm32"))]
 fn render_bands(doc: &Document, page: NodeId, view: &View, opts: &Options, bands: u32) -> Option<Pixmap> {
     use rayon::prelude::*;
-    let band_h = view.height.div_ceil(bands.max(1));
-    let overlap = backdrop_reach(max_backdrop_blur(doc), view.scale).ceil();
-    if !overlap.is_finite() || overlap > f64::from(band_h) {
+    let overlap = backdrop_reach(backdrop_blur_near(doc, page, view), view.scale).ceil();
+    if !overlap.is_finite() || overlap * 4.0 > f64::from(view.height) {
         return None;
     }
     let overlap = overlap as u32;
+    // Bands at least as tall as their overlap: thinner ones would each draw mostly overlap.
+    let bands = bands.min(view.height / overlap.max(1)).max(1);
+    let band_h = view.height.div_ceil(bands.max(1));
     let s = view.scale.max(1e-9);
     let parts: Vec<(u32, Option<Pixmap>)> = (0..bands)
         .into_par_iter()

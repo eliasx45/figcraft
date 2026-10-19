@@ -229,24 +229,51 @@ pub fn mask_by(p: &mut Pixmap, m: &Pixmap, invert: bool) {
     }
 }
 
-/// [`mask_by`] with `m`'s pixel `(x + at.0, y + at.1)` for `p`'s pixel `(x, y)`; past `m`'s edges
-/// the mask is empty.
 /// The alpha of `small` scaled up `k` times (bilinear, pixel centres matching), as a `w` × `h`
 /// pixmap whose top-left lies `at` scaled-up pixels into it, with the alpha in every channel.
 /// One channel and two taps each way: a shadow cast from a small copy came back up at a few
 /// pixels per microsecond through the general resampler.
 pub fn upscale_alpha(small: &Pixmap, k: u32, at: (u32, u32), w: u32, h: u32) -> Option<Pixmap> {
     let mut out = Pixmap::new(w, h)?;
-    let (sw, sh) = (small.width() as usize, small.height() as usize);
-    if sw == 0 || sh == 0 || k == 0 {
-        return Some(out);
-    }
     let a: Vec<u8> = small.data().as_chunks::<4>().0.iter().map(|c| c[3]).collect();
+    let up = upscale_channel(&a, (small.width() as usize, small.height() as usize), k, at, (w as usize, h as usize));
+    for (px, v) in out.data_mut().as_chunks_mut::<4>().0.iter_mut().zip(up) {
+        *px = [v; 4];
+    }
+    Some(out)
+}
+
+/// `small` scaled up `k` times (bilinear, pixel centres matching) to `w` × `h`, each channel
+/// apart (see [`upscale_alpha`]): a premultiplied pixmap stays premultiplied.
+pub fn upscale(small: &Pixmap, k: u32, w: u32, h: u32) -> Option<Pixmap> {
+    let mut out = Pixmap::new(w, h)?;
+    let size = (small.width() as usize, small.height() as usize);
+    let chans: Vec<Vec<u8>> = (0..4)
+        .map(|c| {
+            let ch: Vec<u8> = small.data().as_chunks::<4>().0.iter().map(|p| p[c]).collect();
+            upscale_channel(&ch, size, k, (0, 0), (w as usize, h as usize))
+        })
+        .collect();
+    for (i, px) in out.data_mut().as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        for (c, v) in px.iter_mut().enumerate() {
+            *v = chans.get(c).and_then(|ch| ch.get(i)).copied().unwrap_or(0);
+        }
+    }
+    Some(out)
+}
+
+/// One channel `src` (`size` pixels) scaled up `k` times to `out` pixels, whose top-left lies `at`
+/// scaled-up pixels in. Each source row is scaled across once, as the output rows reach it.
+fn upscale_channel(src: &[u8], (sw, sh): (usize, usize), k: u32, at: (u32, u32), (w, h): (usize, usize)) -> Vec<u8> {
+    let mut out = vec![0u8; w * h];
+    if sw == 0 || sh == 0 || k == 0 {
+        return out;
+    }
     // For each output column or row: the two source ones and the second's weight (of 256).
-    let taps = |n: u32, off: u32, len: usize| -> Vec<(usize, usize, u32)> {
+    let taps = |n: usize, off: u32, len: usize| -> Vec<(usize, usize, u32)> {
         (0..n)
             .map(|i| {
-                let u = (f64::from(i + off) + 0.5) / f64::from(k) - 0.5;
+                let u = (i as f64 + f64::from(off) + 0.5) / f64::from(k) - 0.5;
                 let u0 = u.floor();
                 let f = ((u - u0) * 256.0).round() as u32;
                 let c = |v: f64| (v.max(0.0) as usize).min(len - 1);
@@ -255,15 +282,14 @@ pub fn upscale_alpha(small: &Pixmap, k: u32, at: (u32, u32), w: u32, h: u32) -> 
             .collect()
     };
     let (xs, ys) = (taps(w, at.0, sw), taps(h, at.1, sh));
-    // The source rows scaled across (×256), each once, as the output rows reach them.
     let mut rows: Vec<Option<Vec<u32>>> = vec![None; sh];
     let across = |y: usize, rows: &mut Vec<Option<Vec<u32>>>| {
         if rows.get(y).is_some_and(Option::is_none) {
-            let src = a.get(y * sw..(y + 1) * sw).unwrap_or(&[]);
+            let row = src.get(y * sw..(y + 1) * sw).unwrap_or(&[]);
             let v = xs
                 .iter()
                 .map(|&(x0, x1, f)| {
-                    let (p, q) = (u32::from(src.get(x0).copied().unwrap_or(0)), u32::from(src.get(x1).copied().unwrap_or(0)));
+                    let (p, q) = (u32::from(row.get(x0).copied().unwrap_or(0)), u32::from(row.get(x1).copied().unwrap_or(0)));
                     p * (256 - f) + q * f
                 })
                 .collect();
@@ -272,22 +298,46 @@ pub fn upscale_alpha(small: &Pixmap, k: u32, at: (u32, u32), w: u32, h: u32) -> 
             }
         }
     };
-    let wu = w as usize;
     for (oy, &(y0, y1, f)) in ys.iter().enumerate() {
         across(y0, &mut rows);
         across(y1, &mut rows);
         let (Some(Some(r0)), Some(Some(r1))) = (rows.get(y0), rows.get(y1)) else { continue };
-        let line = out.data_mut().get_mut(oy * wu * 4..(oy + 1) * wu * 4).unwrap_or(&mut []);
-        for ((px, p), q) in line.as_chunks_mut::<4>().0.iter_mut().zip(r0).zip(r1) {
-            let v = ((p * (256 - f) + q * f + 32_768) >> 16).min(255) as u8;
-            *px = [v; 4];
+        let line = out.get_mut(oy * w..(oy + 1) * w).unwrap_or(&mut []);
+        for ((v, p), q) in line.iter_mut().zip(r0).zip(r1) {
+            *v = ((p * (256 - f) + q * f + 32_768) >> 16).min(255) as u8;
         }
         // Rows above this one aren't read again.
         if let Some(done) = y0.checked_sub(1).and_then(|y| rows.get_mut(y)) {
             *done = None;
         }
     }
-    Some(out)
+    out
+}
+
+/// [`blur`], blurred from a copy halved down to an eighth of `sigma` (at most 64 times smaller)
+/// and scaled back up when `sigma` is 16 pixels or more: such a blur keeps no detail that copy
+/// doesn't, and costs the square of that less. Smaller blurs are exact.
+pub fn blur_reduced(p: &mut Pixmap, sigma: f64) {
+    if !(sigma.is_finite() && sigma >= 16.0) {
+        blur(p, sigma);
+        return;
+    }
+    let k = 1u32 << ((sigma / 8.0).min(64.0).log2().floor() as u32);
+    let mut small = None::<Pixmap>;
+    let mut f = 1;
+    while f < k {
+        let Some(h) = half(small.as_ref().unwrap_or(p)) else { break };
+        small = Some(h);
+        f *= 2;
+    }
+    let Some(mut small) = small else {
+        blur(p, sigma);
+        return;
+    };
+    blur(&mut small, sigma / f64::from(f));
+    if let Some(up) = upscale(&small, f, p.width(), p.height()) {
+        p.data_mut().copy_from_slice(up.data());
+    }
 }
 
 /// `p` at half its size (rounded up): each pixel the mean of the 2 × 2 it covers, with what lies
@@ -307,6 +357,8 @@ pub fn half(p: &Pixmap) -> Option<Pixmap> {
     Some(out)
 }
 
+/// [`mask_by`] with `m`'s pixel `(x + at.0, y + at.1)` for `p`'s pixel `(x, y)`; past `m`'s edges
+/// the mask is empty.
 pub fn mask_by_at(p: &mut Pixmap, m: &Pixmap, at: (i32, i32), invert: bool) {
     let (pw, mw, mh) = (p.width() as i64, i64::from(m.width()), i64::from(m.height()));
     for (i, px) in p.data_mut().as_chunks_mut::<4>().0.iter_mut().enumerate() {
@@ -448,6 +500,28 @@ mod tests {
         assert!(t.elapsed().as_secs_f64() < 3.0, "{:?}", t.elapsed());
         assert_eq!(p.pixel(600, 400).map(|c| c.alpha()), Some(255));
         assert_eq!(p.pixel(599, 399).map(|c| c.alpha()), Some(0));
+    }
+
+    #[test]
+    fn a_wide_blur_from_a_smaller_copy_matches_the_exact_one() {
+        // Hard-edged shapes in four colours: the worst case for a copy drawn smaller.
+        let mut src = Pixmap::new(300, 220).unwrap();
+        for (i, (x, y, w, h)) in
+            [(20.0, 30.0, 90.0, 60.0), (140.0, 20.0, 40.0, 170.0), (60.0, 120.0, 200.0, 30.0), (230.0, 60.0, 50.0, 50.0)].into_iter().enumerate()
+        {
+            let mut paint = tiny_skia::Paint::default();
+            paint.set_color_rgba8([255, 40, 0, 200][i], [0, 200, 90, 255][i], [30, 0, 255, 120][i], [255, 255, 180, 255][i]);
+            src.fill_rect(tiny_skia::Rect::from_xywh(x, y, w, h).unwrap(), &paint, tiny_skia::Transform::identity(), None);
+        }
+        for sigma in [16.0, 24.0, 40.0, 70.0] {
+            let (mut exact, mut fast) = (src.clone(), src.clone());
+            blur(&mut exact, sigma);
+            blur_reduced(&mut fast, sigma);
+            let d: Vec<u32> = exact.data().iter().zip(fast.data()).map(|(a, b)| u32::from(a.abs_diff(*b))).collect();
+            let mean = f64::from(d.iter().sum::<u32>()) / d.len() as f64;
+            let max = d.iter().copied().max().unwrap_or(0);
+            assert!(mean < 0.75 && max <= 4, "sigma {sigma}: mean {mean}, max {max}");
+        }
     }
 
     #[test]

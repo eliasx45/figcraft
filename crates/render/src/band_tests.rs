@@ -125,3 +125,21 @@ fn huge_backdrop_blur_renders_in_one_piece() {
     assert!(render_bands(&d, p, &view(1.0), &Options::default(), 4).is_none());
     assert!(render_view(&d, p, &view(1.0), &Options::default()).is_some());
 }
+
+#[test]
+fn a_wide_backdrop_blur_out_of_view_leaves_the_bands_apart() {
+    // A huge blur far down the page used to make every view render in one piece.
+    let (mut d, p) = scene(true, true);
+    let far = d.create(p, NodeKind::Rectangle, "Far glass", 0.0, 50_000.0, 300.0, 300.0).unwrap();
+    d.get_mut(far).unwrap().effects = vec![Effect { kind: EffectKind::BackgroundBlur(figcraft_doc::Blur::uniform(200.0)), visible: true }];
+    let v = view(2.0);
+    assert_eq!(backdrop_blur_near(&d, p, &v), 12.0);
+    let one = render_view_single(&d, p, &v, &Options::default()).unwrap();
+    let banded = render_bands(&d, p, &v, &Options::default(), 7).unwrap();
+    for (y, (mean, off)) in row_diffs(&one, &banded).into_iter().enumerate() {
+        assert!(mean < 0.25 && off * 20 <= v.width as usize, "row {y} differs ({off} pixels, {mean:.2} on average)");
+    }
+    // Scrolled down to it, its blur counts again.
+    let there = View { origin: (0.0, 50_000.0), ..v };
+    assert_eq!(backdrop_blur_near(&d, p, &there), 200.0);
+}

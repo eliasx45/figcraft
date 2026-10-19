@@ -23,7 +23,7 @@ pub fn apply(p: &mut Pixmap, b: &Blur, size: (f64, f64), xf: Affine, scale: f64)
     let b = b.sanitized();
     let sigma = |r: f64| r / 2.0 * scale;
     if !b.is_progressive() {
-        fx::blur(p, sigma(b.radius));
+        fx::blur_reduced(p, sigma(b.radius));
         return;
     }
     let at = |u: (f64, f64)| xf * Point::new(u.0 * size.0, u.1 * size.1);

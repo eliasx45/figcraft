@@ -310,9 +310,14 @@ No alpha blockers: the alpha gate in [`roadmap.md`](roadmap.md#alpha-gate) passe
   2048-pixel cells for very large layers, drawn and cast on threads of their own), so the canvas's
   bands, its tiles and pans share them: on the same page a scroll's render went 2.6 s → 1.95 s and
   1.7 s → 0.9 s; the first render at a new zoom only ~10 % (3.5 s → 3.1 s: the cells' copies of such
-  large layers are most of it). Next symptom → fix: still seconds right after a zoom on such a page →
-  the background blurs (about a quarter of what is left) and the large layers' content, then GPU
-  shaders (10–20 h).
+  large layers are most of it). Background and layer blurs of 16+ device pixels are blurred from a
+  copy halved down to σ/8 and scaled back up (at most 2/255 off the exact blur on that page), and
+  the canvas's bands overlap by the widest background blur reaching the view, not the document's
+  (a frame with a wide blur elsewhere made every view render on one thread): the sharp render
+  after a zoom onto chat screenshots under a blurred frame went 2.6 s → 0.6 s at 100 %, 3.0 s →
+  1.5 s at 200 %, 2.6 s → 0.95 s half off a frame. Next symptom → fix: still ~1.5 s zoomed in on
+  large screenshots → drawing the large images (two 2300×4200 screenshots are most of what is
+  left; each band samples them at full size), then GPU shaders (10–20 h).
 
 ### 8. Platform QA: Linux and the browser left
 - **Missing:** regular runs on Linux and the browser; real screen readers; a repeat of the Windows
@@ -511,6 +516,7 @@ No alpha blockers: the alpha gate in [`roadmap.md`](roadmap.md#alpha-gate) passe
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-19 | patch | Gap 7: background and layer blurs of 16+ device pixels are blurred from a smaller copy (at most 2/255 off), and the canvas's bands overlap by the blurs reaching the view only. The owner's page, the sharp render after a zoom: 2.6 → 0.6 s at 100 %, 3.0 → 1.5 s at 200 %. Ranks and hours unchanged |
 | 2026-10-19 | patch | Gap 7: soft drop shadows are kept between renders at one zoom (per layer, or per 2048-pixel cell of a very large one), shared by the canvas's bands, tiles and pans; an entry is dropped when anything below the layer changes. The owner's page: a scroll's render 2.6 → 1.95 s and 1.7 → 0.9 s, the first at a new zoom 3.5 → 3.1 s. Ranks and hours unchanged |
 | 2026-10-19 | patch | Gap 7: large drop shadows on the CPU: blurred by 16+ device pixels they are cast from a copy drawn up to 64× smaller, and the layer no longer reaches as far as they do; spread is linear in the layer's pixels. The owner's page zoomed in: 87 s → 3.6 s. Ranks and hours unchanged |
 | 2026-10-19 | minor | Gap 7: the desktop app's GPU canvas is on by default (gap 7): Preferences ▸ Draw the canvas on the GPU (`pref.gpuCanvas`, from the next start) turns it off, `FIGCRAFT_GPU_TILES=0` or `=1` overrides it for one run; the CPU still paints effects, masks, pattern fills and anything the device can't run. Ranks and hours unchanged |
