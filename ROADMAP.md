@@ -49,7 +49,7 @@ FigCraft opens `.fig` files only best effort, has only a preview of multiplayer,
 against real Figma documents. Ready-for-real-work is ~53%, inside alpha's ~40–75% band, and the alpha gate passes: every daily core workflow (design screens, build a design system, prototype, hand off to developers) works end to end on FigCraft's own files, which save and reopen; review works only asynchronously and `.fig` import is unproven on real files, both beta gaps ([alpha gate](docs/roadmap.md#alpha-gate)). Beta needs
 ~75% **and** reliable `.fig` import: the `.fig` import's tail (5–10 h), a real-file corpus with measured
 fidelity (15–30 h), the interaction pass (25–40 h of the 40–60), core depth to ~80% (40–75 h),
-basic multiplayer on the landed core (30–55 h), stability and platform QA (20–40 h), a partial GPU path (4–12 h: the tile cache and an opt-in GPU canvas landed; checking it on macOS and the browser and turning it on by default are left);
+basic multiplayer on the landed core (30–55 h), stability and platform QA (20–40 h), a partial GPU path (4–12 h: the tile cache and an opt-in GPU canvas landed; checked on Windows and macOS; the browser, caching the scene encoding and turning it on by default are left);
 native speakers' reviews of the six language drafts need people.
 
 ## By dimension
