@@ -46,9 +46,9 @@ supported by both apps (CJK, Arabic and Devanagari shaping, IME); Figma has no v
   overlay, then the base language, then English.
 - **Check:** `cargo test -p figcraft-ui-egui i18n` fails on keys the code uses that `en.toml`
   lacks, keys no code uses, unknown command ids, placeholders that differ from English, overlay
-  entries that read as in their base language and, for complete languages (Spanish), anything
-  untranslated. The other catalogs are not held to it: a string added later shows English there
-  until someone translates it. Every draft translated every string on 2026-10-12; by 2026-10-17
+  entries that read as in their base language and, for languages listed in `COMPLETE`, anything
+  untranslated. None is listed since 2026-10-19 (Spanish was): a string added later shows English
+  in every draft until someone translates it. Every draft translated every string on 2026-10-12; by 2026-10-17
   the strings added since left them at 95–99% (table below).
 - **Not yet localized:** messages the engine writes (errors, a few toasts, Dev Mode property values
   such as "inside"), number formatting (decimal points stay `.`), and decimal plural rules
@@ -85,6 +85,7 @@ supported by both apps (CJK, Arabic and Devanagari shaping, IME); Figma has no v
 
 | Language | Code | UI strings translated | Dialogs / tooltips / help | Script support | Native review | Status | Hours to full |
 |---|---|---|---|---|---|---|---|
+| 2026-10-19 | patch | Spanish no longer held complete by the catalog check (`COMPLETE` is empty), so new commands don't fail the build; the Spanish catalog still translates everything today. Grade and hours unchanged |
 | English | en | 2,272 / 2,272 (100%, source) | yes | Latin | yes (source) | full | 0 |
 | Simplified Chinese (Mandarin) | zh-Hans | 2,166 / 2,272 (95.3%, draft) | yes | CJK text and IME in documents; UI text in an installed Chinese face, ahead of Japanese ones (web: the `FIGCRAFT_EMBED_CJK` build); no Traditional Chinese catalog (zh-TW, zh-HK read English) | no | draft | 1–2 (after native review) |
 | Spanish | es, es-419 | 2,272 / 2,272 (100%, draft); es-419 overlays 101 Latin American wordings (draft) | yes | Latin | no | draft | 0–1 (after native review) |
