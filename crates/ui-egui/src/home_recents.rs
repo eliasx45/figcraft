@@ -554,16 +554,27 @@ enum Action {
     View(View),
 }
 
-/// The Recent files heading, its toolbar and the files as cards or a table.
-pub fn section(app: &mut FigApp, ui: &mut Ui, t: &Tokens) {
-    let paths: Vec<String> = listed(&app.session.prefs.recent_files).take(SHOWN).cloned().collect();
+/// The Recent files heading, its toolbar and the files as cards or a table. With a `query` (lower
+/// case, from the Home search) only the files not open whose path has it, from every recent file;
+/// nothing at all when none has it. How many files are shown.
+pub fn section(app: &mut FigApp, ui: &mut Ui, t: &Tokens, query: &str) -> usize {
+    let searching = !query.is_empty();
+    // A search reaches every recent file; the files shown without one stay known through it.
+    let paths: Vec<String> = listed(&app.session.prefs.recent_files).take(if searching { usize::MAX } else { SHOWN }).cloned().collect();
     let time = ui.input(|i| i.time);
     let now = figcraft_engine::cmd::comment::now_secs();
     let reduce_motion = app.reduce_motion();
     let (view, sort) = (View::of(&app.session.prefs), Sort::of(&app.session.prefs));
     let state = &mut app.ui.home_view.recents;
     state.refresh(ui.ctx(), &paths, time);
-    let files = sorted(state.shown(&paths), sort);
+    let mut files = sorted(state.shown(&paths), sort);
+    if searching {
+        let docs = &app.session.docs;
+        files.retain(|f| f.path.to_lowercase().contains(query) && !docs.iter().any(|d| d.path.as_deref() == Some(f.path.as_str())));
+        if files.is_empty() {
+            return 0;
+        }
+    }
     let with_created = files.iter().any(|f| f.stat.is_some_and(|s| s.created.is_some()));
     let mut action = toolbar(ui, t, view, sort, with_created);
     ui.add_space(16.0);
@@ -593,6 +604,7 @@ pub fn section(app: &mut FigApp, ui: &mut Ui, t: &Tokens) {
         }
         None => {}
     }
+    files.len()
 }
 
 /// "Recent files", and at the right the sort menu and the grid and list buttons.
@@ -726,8 +738,8 @@ fn file_icon(ui: &Ui, t: &Tokens, center: egui::Pos2, path: &str) {
     let r = Rect::from_center_size(center, vec2(16.0, 16.0));
     match FileKind::of(Path::new(path)) {
         FileKind::FigCraft | FileKind::Fig => {
-            ui.painter().rect_filled(r, CornerRadius::same(4), ACCENT);
-            icons::paint(ui.painter(), r.shrink(3.0), Icon::Logo, Color32::WHITE);
+            ui.painter().rect_filled(r, CornerRadius::same(4), t.accent);
+            icons::paint(ui.painter(), r.shrink(3.0), Icon::Logo, t.accent_on);
         }
         kind => {
             ui.painter().rect_filled(r, CornerRadius::same(4), t.field);

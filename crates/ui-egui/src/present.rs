@@ -1788,8 +1788,7 @@ fn navigation_bar(p: &mut Presenter, ctx: &egui::Context, now: f64) -> Option<St
                     let scale_menu = ui.menu_button(format!("{}    ", tr(p.view.scale.label(settings.device().is_some()))), |ui| {
                         navigation_menu(ui, |ui| {
                             for scale in PresentScale::options(settings.device().is_some()) {
-                                let label = egui::RichText::new(tr(scale.label(settings.device().is_some()))).color(t.menu_text);
-                                if ui.selectable_label(p.view.scale == *scale, label).clicked() {
+                                if ui.selectable_label(p.view.scale == *scale, tr(scale.label(settings.device().is_some()))).clicked() {
                                     p.set_scale(*scale);
                                     ui.close();
                                 }
@@ -1812,15 +1811,8 @@ fn paint_menu_chevron(painter: &egui::Painter, button: Rect, color: Color32) {
 }
 
 fn navigation_menu(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
-    let t = Tokens::get(ui.ctx());
-    ui.visuals_mut().override_text_color = Some(t.menu_text);
-    egui::Frame::NONE.fill(t.menu).stroke(Stroke::new(1.0, t.border)).corner_radius(CornerRadius::same(7)).inner_margin(egui::Margin::same(6)).show(
-        ui,
-        |ui| {
-            ui.set_min_width(212.0);
-            add(ui);
-        },
-    );
+    ui.set_min_width(212.0);
+    add(ui);
 }
 
 /// How often the player polls the controllers while its prototype has gamepad triggers (seconds).
@@ -2231,7 +2223,7 @@ fn top_bar(p: &mut Presenter, ui: &mut Ui, bar: Rect, now: f64, chrome: Chrome) 
         }
         let on = (*act == BarAction::Comments && p.view.comments) || (*act == BarAction::Inspect && p.view.inspect);
         if on {
-            ui.painter().rect_filled(br, CornerRadius::same(5), ACCENT);
+            ui.painter().rect_filled(br, CornerRadius::same(5), t.accent);
         } else if resp.hovered() {
             ui.painter().rect_filled(br, CornerRadius::same(5), hover);
         }
@@ -2242,9 +2234,9 @@ fn top_bar(p: &mut Presenter, ui: &mut Ui, bar: Rect, now: f64, chrome: Chrome) 
             resp = resp.tip(tr("Inspect the layer under the pointer: size, colours, typography"));
         }
         if chrome.pane {
-            icons::paint(ui.painter(), br.shrink(5.0), *icon, t.icon);
+            icons::paint(ui.painter(), br.shrink(5.0), *icon, if on { t.accent_on } else { t.icon });
         } else {
-            ui.painter().text(br.center(), Align2::CENTER_CENTER, shown, regular(11.5), text);
+            ui.painter().text(br.center(), Align2::CENTER_CENTER, shown, regular(11.5), if on { t.accent_on } else { text });
         }
         if *act == BarAction::Options {
             let menu = crate::right::menu_popup(&resp).width(220.0).show(|ui| options_menu(p, ui, device, settings.responsive, now));

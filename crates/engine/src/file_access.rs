@@ -62,7 +62,7 @@ impl Roots {
             Ok(resolved) if roots.iter().any(|r| resolved.starts_with(r)) => return Ok(resolved),
             Ok(_) => {}
             // Why a path can't be resolved says what exists there: only told for paths inside a root.
-            Err(why) if lexically_inside(path, &roots) => return Err(format!("automation path rejected: {asked}: {why}")),
+            Err(why) if inside_as_far_as_it_exists(path, &roots) => return Err(format!("automation path rejected: {asked}: {why}")),
             Err(_) => {}
         }
         if roots.is_empty() {
@@ -79,11 +79,10 @@ impl Roots {
     }
 }
 
-/// Whether `path`, made absolute with its `.` and `..` taken by name, lies in one of `roots` (as
-/// resolved, or as shown without Windows' `\\?\` prefix). Its nearest existing folder is resolved
-/// too, so a path spelled through a link above the roots (macOS's `/var` for `/private/var`)
-/// counts; the part below that folder, the link that can't be resolved, is taken by name.
-fn lexically_inside(path: &Path, roots: &[PathBuf]) -> bool {
+/// Whether `path` lies in one of `roots` once made absolute with its `.` and `..` taken by name and
+/// its longest leading part that exists resolved, so links on the way are followed as the roots'
+/// were (`/tmp/work/x` is inside root `/private/tmp/work`, a link out of a root leads out of it).
+fn inside_as_far_as_it_exists(path: &Path, roots: &[PathBuf]) -> bool {
     let Ok(abs) = std::path::absolute(path) else { return false };
     let mut lexical = PathBuf::new();
     for c in abs.components() {
@@ -95,20 +94,18 @@ fn lexically_inside(path: &Path, roots: &[PathBuf]) -> bool {
             c => lexical.push(c),
         }
     }
-    let mut base = lexical.as_path();
-    let mut rest = Vec::new();
+    let mut rest: Vec<&OsStr> = Vec::new();
+    let mut at = lexical.as_path();
     let resolved = loop {
-        let Some(parent) = base.parent() else { break None };
-        if let Some(name) = base.file_name() {
-            rest.push(name);
+        if let Ok(mut base) = std::fs::canonicalize(at) {
+            base.extend(rest.iter().rev());
+            break base;
         }
-        base = parent;
-        if let Ok(mut b) = std::fs::canonicalize(base) {
-            b.extend(rest.iter().rev());
-            break Some(b);
-        }
+        let (Some(name), Some(parent)) = (at.file_name(), at.parent()) else { return false };
+        rest.push(name);
+        at = parent;
     };
-    roots.iter().any(|r| [Some(&lexical), resolved.as_ref()].into_iter().flatten().any(|p| p.starts_with(r) || p.starts_with(shown(r))))
+    roots.iter().any(|r| resolved.starts_with(r))
 }
 
 /// Whether `path` lies in the app's own folder `folder`, both resolved (links and `..` followed);

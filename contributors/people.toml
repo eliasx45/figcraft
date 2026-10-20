@@ -37,6 +37,11 @@ real_name = "Justin John"
 
 [people.Losminek]
 
+[people.alrifatsabbir]
+real_name = "Al Rifat Sabbir"
+display_name = "Al Rifat Sabbir"
+sync_github_name = true
+
 [people.RevDonz]
 
 [people.Nael-Nathanael]
@@ -57,3 +62,11 @@ sync_github_name = true
 [people.hakifx]
 display_name = "Elias"
 consent_source = "Explicit owner request in the FigCraft contribution PR chat, 2026-10-15: Use Elias."
+[people.pechnikov2026-star]
+sync_github_name = true
+
+[people.MortenHusted]
+sync_github_name = true
+
+[people.AganzeFelicite]
+sync_github_name = true
