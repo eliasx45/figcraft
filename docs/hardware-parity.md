@@ -50,6 +50,7 @@ Nothing has been timed against Figma on the same document (needs `.fig` import).
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-20 | patch | Effects row: nested effects on large layers stay on the GPU canvas (textures cover what the scene needs, nested layers with effects drawn into one texture). The owner's page at 51 %: 28 tiles 20.6 s on the CPU → 0.26 s on the GPU. Hours unchanged |
 | 2026-10-20 | patch | Canvas rendering row: images no longer go missing on the GPU canvas zoomed out (vello's 8192² image atlas left out what didn't fit): renders leave out the images they don't show, effect textures are drawn in pieces, and what still can't fit paints on the CPU. Hours unchanged |
 | 2026-10-19 | patch | Effects row: drop shadows, inner shadows, layer and background blurs, noise and masks drawn by the GPU canvas (compute passes, kept per zoom level). The owner's page on an RTX 4060 laptop: the sharp image after a zoom 0.9–1.8 s → 0.1–0.5 s, zoom steps within a level 4–8 ms. Hours unchanged |
 | 2026-10-19 | patch | Effects row: background and layer blurs of 16+ device pixels are blurred from a copy halved down to σ/8 (at most 2/255 off the exact blur), and the canvas's bands overlap only by the blurs reaching the view. The owner's page after a zoom: 2.6 → 0.6 s at 100 %, 3.0 → 1.5 s at 200 %. Hours unchanged |

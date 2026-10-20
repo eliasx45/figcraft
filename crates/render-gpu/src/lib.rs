@@ -85,45 +85,66 @@ impl Atlas {
         let mut next = self.mirror.clone();
         next.resolve(&[]);
         next.resolve(&[]);
-        let mut strip = None;
+        let mut prime = Vec::new();
         if !next.resolve_copy(&images) {
             // Evicted only once one doesn't fit, those images left gaps the scene's don't fit
-            // between: a third with a strip as wide as the atlas (which doesn't fit then) evicts
-            // them all first, and the scene's images go into an atlas holding only the strip.
-            for h in [1, 64, 1024] {
-                let im = scene::placeholder(ATLAS_SIDE as u32, h, true);
-                let mut m = next.clone();
-                m.resolve(&[(im.data.id(), ATLAS_SIDE, h as i32)]);
-                if m.map.len() == 1 {
-                    if m.resolve_copy(&images) {
-                        next = m;
-                        strip = Some(im);
-                    }
-                    break;
+            // between: a third render places the scene's images first (the first that finds no
+            // room evicts the others), in an order they pack in, and the scene finds them placed.
+            // A strip as wide or as tall as the atlas first, which finds no room, makes sure the
+            // eviction comes before any of them.
+            let mut distinct: Vec<vello::peniko::ImageData> = Vec::new();
+            let mut seen = HashSet::new();
+            for p in patches {
+                if let vello::low_level::vello_encoding::Patch::Image { image, .. } = p
+                    && seen.insert(image.data.id())
+                {
+                    distinct.push(image.clone());
                 }
             }
-            if strip.is_none() {
+            let area = |im: &vello::peniko::ImageData| u64::from(im.width) * u64::from(im.height);
+            let mut orders = vec![distinct.clone()];
+            for key in [area, |im: &vello::peniko::ImageData| u64::from(im.height), |im: &vello::peniko::ImageData| u64::from(im.width)] {
+                let mut o = distinct.clone();
+                o.sort_by_key(|im| (std::cmp::Reverse(key(im)), std::cmp::Reverse(area(im))));
+                orders.push(o);
+            }
+            let side = next.atlas.size().width as u32;
+            let strips = [None, Some((side, 1)), Some((1, side)), Some((side, 64)), Some((64, side))];
+            'found: for strip in strips {
+                for order in &orders {
+                    let first: Vec<vello::peniko::ImageData> =
+                        strip.map(|(w, h)| scene::placeholder(w, h, true)).into_iter().chain(order.iter().cloned()).collect();
+                    let mut m = next.clone();
+                    m.resolve(&scene_images_of(&first));
+                    if m.resolve_copy(&images) {
+                        next = m;
+                        prime = first;
+                        break 'found;
+                    }
+                }
+            }
+            if prime.is_empty() {
                 return Err(ATLAS_FULL);
             }
         }
         next.resolve(&images);
         // vello resolves a scene's images before anything can fail: the atlas moves on either way.
         self.mirror = next;
-        self.idle(renderer, device, queue, None)?;
-        self.idle(renderer, device, queue, None)?;
-        if let Some(im) = strip {
-            self.idle(renderer, device, queue, Some(im))?;
+        self.idle(renderer, device, queue, &[])?;
+        self.idle(renderer, device, queue, &[])?;
+        if !prime.is_empty() {
+            self.idle(renderer, device, queue, &prime)?;
         }
         Ok(())
     }
 
-    /// A render of nothing (or of `image`, drawn nowhere) into a pixel of its own.
+    /// A render of nothing but `images` (in that order) into a pixel of its own.
     fn idle(
         &mut self,
         renderer: &mut Renderer,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        image: Option<vello::peniko::ImageData>,
+        images: &[vello::peniko::ImageData],
     ) -> Result<(), Fallback> {
         let view = self.idle.get_or_insert_with(|| {
             device
@@ -141,8 +162,8 @@ impl Atlas {
         });
         let mut sc = Scene::new();
         keep_atlas(&mut sc);
-        if let Some(image) = image {
-            let brush = vello::peniko::ImageBrush { image, sampler: vello::peniko::ImageSampler::default() };
+        for image in images {
+            let brush = vello::peniko::ImageBrush { image: image.clone(), sampler: vello::peniko::ImageSampler::default() };
             sc.fill(vello::peniko::Fill::NonZero, vello::kurbo::Affine::IDENTITY, &brush, None, &vello::kurbo::Rect::new(0.0, 0.0, 1.0, 1.0));
         }
         let params = RenderParams { base_color: vello::peniko::Color::TRANSPARENT, width: 1, height: 1, antialiasing_method: AaConfig::Area };
@@ -155,17 +176,23 @@ impl Atlas {
 
 /// `scene`'s images in the order vello places them: blob, width, height.
 fn scene_images(scene: &Scene) -> Vec<(u64, i32, i32)> {
-    let side = |v: u32| i32::try_from(v).unwrap_or(i32::MAX);
-    scene
+    let images: Vec<vello::peniko::ImageData> = scene
         .encoding()
         .resources
         .patches
         .iter()
         .filter_map(|p| match p {
-            vello::low_level::vello_encoding::Patch::Image { image, .. } => Some((image.data.id(), side(image.width), side(image.height))),
+            vello::low_level::vello_encoding::Patch::Image { image, .. } => Some(image.clone()),
             _ => None,
         })
-        .collect()
+        .collect();
+    scene_images_of(&images)
+}
+
+/// Blob, width and height of `images`.
+fn scene_images_of(images: &[vello::peniko::ImageData]) -> Vec<(u64, i32, i32)> {
+    let side = |v: u32| i32::try_from(v).unwrap_or(i32::MAX);
+    images.iter().map(|im| (im.data.id(), side(im.width), side(im.height))).collect()
 }
 
 /// What vello's atlas holds, kept by the same rules on the same allocator (vello_encoding 0.11's
@@ -347,11 +374,11 @@ impl Gpu {
     ) -> Result<(), Fallback> {
         let Some(pipes) = &self.fx else { return Err("GPU effects unavailable") };
         let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        // Each source drawn once per factor.
-        let mut sources: Vec<((effects::Source, u32), wgpu::Texture)> = Vec::new();
+        // Each source drawn once per factor and area.
+        let mut sources: Vec<((effects::Source, u32, Rect), wgpu::Texture)> = Vec::new();
         let mut made = Vec::with_capacity(fx.passes.len());
         for p in &fx.passes {
-            let key = (p.source, p.k);
+            let key = (p.source, p.k, p.region);
             let shared = sources.iter().find(|(k, _)| *k == key).filter(|_| p.shape.is_none());
             let src = match shared {
                 _ if matches!(p.kind, effects::Kind::Noise(_)) => None,
@@ -370,12 +397,16 @@ impl Gpu {
                         sample_count: 1,
                         dimension: wgpu::TextureDimension::D2,
                         format: wgpu::TextureFormat::Rgba8Unorm,
-                        usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                        usage: wgpu::TextureUsages::STORAGE_BINDING
+                            | wgpu::TextureUsages::TEXTURE_BINDING
+                            | wgpu::TextureUsages::COPY_DST
+                            // A flat pass's texture is the source (vello copies it into its atlas).
+                            | wgpu::TextureUsages::COPY_SRC,
                         view_formats: &[],
                     });
                     let under = vello::peniko::Color::new([under.r, under.g, under.b, under.a]);
                     let to = Dest { texture: &t, width, height, base: under };
-                    pieces(&mut self.renderer, &self.device, &self.queue, &mut self.atlas, scene, fx.to_texture(p.k), drawn, &to)?;
+                    pieces(&mut self.renderer, &self.device, &self.queue, &mut self.atlas, scene, p.to_texture(fx.scale), drawn, &to)?;
                     if p.shape.is_none() {
                         sources.push((key, t.clone()));
                     }
@@ -863,10 +894,14 @@ impl GpuTilePainter {
     /// so none is built then; why is returned.
     fn build_over(&mut self, shown: &[Rect], whole: bool) -> Option<Fallback> {
         let first = shown.first()?;
-        let mut rects = shown.to_vec();
         let all = shown.iter().fold(*first, |a, r| a.union(*r));
         // Images within half a view of what is shown are drawn too, so a pan doesn't build again.
-        let area = all.inflate(all.width() / 2.0, all.height() / 2.0);
+        self.build_in(shown, whole, all.inflate(all.width() / 2.0, all.height() / 2.0))
+    }
+
+    /// [`Self::build_over`], drawing images and large layers' effects within `area`.
+    fn build_in(&mut self, shown: &[Rect], whole: bool, area: Rect) -> Option<Fallback> {
+        let mut rects = shown.to_vec();
         let inside = |c: &Rect, r: &Rect| c.x0 <= r.x0 && c.y0 <= r.y0 && c.x1 >= r.x1 && c.y1 >= r.y1;
         // A layer built for a backdrop can hold another background blur (a few rounds at most).
         for _ in 0..4 {
@@ -1161,10 +1196,22 @@ impl GpuTilePainter {
         let rows = (keys.iter().map(|k| k.y).max()? - y0 + 1).clamp(1, BLOCK) as u32;
         let first = TileKey { level, x: x0, y: y0 }.view();
         let view = View { width: cols * TILE_PX, height: rows * TILE_PX, ..first };
-        self.build_over(&[view.page_rect()], false);
-        if let Err(why) = self.prepare(&view.page_rect(), base) {
-            self.last_fallback = Some(why);
-            return None;
+        let rect = view.page_rect();
+        self.build_over(&[rect], false);
+        match self.prepare(&rect, base) {
+            // Built for many tiles at once, the textures of large layers with effects over this
+            // block can be more than vello's atlas holds together: built again for it alone.
+            Err(ATLAS_FULL) if self.narrow(&rect) => {
+                if let Err(why) = self.prepare(&rect, base) {
+                    self.last_fallback = Some(why);
+                    return None;
+                }
+            }
+            Err(why) => {
+                self.last_fallback = Some(why);
+                return None;
+            }
+            Ok(()) => {}
         }
         let t = std::time::Instant::now();
         self.compose(&view);
@@ -1188,6 +1235,28 @@ impl GpuTilePainter {
         let at = |k: &TileKey| ((k.y - y0) as usize) * cols as usize + (k.x - x0) as usize;
         let mut tiles: Vec<Option<Painted>> = tiles.into_iter().map(Some).collect();
         Some(keys.iter().filter_map(|k| Some((*k, tiles.get_mut(at(k))?.take()?))).collect())
+    }
+
+    /// Build the top-level layers with effects over `rect` again for it alone (their effects'
+    /// textures covering only it and what they reach); whether there were any.
+    fn narrow(&mut self, rect: &Rect) -> bool {
+        let Some(k) = self.kept.as_mut() else { return false };
+        let mut any = false;
+        for (_, slot) in &mut k.parts {
+            if let Slot::Built(p) = slot
+                && let Ok(b) = p.as_ref()
+                && !b.fx.is_empty()
+                && b.at.is_none_or(|r| overlaps(&r, rect))
+            {
+                *slot = Slot::Pending(b.at);
+                any = true;
+            }
+        }
+        if any {
+            let m = rect.width().min(rect.height()) / 8.0;
+            self.build_in(&[*rect], false, rect.inflate(m, m));
+        }
+        any
     }
 
     /// [`TilePainter::paint_view`] on the scene in `self.kept`.

@@ -499,3 +499,38 @@ fn images_too_many_for_the_atlas_paint_on_the_cpu() {
     assert_eq!(colour_at(&out, 700, 700), COLOURS[7]);
     assert_eq!(gp.counts.cpu, 1, "painted on the GPU, without some of its images");
 }
+
+#[test]
+#[ignore = "needs a GPU adapter"]
+fn nested_effects_on_a_large_frame_stay_on_the_gpu() {
+    // A 4000-unit frame with a drop shadow holding three frames as large with shadows and blurs:
+    // textures covering each whole layer stacked ~90 megapixels on every spot (vello's atlas
+    // holds 67), so its tiles went to the CPU. Covering what is shown, they fit; a tile far from
+    // the first builds the scene again there.
+    let Ok(gpu) = Gpu::new() else { return };
+    let mut gp = GpuTilePainter::new(gpu);
+    let (mut d, p) = new_doc();
+    let outer = d.create(p, NodeKind::Frame, "Section", 0.0, 0.0, 4000.0, 3000.0).unwrap();
+    d.get_mut(outer).unwrap().fills = vec![Paint::solid(Color::from_hex("F4F0E8").unwrap())];
+    d.get_mut(outer).unwrap().effects.push(shadow(6.0, (0.0, 4.0), 0.0, false));
+    for (i, c) in ["3060C0", "C04030", "30A060"].iter().enumerate() {
+        let o = 40.0 + i as f64 * 30.0;
+        let f = d.create(outer, NodeKind::Frame, "Card", o, o, 3800.0, 2800.0).unwrap();
+        let n = d.get_mut(f).unwrap();
+        n.fills = vec![Paint::solid(Color::from_hex(c).unwrap().with_alpha(0.5))];
+        n.effects.push(shadow(8.0, (3.0, 3.0), 2.0, false));
+        n.effects.push(layer_blur(4.0));
+        rect(&mut d, f, 100.0 + i as f64 * 400.0, 300.0, 600.0, 1800.0, "202020");
+    }
+    let doc = Arc::new(d);
+    let opts = Options::default();
+    for key in [TileKey { level: 0, x: 1, y: 1 }, TileKey { level: 0, x: 6, y: 4 }, TileKey { level: 0, x: 7, y: 5 }] {
+        let out = gp.paint(&doc, p, &[key], &opts, &|| false);
+        assert_eq!(gp.counts.cpu, 0, "tile {key:?}: {:?}", gp.last_fallback);
+        let g = pixels(out.into_iter().next().and_then(|(_, t)| t), &doc, p);
+        let cpu = CpuTilePainter.paint(&doc, p, &[key], &opts, &|| false);
+        let cpu = pixels(cpu.into_iter().next().and_then(|(_, t)| t), &doc, p);
+        let (mean, max, off) = diff(&cpu, &g);
+        assert!(mean < 2.0 && off < 0.05, "tile {key:?}: mean {mean:.3}, max {max}, {:.2}% off", off * 100.0);
+    }
+}

@@ -189,23 +189,43 @@ struct OverFill<'a> {
     rule: FillRule,
     /// Local → page.
     xf: Affine,
-    region: Rect,
     scale: f64,
 }
 
 impl OverFill<'_> {
     fn draw(&self, sc: &mut Scene) {
-        let (brush, bxf) = fx_brush(self.region, self.scale, self.pass);
+        let (brush, bxf) = fx_brush(self.scale, self.pass);
         sc.push_layer(fill_rule(self.rule), Mix::Normal, 1.0, self.xf, self.path);
-        sc.fill(Fill::NonZero, Affine::IDENTITY, &brush, Some(bxf), &self.region);
+        sc.fill(Fill::NonZero, Affine::IDENTITY, &brush, Some(bxf), &self.pass.region);
         sc.pop_layer();
     }
 }
 
-/// The page area a pass's image covers and the brush that draws it there (image pixels → page).
-fn fx_brush(fx_region: Rect, scale: f64, p: &Pass) -> (peniko::Brush, Affine) {
+/// Device pixels of a layer's textures past which they cover only what a build needs.
+const CROP_PX: f64 = 1024.0 * 1024.0;
+
+/// How far (page units) a layer's effects reach: what its textures need around what they show.
+fn reach(shadows: &[&Shadow], inners: &[&Shadow], layer_var: f64, back: Option<f64>, scale: f64) -> f64 {
+    let finite = |v: f64| if v.is_finite() { v.abs() } else { 0.0 };
+    let mut sigma = layer_var.max(0.0).sqrt();
+    let mut reach = 3.0 * sigma;
+    for s in shadows.iter().chain(inners) {
+        let sg = ((finite(s.radius) / 2.0).powi(2) + layer_var.max(0.0)).sqrt();
+        sigma = sigma.max(sg);
+        reach = reach.max(3.0 * sg + finite(s.spread) + finite(s.offset.0).max(finite(s.offset.1)));
+    }
+    if let Some(b) = back {
+        sigma = sigma.max(finite(b));
+        reach = reach.max(3.0 * finite(b));
+    }
+    // A texture drawn smaller is off by up to two of its pixels at an edge.
+    reach + (2.0 * f64::from(effects::factor(sigma * scale)) + 2.0) / scale
+}
+
+/// The brush that draws a pass's image over its page area (image pixels → page).
+fn fx_brush(scale: f64, p: &Pass) -> (peniko::Brush, Affine) {
     let sampler = ImageSampler { x_extend: Extend::Pad, y_extend: Extend::Pad, quality: ImageQuality::Medium, alpha: 1.0 };
-    let xf = Affine::translate((fx_region.x0, fx_region.y0)) * Affine::scale(f64::from(p.k.max(1)) / scale);
+    let xf = Affine::translate((p.region.x0, p.region.y0)) * Affine::scale(f64::from(p.k.max(1)) / scale);
     (peniko::Brush::Image(ImageBrush { image: p.image.clone(), sampler }), xf)
 }
 
@@ -346,21 +366,49 @@ impl Builder<'_> {
         // Everything the node and its effects paint, in page units, out to whole pixels (grains
         // land on the pixels the CPU draws them on).
         let Some(r) = figcraft_render::paint_bounds(doc, n.id).map(|r| r.inflate(1.0, 1.0)) else { return Ok(()) };
-        let region =
-            Rect::new((r.x0 * scale).floor() / scale, (r.y0 * scale).floor() / scale, (r.x1 * scale).ceil() / scale, (r.y1 * scale).ceil() / scale);
+        let snap = |r: Rect| {
+            Rect::new((r.x0 * scale).floor() / scale, (r.y0 * scale).floor() / scale, (r.x1 * scale).ceil() / scale, (r.y1 * scale).ceil() / scale)
+        };
+        let full = snap(r);
+        // A large layer's textures cover only what the build needs (its area, and as far as each
+        // effect reaches into it): whole, the textures of layers with effects inside one another
+        // stack more pixels on a spot than vello's image atlas holds. The scene then shows only
+        // its area as it is, and is built again past it.
+        let area = self.area.filter(|_| full.width() * full.height() * scale * scale > CROP_PX);
+        let crop = |reach: f64| match area {
+            Some(a) => snap(full.intersect(a.inflate(reach, reach))).intersect(full),
+            None => full,
+        };
+        let region = crop(reach(&shadows, &inners, layer_var, back, scale));
+        if !(region.width() > 0.0 && region.height() > 0.0) {
+            self.partial = true;
+            return Ok(());
+        }
+        let cropped = region != full;
+        if cropped {
+            self.partial = true;
+        }
         // The scene's pixels (effects drawn smaller) belong to its scale.
         self.sampled = true;
-        let pass = |source, kind_of: &dyn Fn(f64) -> Kind, sigma_page: f64, premultiplied: bool, shape: Option<Scene>| -> Result<Pass, Fallback> {
+        // `reach`: how far (page units) the effect reaches, its texture drawn smaller aside.
+        let pass = |source, kind_of: &dyn Fn(f64) -> Kind, sigma_page: f64, reach: f64, premultiplied: bool, shape: Option<Scene>| {
             let mut k = effects::factor(sigma_page * scale);
-            let mut size = effects::texture_size(region, scale, k);
-            while size.is_none() && k < 64 {
+            loop {
+                // Off by up to two of its pixels at an edge, drawn smaller.
+                let r = crop(reach + (2.0 * f64::from(k) + 2.0) / scale);
+                let r = if r.width() > 0.0 && r.height() > 0.0 { r } else { region };
+                if let Some((w, h)) = effects::texture_size(r, scale, k) {
+                    let px = scale / f64::from(k);
+                    return Ok(Pass { source, kind: kind_of(px), k, shape, image: placeholder(w, h, premultiplied), region: r });
+                }
+                if k >= 64 {
+                    return Err("an effect too large for the GPU");
+                }
                 k *= 2;
-                size = effects::texture_size(region, scale, k);
             }
-            let (w, h) = size.ok_or("an effect too large for the GPU")?;
-            let px = scale / f64::from(k);
-            Ok(Pass { source, kind: kind_of(px), k, shape, image: placeholder(w, h, premultiplied) })
         };
+        let finite = |v: f64| if v.is_finite() { v.abs() } else { 0.0 };
+        let shadow_reach = |s: &Shadow, sigma: f64| 3.0 * sigma + finite(s.spread) + finite(s.offset.0).max(finite(s.offset.1));
         let shape = figcraft_render::node_outline(doc, n);
         let is_group = matches!(n.kind, NodeKind::Group);
         // Inner shadows of a layer that is one outline: what lies outside it (shrunk by the spread)
@@ -377,15 +425,14 @@ impl Builder<'_> {
                     Source::Content,
                     &|px| Kind::Shadow { sigma: sigma * px, spread: 0.0, color, inside: true },
                     sigma,
+                    shadow_reach(s, sigma),
                     false,
                     Some(cast),
                 )?);
             }
         }
-        let over: Vec<OverFill> = inner_passes
-            .iter()
-            .filter_map(|p| shape.as_ref().map(|(path, rule)| OverFill { pass: p, path, rule: *rule, xf, region, scale }))
-            .collect();
+        let over: Vec<OverFill> =
+            inner_passes.iter().filter_map(|p| shape.as_ref().map(|(path, rule)| OverFill { pass: p, path, rule: *rule, xf, scale })).collect();
         // The content on its own (layers with effects inside it are made first, and drawn as
         // their images in it).
         let mut content = Scene::new();
@@ -402,9 +449,17 @@ impl Builder<'_> {
         });
         let under = std::mem::replace(&mut self.under, under);
         let open = std::mem::replace(&mut self.open, 0);
+        // A cropped layer's content is needed over its textures.
+        let outer = self.area;
+        if cropped {
+            self.area = Some(region);
+        }
+        let fx_before = self.fx.len();
         self.in_fx += 1;
         let built = self.content(&mut content, n, xf, depth, &over);
         self.in_fx -= 1;
+        let nested = self.fx.len() > fx_before;
+        self.area = outer;
         self.open = open;
         self.under = under;
         built?;
@@ -422,6 +477,7 @@ impl Builder<'_> {
                     Source::Content,
                     &|px| Kind::Shadow { sigma: sigma * px, spread: -spread * px, color, inside: true },
                     sigma,
+                    shadow_reach(s, sigma),
                     false,
                     Some(cast),
                 )?);
@@ -442,19 +498,27 @@ impl Builder<'_> {
                 Source::Content,
                 &|px| Kind::Shadow { sigma: sigma * px, spread: spread * px, color, inside: false },
                 sigma,
+                shadow_reach(s, sigma),
                 false,
                 cast,
             )?);
         }
         let blurred = if layer_var > 0.0 {
             let sigma = layer_var.sqrt();
-            Some(pass(Source::Content, &|px| Kind::Blur { sigma: sigma * px }, sigma, true, None)?)
+            Some(pass(Source::Content, &|px| Kind::Blur { sigma: sigma * px }, sigma, 3.0 * sigma, true, None)?)
         } else {
             None
         };
         let backdrop = match back {
-            Some(sigma) => Some(pass(Source::Backdrop, &|px| Kind::Blur { sigma: sigma * px }, sigma, true, None)?),
+            Some(sigma) => Some(pass(Source::Backdrop, &|px| Kind::Blur { sigma: sigma * px }, sigma, 3.0 * sigma, true, None)?),
             None => None,
+        };
+        // A layer holding layers with effects draws its content once, into a texture of its own:
+        // drawn as it is, each render would hold the textures of every layer nested in it at once
+        // (more than vello's image atlas holds, on a page of sections of cards with shadows).
+        let flat = match &blurred {
+            None if nested => pass(Source::Content, &|_| Kind::Flat, 0.0, 0.0, false, None).ok().filter(|p| p.k == 1),
+            _ => None,
         };
         let mut noise_passes = Vec::new();
         for nz in &noises {
@@ -464,7 +528,9 @@ impl Builder<'_> {
             }
             let (gx, gy) = nz.grain();
             let (gx, gy) = (gx * 2.0, gy * 2.0);
-            let tex = Affine::scale(scale) * Affine::translate((-region.x0, -region.y0)) * xf;
+            let nr = crop(2.0 / scale);
+            let nr = if nr.width() > 0.0 && nr.height() > 0.0 { nr } else { region };
+            let tex = Affine::scale(scale) * Affine::translate((-nr.x0, -nr.y0)) * xf;
             let det = tex.determinant();
             if !(det.is_finite() && det.abs() > 1e-12) {
                 continue;
@@ -483,17 +549,34 @@ impl Builder<'_> {
                 c2: nz.secondary.sanitized(),
                 multi_alpha: if nz.opacity.is_finite() { nz.opacity.clamp(0.0, 1.0) } else { 0.0 },
             };
-            let (w, h) = effects::texture_size(region, scale, 1).ok_or("noise too large for the GPU")?;
-            noise_passes.push((Pass { source: Source::Content, kind: Kind::Noise(g), k: 1, shape: None, image: placeholder(w, h, true) }, nz.blend));
+            let (w, h) = effects::texture_size(nr, scale, 1).ok_or("noise too large for the GPU")?;
+            let image = placeholder(w, h, true);
+            noise_passes.push((Pass { source: Source::Content, kind: Kind::Noise(g), k: 1, shape: None, image, region: nr }, nz.blend));
         }
 
+        // The content, and what the layer's pixels are (blurred, with a layer blur): hide grains
+        // and group inner shadows outside them.
+        let inline = |sc: &mut Scene| match &flat {
+            Some(f) => {
+                let (brush, bxf) = fx_brush(scale, f);
+                sc.fill(Fill::NonZero, Affine::IDENTITY, &brush, Some(bxf), &f.region);
+            }
+            None => sc.append(&content, None),
+        };
+        let pixels = |sc: &mut Scene| match &blurred {
+            Some(b) => {
+                let (brush, bxf) = fx_brush(scale, b);
+                sc.fill(Fill::NonZero, Affine::IDENTITY, &brush, Some(bxf), &b.region);
+            }
+            None => inline(sc),
+        };
         let op = n.opacity.clamp(0.0, 1.0);
         let cover = figcraft_render::shadow::hiding_cover(doc, n);
         for (s, p) in shadows.iter().zip(&shadow_passes) {
             let at = Affine::translate(s.offset);
-            let (brush, bxf) = fx_brush(region, scale, p);
+            let (brush, bxf) = fx_brush(scale, p);
             sc.push_layer(Fill::NonZero, mode(s.blend), op, at, &region);
-            sc.fill(Fill::NonZero, at, &brush, Some(bxf), &region);
+            sc.fill(Fill::NonZero, at, &brush, Some(bxf), &p.region);
             if !s.show_behind {
                 // Hidden behind what the layer's paints cover (or its pixels).
                 let moved = Rect::new(region.x0 + s.offset.0, region.y0 + s.offset.1, region.x1 + s.offset.0, region.y1 + s.offset.1);
@@ -504,11 +587,7 @@ impl Builder<'_> {
                             sc.fill(fill_rule(*rule), xf, peniko::Color::new([1.0, 1.0, 1.0, 1.0]), None, path);
                         }
                     }
-                    (None, Some(b)) => {
-                        let (brush, bxf) = fx_brush(region, scale, b);
-                        sc.fill(Fill::NonZero, Affine::IDENTITY, &brush, Some(bxf), &region);
-                    }
-                    (None, None) => sc.append(&content, None),
+                    (None, _) => pixels(sc),
                 }
                 sc.pop_layer();
             }
@@ -529,34 +608,26 @@ impl Builder<'_> {
             pre.append(&closed(sc, self.open), None);
             prefix = Some(pre);
             if let Some((path, rule)) = figcraft_render::backdrop::outline(doc, n) {
-                let (brush, bxf) = fx_brush(region, scale, p);
+                let (brush, bxf) = fx_brush(scale, p);
                 sc.push_layer(fill_rule(rule), Mix::Normal, 1.0, xf, &path);
-                sc.fill(Fill::NonZero, Affine::IDENTITY, &brush, Some(bxf), &region);
+                sc.fill(Fill::NonZero, Affine::IDENTITY, &brush, Some(bxf), &p.region);
                 sc.pop_layer();
             }
         }
-        // What the layer's pixels are now: hides grains and group inner shadows outside them.
-        let pixels = |sc: &mut Scene| match &blurred {
-            Some(b) => {
-                let (brush, bxf) = fx_brush(region, scale, b);
-                sc.fill(Fill::NonZero, Affine::IDENTITY, &brush, Some(bxf), &region);
-            }
-            None => sc.append(&content, None),
-        };
         pixels(sc);
         let dest_in = peniko::BlendMode::new(Mix::Normal, Compose::DestIn);
         for p in &group_inner {
-            let (brush, bxf) = fx_brush(region, scale, p);
+            let (brush, bxf) = fx_brush(scale, p);
             sc.push_layer(Fill::NonZero, Mix::Normal, 1.0, Affine::IDENTITY, &region);
-            sc.fill(Fill::NonZero, Affine::IDENTITY, &brush, Some(bxf), &region);
+            sc.fill(Fill::NonZero, Affine::IDENTITY, &brush, Some(bxf), &p.region);
             sc.push_layer(Fill::NonZero, dest_in, 1.0, Affine::IDENTITY, &region);
-            sc.append(&content, None);
+            inline(sc);
             sc.pop_layer();
             sc.pop_layer();
         }
         for (p, blend) in &noise_passes {
             // Grains at the alpha of the pixels under them, blended with the noise's mode.
-            let (brush, bxf) = fx_brush(region, scale, p);
+            let (brush, bxf) = fx_brush(scale, p);
             let brush = match brush {
                 peniko::Brush::Image(mut im) => {
                     im.sampler.quality = ImageQuality::Low;
@@ -565,7 +636,7 @@ impl Builder<'_> {
                 b => b,
             };
             sc.push_layer(Fill::NonZero, mode(*blend), 1.0, Affine::IDENTITY, &region);
-            sc.fill(Fill::NonZero, Affine::IDENTITY, &brush, Some(bxf), &region);
+            sc.fill(Fill::NonZero, Affine::IDENTITY, &brush, Some(bxf), &p.region);
             sc.push_layer(Fill::NonZero, dest_in, 1.0, Affine::IDENTITY, &region);
             pixels(sc);
             sc.pop_layer();
@@ -580,6 +651,7 @@ impl Builder<'_> {
         passes.extend(group_inner);
         passes.extend(shadow_passes);
         passes.extend(blurred);
+        passes.extend(flat);
         passes.extend(backdrop);
         passes.extend(noise_passes.into_iter().map(|(p, _)| p));
         // Its textures draw over its region (the content of a layer with effects around it holds them).

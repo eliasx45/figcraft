@@ -42,6 +42,8 @@ pub enum Kind {
     Blur { sigma: f64 },
     /// Grains (premultiplied out), from nothing.
     Noise(Grains),
+    /// The source itself (straight alpha, as vello writes it).
+    Flat,
 }
 
 /// A noise effect's grains in a pass's texture.
@@ -68,6 +70,17 @@ pub struct Pass {
     pub shape: Option<Scene>,
     /// The image the scene draws, whose pixels this pass makes (its size is the texture's).
     pub image: ImageData,
+    /// The page area the texture covers (within its layer's region: a large layer's covers only
+    /// what the scene needs, as far as this effect reaches).
+    pub region: Rect,
+}
+
+impl Pass {
+    /// Page units → texture pixels, at the scene's `scale`.
+    pub fn to_texture(&self, scale: f64) -> Affine {
+        let s = scale / f64::from(self.k.max(1));
+        Affine::scale(s) * Affine::translate((-self.region.x0, -self.region.y0))
+    }
 }
 
 /// A layer with effects in the page scene: what its passes are made from.
@@ -80,7 +93,7 @@ pub struct FxNode {
     pub content: Scene,
     /// What its own top-level layer draws before it (backdrop passes only).
     pub prefix: Option<Scene>,
-    /// The page area the textures cover.
+    /// The page area its textures cover together.
     pub region: Rect,
     /// Device pixels per page unit the scene (and its textures) are made for.
     pub scale: f64,
@@ -89,14 +102,6 @@ pub struct FxNode {
     pub made: Mutex<Option<Vec<wgpu::Texture>>>,
     /// Why its textures can't be made on the GPU (its tiles paint on the CPU).
     pub failed: std::sync::OnceLock<crate::Fallback>,
-}
-
-impl FxNode {
-    /// Page units → texture pixels of a pass drawn `k` times smaller.
-    pub fn to_texture(&self, k: u32) -> Affine {
-        let s = self.scale / f64::from(k.max(1));
-        Affine::scale(s) * Affine::translate((-self.region.x0, -self.region.y0))
-    }
 }
 
 /// The texture size of `region` at `scale / k` (`None`: too large or empty).
@@ -377,6 +382,7 @@ impl Pipelines {
                 Some(self.step(device, queue, enc, &self.rgba_v, Out::Rgba, &wide, params(*sigma, n, false, false, none)))
             }
             Kind::Noise(g) => Some(self.grains(device, queue, enc, g, size)),
+            Kind::Flat => src.cloned(),
         }
     }
 
