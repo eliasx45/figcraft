@@ -182,6 +182,7 @@ node_props! {
     CodeLinks => code_links,
     DevResources => dev_resources,
     Audio => audio,
+    Effectcraft => effectcraft,
 }
 
 /// A document-level property. Lists of entries with ids (styles, comments, variable collections,

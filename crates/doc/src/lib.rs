@@ -11,6 +11,7 @@
 pub mod audio;
 pub mod colors;
 pub mod comments;
+pub mod effectcraft;
 pub mod geometry;
 pub mod handoff;
 pub mod ids;
@@ -25,6 +26,7 @@ pub mod vector_faces;
 pub mod vector_regions;
 
 pub use audio::{AudioClip, AudioData, AudioMarker, Peaks};
+pub use effectcraft::EcComp;
 pub use colors::*;
 pub use comments::*;
 pub use figcraft_color as color;

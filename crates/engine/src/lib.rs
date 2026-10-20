@@ -13,6 +13,7 @@ pub mod al_keys;
 pub mod annotations;
 pub mod arc_handles;
 pub mod audio;
+pub mod effectcraft;
 pub mod background;
 pub mod booleans;
 pub mod branches;
@@ -810,6 +811,8 @@ pub struct Session {
     pub background: background::Background,
     /// The audio playhead (see [`audio::Transport`]).
     pub audio: audio::Transport,
+    /// The EffectCraft card playhead (see [`effectcraft::Transport`]).
+    pub effectcraft: effectcraft::Transport,
 }
 
 impl Default for Session {
@@ -821,7 +824,7 @@ impl Default for Session {
 /// Whether a command, or a batch wrapping one, imports a file passed as Base64 `data`.
 fn command_carries_import_bytes(id: &str, params: &Value) -> bool {
     match id {
-        "file.import" => params::get(params, "data").is_some(),
+        "file.import" | "effectcraft.setPoster" => params::get(params, "data").is_some(),
         "command.batch" => params.get("commands").and_then(Value::as_array).is_some_and(|commands| {
             commands.iter().any(|c| {
                 c.get("command").and_then(Value::as_str).zip(c.get("params")).is_some_and(|(id, params)| command_carries_import_bytes(id, params))
@@ -859,6 +862,7 @@ impl Session {
             live: live::Lives::default(),
             background: background::Background::default(),
             audio: audio::Transport::default(),
+            effectcraft: effectcraft::Transport::default(),
         }
     }
 
@@ -1605,6 +1609,8 @@ mod al_nesting_tests;
 mod annotation_categories_tests;
 #[cfg(test)]
 mod annotations_tests;
+#[cfg(test)]
+mod effectcraft_tests;
 #[cfg(test)]
 mod arc_fields_tests;
 #[cfg(test)]

@@ -8,6 +8,7 @@
 pub mod a11y;
 pub mod assets_panel;
 pub mod audio_ui;
+pub mod effectcraft_ui;
 pub mod bidi;
 pub mod branch_ui;
 pub mod canvas;
@@ -79,6 +80,8 @@ mod theme_startup_tests;
 mod a11y_tests;
 #[cfg(test)]
 mod audio_ui_tests;
+#[cfg(test)]
+mod effectcraft_ui_tests;
 #[cfg(test)]
 mod async_dialog_tests;
 #[cfg(test)]
@@ -817,6 +820,8 @@ pub struct FigApp {
     pub automation_roots: Option<Arc<figcraft_engine::file_access::Roots>>,
     /// Audio playback and the playhead scrub ([`audio_ui`]).
     pub(crate) audio: audio_ui::Player,
+    /// EffectCraft cards: the link to EffectCraft and the frames it sent ([`effectcraft_ui`]).
+    pub(crate) effectcraft: effectcraft_ui::Link,
 }
 
 /// What to do with the result of a command run in the background.
@@ -850,6 +855,7 @@ impl FigApp {
             ui_context: None,
             automation_roots: None,
             audio: Default::default(),
+            effectcraft: Default::default(),
         }
     }
 
@@ -987,6 +993,7 @@ impl FigApp {
                     self.ui.about_tab = dialogs::AboutTab::About;
                 }
                 "dialog.preferences" => self.ui.preferences = true,
+                "effectcraft.explode" | "effectcraft.reveal" => self.effectcraft_request_ui(&r.kind, &r.data),
                 "dialog.missingFonts" => missing_fonts::request(self),
                 "panel.shortcuts" => self.ui.shortcuts_panel = !self.ui.shortcuts_panel,
                 "palette.actions" => menus::toggle_palette(&mut self.ui),
@@ -1566,6 +1573,7 @@ impl FigApp {
         let (files, prefs) = (self.session.docs.len(), self.session.prefs.clone());
         self.frame(ui);
         self.audio_sync(&ctx);
+        self.effectcraft_sync(&ctx);
         windows::settle(self, &ctx, files);
         if self.session.prefs != prefs {
             windows::repaint_others(self, &ctx);

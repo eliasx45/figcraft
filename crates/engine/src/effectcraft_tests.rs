@@ -1,0 +1,115 @@
+//! EffectCraft cards: placed (on their own, or filling an empty frame), read back with their
+//! frames, set, played in a loop and sought, given a poster, and the requests the desktop app
+//! carries out (explode, reveal).
+
+use figcraft_doc::{NodeId, NodeKind};
+use serde_json::{Value, json};
+
+use crate::Session;
+use crate::params::id_of;
+
+fn ok(s: &mut Session, cmd: &str, p: Value) -> Value {
+    s.execute(cmd, &p).unwrap_or_else(|e| panic!("{cmd} {p}: {e}"))
+}
+
+fn card(s: &mut Session, extra: Value) -> NodeId {
+    let mut p = json!({"comp": "MAIN", "compId": 282, "start": 1.4, "end": 5.1, "fps": 29.97, "width": 1920, "height": 1080, "x": 0, "y": 0});
+    if let (Some(o), Value::Object(e)) = (p.as_object_mut(), extra) {
+        o.extend(e);
+    }
+    id_of(&ok(s, "effectcraft.place", p)["id"]).unwrap()
+}
+
+#[test]
+fn placing_a_comp_makes_a_card_with_its_frames() {
+    let mut s = Session::new();
+    let id = card(&mut s, json!({}));
+    let r = ok(&mut s, "effectcraft.info", json!({"ids": [id]}));
+    let c = &r["cards"][0];
+    assert_eq!((c["comp"].clone(), c["compId"].clone()), (json!("MAIN"), json!(282)), "{r}");
+    assert_eq!((c["startFrame"].clone(), c["endFrame"].clone()), (json!(41), json!(152)), "{r}");
+    assert_eq!((c["cardWidth"].clone(), c["cardHeight"].clone()), (json!(480.0), json!(270.0)), "16:9 at the default width");
+    assert_eq!(s.doc().unwrap().node(id).unwrap().name, "MAIN · 0:01–0:05");
+    assert!(s.undo().unwrap(), "placing is one undo step");
+    assert!(s.doc().unwrap().node(id).is_none());
+}
+
+#[test]
+fn a_card_fills_the_selected_empty_frame() {
+    let mut s = Session::new();
+    let f = id_of(&ok(&mut s, "node.create", json!({"type": "frame", "x": 100, "y": 50, "width": 640, "height": 360}))["id"]).unwrap();
+    ok(&mut s, "select.set", json!({"ids": [f]}));
+    let id = id_of(&ok(&mut s, "effectcraft.place", json!({"comp": "Document page", "start": 0, "end": 3.7}))["id"]).unwrap();
+    let doc = s.doc().unwrap();
+    let n = doc.node(id).unwrap();
+    assert_eq!(n.parent, Some(f));
+    assert_eq!((n.width, n.height), (640.0, 360.0));
+    assert!(matches!(doc.node(f).unwrap().kind, NodeKind::Frame));
+}
+
+#[test]
+fn bad_ranges_and_values_are_refused() {
+    let mut s = Session::new();
+    for p in [
+        json!({"comp": "MAIN", "start": 5, "end": 2}),
+        json!({"comp": "", "start": 0, "end": 2}),
+        json!({"comp": "MAIN", "fps": 0}),
+        json!({"comp": "MAIN", "rate": -1}),
+        json!({"comp": "MAIN", "width": 0}),
+        json!({"comp": "MAIN", "start": 0, "end": 100000}),
+        json!({"start": 0, "end": 2}),
+    ] {
+        assert!(s.execute("effectcraft.place", &p).is_err(), "{p}");
+    }
+    let id = card(&mut s, json!({}));
+    assert!(s.execute("effectcraft.set", &json!({"ids": [id], "start": 9, "end": 1})).is_err());
+    let r = ok(&mut s, "effectcraft.set", json!({"ids": [id], "start": 2, "end": 4, "offset": 1.4, "sound": false}));
+    assert_eq!((r["cards"][0]["start"].clone(), r["cards"][0]["sound"].clone()), (json!(2.0), json!(false)), "{r}");
+}
+
+#[test]
+fn the_transport_plays_seeks_and_pauses_a_card() {
+    let mut s = Session::new();
+    let id = card(&mut s, json!({}));
+    let t = ok(&mut s, "effectcraft.seek", json!({"id": id, "frame": 85}));
+    assert_eq!(t["frame"], json!(85), "{t}");
+    let t = ok(&mut s, "effectcraft.play", json!({"id": id}));
+    assert_eq!(t["playing"], json!(true));
+    let t = ok(&mut s, "effectcraft.pause", json!({}));
+    assert_eq!(t["playing"], json!(false));
+    let at = t["time"].as_f64().unwrap();
+    assert!((2.83..3.0).contains(&at), "resumes where it was sought: {t}");
+    let t = ok(&mut s, "effectcraft.seek", json!({"id": id, "x": 0}));
+    assert_eq!(t["time"], json!(1.4), "the left edge is the start");
+}
+
+#[test]
+fn a_card_keeps_a_poster_frame_without_an_undo_step() {
+    let mut s = Session::new();
+    let id = card(&mut s, json!({}));
+    let png = {
+        let img = image::RgbaImage::from_pixel(4, 2, image::Rgba([200, 30, 40, 255]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+        out.into_inner()
+    };
+    use base64::Engine as _;
+    let steps = s.ds().unwrap().history.undo.len();
+    let r = ok(&mut s, "effectcraft.setPoster", json!({"id": id, "data": base64::engine::general_purpose::STANDARD.encode(png)}));
+    assert!(r["image"].is_string());
+    assert_eq!(s.ds().unwrap().history.undo.len(), steps);
+    let info = ok(&mut s, "effectcraft.info", json!({"ids": [id]}));
+    assert_eq!(info["cards"][0]["poster"], json!(true));
+    assert!(s.execute("effectcraft.setPoster", &json!({"id": id, "data": "not base64!"})).is_err());
+}
+
+#[test]
+fn explode_and_reveal_go_to_the_desktop_app() {
+    let mut s = Session::new();
+    let id = card(&mut s, json!({}));
+    ok(&mut s, "effectcraft.explode", json!({"id": id}));
+    ok(&mut s, "effectcraft.reveal", json!({"id": id, "time": 3.0}));
+    let kinds: Vec<&str> = s.ui_requests.iter().map(|r| r.kind.as_str()).collect();
+    assert_eq!(kinds, ["effectcraft.explode", "effectcraft.reveal"]);
+    assert_eq!(s.ui_requests[1].data["comp"], json!("MAIN"));
+}

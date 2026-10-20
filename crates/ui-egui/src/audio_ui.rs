@@ -264,7 +264,7 @@ fn seek_to(app: &mut FigApp, id: NodeId, pos: Pos2) {
 /// The sound output (macOS and Windows): the stretch from the playhead to the end of the clip's range,
 /// decoded and resampled to the device rate up front, played from a shared buffer.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-mod out {
+pub(crate) mod out {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 

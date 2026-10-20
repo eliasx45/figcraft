@@ -137,6 +137,28 @@ export) without decoding.
   {time | frame | x}`, `audio.transport` → `{id, playing, time, frame}`. The playhead runs on the
   wall clock, so headless sessions report it too; the desktop app sounds it on macOS and Windows.
 
+### EffectCraft comps
+
+A layer can show a live EffectCraft comp, like Dynamic Link: the desktop app asks the running
+EffectCraft (control channel `127.0.0.1:9877`, `EFFECTCRAFT_CONTROL_PORT`) for the card's frames.
+EffectCraft answers from its own preview cache and queues the frames it lacks behind its own
+viewer's work, so nothing renders twice; frames appear as they are ready. EffectCraft's **Send to
+FigCraft** places a card the same way. The layer's fill keeps a poster frame for when EffectCraft
+isn't running.
+
+- `effectcraft.place {comp, compId?, project?, start?, end? (comp seconds), fps?, width?, height?
+  (the comp's pixels), offset? (timeline seconds of comp time 0), rate?, sound?, into?, x?, y?,
+  cardWidth?}` → the card. With an empty frame selected (or `into`), the card fills it.
+- `effectcraft.info` → `{cards: [{id, comp, compId, start, end, fps, offset, rate, startFrame,
+  endFrame, …}]}`; `effectcraft.set` changes them; `effectcraft.setPoster {id, data}`.
+- Transport: `effectcraft.play {id?, time? | frame?}` (loops over the card), `effectcraft.pause`,
+  `effectcraft.togglePlay`, `effectcraft.seek {time | frame | x}`, `effectcraft.transport`. A playing
+  card sounds the comp's own mix; audio strips covering the same edit time (`offset`) follow it,
+  and cards follow a playing strip.
+- `effectcraft.explode {id?}`: a card for each comp nested in the card's stretch, to its right, all
+  on the same playhead. `effectcraft.reveal {id?, time?}`: open the comp in EffectCraft there
+  (double-clicking a card does it too).
+
 ## Configure a client
 
 Build the CLI first (`cargo build --release -p figcraft-cli`) and use the absolute path to

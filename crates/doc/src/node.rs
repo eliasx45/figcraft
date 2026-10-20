@@ -521,6 +521,9 @@ pub struct Node {
     /// An audio clip this layer shows as a waveform strip (see [`crate::audio`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio: Option<Box<crate::audio::AudioClip>>,
+    /// A live EffectCraft comp this layer shows and plays (see [`crate::effectcraft`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effectcraft: Option<Box<crate::effectcraft::EcComp>>,
 }
 
 pub(crate) fn yes() -> bool {
@@ -632,6 +635,7 @@ impl Node {
             code_links: Vec::new(),
             dev_resources: Vec::new(),
             audio: None,
+            effectcraft: None,
         }
     }
 

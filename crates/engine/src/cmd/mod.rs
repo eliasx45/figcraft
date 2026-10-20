@@ -2,6 +2,7 @@
 
 pub mod arrange;
 pub mod audio;
+pub mod effectcraft;
 pub mod comment;
 pub mod component;
 pub mod create;
@@ -85,6 +86,7 @@ fn registry() -> &'static Registry {
         list.extend(styles::specs());
         list.extend(image::specs());
         list.extend(audio::specs());
+        list.extend(effectcraft::specs());
         list.extend(variables::specs());
         list.extend(variables_io::specs());
         list.extend(component::specs());

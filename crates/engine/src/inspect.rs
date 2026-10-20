@@ -144,6 +144,13 @@ pub fn node_json(doc: &Document, id: NodeId, depth: usize) -> Value {
                     "markers": a.markers.iter().map(|m| json!({"time": m.time, "frame": a.frame_of(m.time), "label": m.label})).collect::<Vec<_>>()}),
             );
         }
+        if let Some(c) = n.effectcraft.as_deref() {
+            o.insert(
+                "effectcraft".into(),
+                json!({"comp": c.comp, "compId": c.comp_id, "start": c.start, "end": c.end, "fps": c.fps, "offset": c.offset, "rate": c.rate,
+                    "startFrame": c.frames().start(), "endFrame": c.frames().end(), "sound": c.sound}),
+            );
+        }
         if !n.annotations.is_empty() {
             o.insert("annotations".into(), serde_json::to_value(&n.annotations).unwrap_or(Value::Null));
         }

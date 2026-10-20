@@ -263,6 +263,7 @@ pub fn show(app: &mut FigApp, ui: &mut Ui, worker: &mut Worker) {
     painter.rect_filled(rect, CornerRadius::ZERO, bg);
     crate::theme::set_canvas_page(&ctx, bg);
     draw_canvas_image(app, &painter, ppp, shown, tiled);
+    crate::effectcraft_ui::overlay(app, &painter);
     app.session.tool.labels = overlays(app, &painter, &t);
     crate::audio_ui::overlay(app, &painter);
     crate::frame_labels::rename_field(app, ui);
@@ -754,6 +755,10 @@ fn input(app: &mut FigApp, ui: &mut Ui, resp: &egui::Response) -> bool {
         && !editing_text
         && app.session.ds().is_ok_and(|d| d.vector_edit.is_none())
         && matches!(app.session.tool.tool, ToolId::Move | ToolId::Scale);
+    // EffectCraft cards: play and explode buttons; a double-click opens the comp in EffectCraft.
+    if !app.canvas.dragging && crate::effectcraft_ui::input(app, &ctx, pos, resp.hovered(), resp.double_clicked() && !keep_drilling) {
+        return true;
+    }
     if resp.double_clicked() || keep_drilling {
         let ev = pointer_event(app, PointerKind::DoubleClick, pos, &mods, &ctx);
         if let Err(e) = app.session.pointer(&ev) {

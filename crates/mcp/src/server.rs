@@ -42,6 +42,8 @@ screenshot returns a PNG of the page or of given layers to look at. undo/redo st
 Audio: run_command audio.place {path} puts a sound (WAV, MP3, M4A…) on the canvas as a waveform strip and \
 returns its duration; audio.info reads clips, audio.set their range (seconds or ruler frames, fps, offset), \
 audio.addMarker / audio.setMarkers label times, audio.play / audio.seek / audio.transport drive the playhead. \
+EffectCraft: run_command effectcraft.place {comp, start, end} shows a live comp from the running EffectCraft \
+as a card that plays (effectcraft.play / seek / info); effectcraft.explode adds a card per nested precomp. \
 Resources: figcraft://document, figcraft://node/{id}, figcraft://command/{id}. prompts/list has workflows.";
 
 /// An MCP server bound to one backend.
