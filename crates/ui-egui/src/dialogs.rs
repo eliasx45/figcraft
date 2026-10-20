@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use crate::FigApp;
 use crate::export_panel::{export_layers, save_one, suggested_name};
 use crate::i18n::{self, tr, tr_noop, trf, trn};
+use crate::icons::{self, Icon};
 use crate::theme::{Tokens, regular, semibold};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
