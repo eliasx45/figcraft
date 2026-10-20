@@ -113,3 +113,23 @@ fn explode_and_reveal_go_to_the_desktop_app() {
     assert_eq!(kinds, ["effectcraft.explode", "effectcraft.reveal"]);
     assert_eq!(s.ui_requests[1].data["comp"], json!("MAIN"));
 }
+
+#[test]
+fn explode_again_closes_the_cards_it_opened() {
+    let mut s = Session::new();
+    let main = card(&mut s, json!({}));
+    let other = card(&mut s, json!({"x": 0, "y": 900}));
+    let page = card(&mut s, json!({"comp": "Document page", "explodedFrom": main, "x": 600}));
+    let sheet = card(&mut s, json!({"comp": "Document sheet", "explodedFrom": page, "x": 900}));
+    let r = ok(&mut s, "effectcraft.explode", json!({"id": main}));
+    assert_eq!(r["collapsed"], json!(2), "{r}");
+    let doc = s.doc().unwrap();
+    assert!(doc.node(page).is_none() && doc.node(sheet).is_none(), "and the ones exploded out of those");
+    assert!(doc.node(main).is_some() && doc.node(other).is_some());
+    assert!(s.ui_requests.is_empty(), "closing asks EffectCraft for nothing");
+    assert!(s.undo().unwrap(), "closing is one undo step");
+    assert!(s.doc().unwrap().node(sheet).is_some());
+    // `open: true` asks again even while they are out.
+    ok(&mut s, "effectcraft.explode", json!({"id": main, "open": true}));
+    assert_eq!(s.ui_requests.len(), 1);
+}

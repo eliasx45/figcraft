@@ -14,7 +14,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "effectcraft.place",
             "Place EffectCraft comp",
-            "{comp (name), compId?, project? (.ecproj path), start? (comp seconds, default 0), end? (default start + 5), fps? (default 29.97), width?, height? (the comp's pixel size, default 1920×1080), offset? (timeline seconds of comp time 0), rate? (comp seconds per timeline second), sound? (default true), name?, into? (a frame to fill; default the selected empty frame), parent?, x?, y? (default the centre of the view), cardWidth? (default 480)}  a card that shows and plays the comp from the running EffectCraft → {id, ...card}",
+            "{comp (name), compId?, project? (.ecproj path), start? (comp seconds, default 0), end? (default start + 5), fps? (default 29.97), width?, height? (the comp's pixel size, default 1920×1080), offset? (timeline seconds of comp time 0), rate? (comp seconds per timeline second), sound? (default true), name?, explodedFrom? (the card it came out of: explode closes it again), into? (a frame to fill; default the selected empty frame), parent?, x?, y? (default the centre of the view), cardWidth? (default 480)}  a card that shows and plays the comp from the running EffectCraft → {id, ...card}",
             true,
             place
         ),
@@ -68,13 +68,9 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "effectcraft.explode",
             "Explode EffectCraft precomps",
-            "{id?}  the desktop app asks EffectCraft for the comps nested in the card at the frame it shows and places a card for each (at most 16), to the right of it, all on the same playhead (one undo step) → {requested}",
-            false,
-            |s, p| {
-                let (id, _) = target("effectcraft.explode", s, p)?;
-                s.request_ui("effectcraft.explode", json!({"id": id}));
-                Ok(json!({"requested": true, "id": id}))
-            }
+            "{id?, open? (bool; default: toggle)}  open: the desktop app asks EffectCraft for the comps nested in the card at the frame it shows and places a card for each (at most 16), to the right of it, all on the same playhead (one undo step) → {requested}; close (when the card is exploded): removes the cards that explode placed, and theirs → {collapsed}",
+            true,
+            explode
         ),
         spec!(
             "effectcraft.reveal",
@@ -99,6 +95,48 @@ pub fn specs() -> Vec<CommandSpec> {
 
 /// Default card width (layer units).
 const CARD_WIDTH: f64 = 480.0;
+/// The `plugin_data` key of a card that explode placed: the id of the card it came out of.
+pub const EXPLODED_FROM: &str = "effectcraft.explodedFrom";
+
+/// The cards explode placed out of card `id`, and the ones placed out of those.
+pub fn exploded_from(doc: &Document, id: NodeId) -> Vec<NodeId> {
+    let mut out: Vec<NodeId> = Vec::new();
+    let mut todo = vec![(id, 0usize)];
+    while let Some((from, depth)) = todo.pop() {
+        if depth > 8 || out.len() > 4096 {
+            break;
+        }
+        let key = from.to_string();
+        for n in doc.nodes().filter(|n| n.effectcraft.is_some() && n.plugin_data.get(EXPLODED_FROM) == Some(&key)) {
+            if !out.contains(&n.id) && n.id != id {
+                out.push(n.id);
+                todo.push((n.id, depth + 1));
+            }
+        }
+    }
+    out
+}
+
+fn explode(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "effectcraft.explode";
+    let (id, _) = target(cmd, s, p)?;
+    let open = boolean(p, "open");
+    let kids = exploded_from(s.doc()?, id);
+    if open != Some(true) && !kids.is_empty() {
+        let doc = s.doc_mut()?;
+        for k in &kids {
+            if doc.node(*k).is_some() {
+                doc.remove(*k)?;
+            }
+        }
+        return Ok(json!({"collapsed": kids.len(), "id": id}));
+    }
+    if open == Some(false) {
+        return Ok(json!({"collapsed": 0, "id": id}));
+    }
+    s.request_ui("effectcraft.explode", json!({"id": id}));
+    Ok(json!({"requested": true, "id": id}))
+}
 
 fn round6(v: f64) -> f64 {
     (v * 1e6).round() / 1e6
@@ -185,6 +223,7 @@ fn place(s: &mut Session, p: &Value) -> Result<Value> {
     let mut c = EcComp::new(comp, start, start + 5.0, 29.97);
     apply(cmd, &mut c, p)?;
     let page = s.page()?;
+    let exploded = opt_id(cmd, p, "explodedFrom")?;
     let sel = s.selection();
     let into = match opt_id(cmd, p, "into")? {
         Some(f) => {
@@ -224,6 +263,9 @@ fn place(s: &mut Session, p: &Value) -> Result<Value> {
     node.fills = vec![figcraft_color::Paint::solid(figcraft_color::Color::from_rgb8_const(0x0C, 0x0C, 0x0E))];
     node.clip = true;
     node.effectcraft = Some(Box::new(c));
+    if let Some(from) = exploded {
+        node.plugin_data.insert(EXPLODED_FROM.into(), from.to_string());
+    }
     doc.insert(node, parent, None)?;
     ds.selection = vec![nid];
     let mut out = card_json(&ds.doc, nid);

@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use egui::{Color32, CornerRadius, Pos2, Rect, Stroke, pos2, vec2};
 use figcraft_doc::{Document, EcComp, NodeId};
+use figcraft_engine::cmd::effectcraft::EXPLODED_FROM;
 use figcraft_geom::Point;
 use serde_json::{Value, json};
 
@@ -110,6 +111,8 @@ pub struct Link {
     last_time: f64,
     /// Whether the audio strip and the card transport played last frame.
     was: (bool, bool),
+    /// The card whose slider is being dragged.
+    scrub: Option<NodeId>,
     bytes: usize,
 }
 
@@ -287,11 +290,31 @@ fn frame_at(c: &EcComp, t: f64) -> i64 {
     c.frame_of(t).clamp(*r.start(), *r.end())
 }
 
-/// The play button's centre (bottom-left of the picture) and the explode button's (top-right),
-/// when the card shows big enough to hold them.
+/// The play button's centre (bottom-left of the picture, above the slider) and the explode
+/// button's (top-right), when the card shows big enough to hold them.
 fn buttons(pic: Rect) -> Option<(Pos2, Pos2)> {
-    (pic.width() > BUTTON * 6.0 && pic.height() > BUTTON * 4.0)
-        .then(|| (pos2(pic.min.x + BUTTON + 6.0, pic.max.y - BUTTON - 6.0), pos2(pic.max.x - BUTTON - 6.0, pic.min.y + BUTTON + 6.0)))
+    (pic.width() > BUTTON * 6.0 && pic.height() > BUTTON * 5.0)
+        .then(|| (pos2(pic.min.x + BUTTON + 6.0, pic.max.y - BUTTON - SLIDER - 4.0), pos2(pic.max.x - BUTTON - 6.0, pic.min.y + BUTTON + 6.0)))
+}
+
+/// Height of the slider's grip zone along the bottom of the picture (screen pixels).
+const SLIDER: f32 = 12.0;
+
+/// Whether screen point `p` is on the slider of a card showing in `pic`.
+fn on_slider(pic: Rect, p: Pos2) -> bool {
+    pic.width() > 40.0 && (pic.min.x..=pic.max.x).contains(&p.x) && (pic.max.y - SLIDER..=pic.max.y + 3.0).contains(&p.y)
+}
+
+/// The comp time at screen x `x` on a card showing in `pic`.
+pub(crate) fn slider_time(c: &EcComp, pic: Rect, x: f32) -> f64 {
+    let u = if pic.width() > 0.0 { f64::from(((x - pic.min.x) / pic.width()).clamp(0.0, 1.0)) } else { 0.0 };
+    c.start + u * c.span()
+}
+
+/// Whether card `id` has cards exploded out of it (its explode button then closes them).
+fn exploded(doc: &Document, id: NodeId) -> bool {
+    let key = id.to_string();
+    doc.nodes().any(|n| n.effectcraft.is_some() && n.plugin_data.get(EXPLODED_FROM) == Some(&key))
 }
 
 fn pointer(painter: &egui::Painter) -> Option<Pos2> {
@@ -323,16 +346,28 @@ pub fn overlay(app: &FigApp, painter: &egui::Painter) {
             }
             None => false,
         };
-        // The frames held, as EffectCraft's cache bar.
-        let (have, total) = app.effectcraft.coverage(c);
-        if total > 0 && have < total && pic.width() > 40.0 {
-            let y = pic.max.y - 2.0;
-            painter.rect_filled(Rect::from_min_max(pos2(pic.min.x, y), pos2(pic.max.x, pic.max.y)), CornerRadius::ZERO, Color32::from_black_alpha(120));
-            let x = pic.min.x + pic.width() * have as f32 / total as f32;
-            painter.rect_filled(Rect::from_min_max(pos2(pic.min.x, y), pos2(x, pic.max.y)), CornerRadius::ZERO, Color32::from_rgb(0x2F, 0xB3, 0x6F));
-        }
         let hovered = hover.is_some_and(|h| r.contains(h));
         let playing = ec.playing() && ec.node == Some(id);
+        let scrubbing = app.effectcraft.scrub == Some(id);
+        // The slider: the frames held (EffectCraft's cache bar) and, on hover, the playhead knob.
+        let (have, total) = app.effectcraft.coverage(c);
+        let active = hovered || playing || scrubbing;
+        if pic.width() > 40.0 && (active || (total > 0 && have < total)) {
+            let grip = scrubbing || hover.is_some_and(|h| on_slider(pic, h));
+            let th = if grip { 5.0 } else if active { 3.0 } else { 2.0 };
+            let track = Rect::from_min_max(pos2(pic.min.x, pic.max.y - th), pic.max);
+            painter.rect_filled(track, CornerRadius::ZERO, Color32::from_black_alpha(140));
+            if total > 0 {
+                let x = pic.min.x + pic.width() * have as f32 / total as f32;
+                painter.rect_filled(Rect::from_min_max(track.min, pos2(x, track.max.y)), CornerRadius::ZERO, Color32::from_rgba_unmultiplied(0x2F, 0xB3, 0x6F, 170));
+            }
+            if active && c.span() > 0.0 {
+                let u = ((t - c.start) / c.span()).clamp(0.0, 1.0) as f32;
+                let x = pic.min.x + pic.width() * u;
+                painter.rect_filled(Rect::from_min_max(track.min, pos2(x, track.max.y)), CornerRadius::ZERO, Color32::from_white_alpha(70));
+                painter.circle_filled(pos2(x, track.center().y), if grip { 6.0 } else { 4.0 }, Color32::WHITE);
+            }
+        }
         if !drawn && let Some(why) = app.effectcraft.down() {
             let project = std::path::Path::new(&c.project).file_name().map(|f| f.to_string_lossy().into_owned()).filter(|f| !f.is_empty());
             let msg = match project {
@@ -355,10 +390,20 @@ pub fn overlay(app: &FigApp, painter: &egui::Painter) {
                     painter.add(egui::Shape::convex_polygon(vec![play + vec2(-3.0, -5.0), play + vec2(5.0, 0.0), play + vec2(-3.0, 5.0)], fg, Stroke::NONE));
                 }
                 if hovered {
-                    // Explode: four small boxes, the comps inside.
+                    // Explode: four small boxes, the comps inside; lit while they are out (a
+                    // press closes them).
+                    let open = exploded(doc, id);
                     round_button(painter, explode);
+                    if open {
+                        painter.circle_filled(explode, BUTTON - 1.0, crate::theme::canvas_accent(painter.ctx()));
+                    }
                     for (dx, dy) in [(-4.5, -4.5), (0.5, -4.5), (-4.5, 0.5), (0.5, 0.5)] {
-                        painter.rect_stroke(Rect::from_min_size(explode + vec2(dx, dy), vec2(4.0, 4.0)), CornerRadius::same(1), Stroke::new(1.0, fg), egui::StrokeKind::Inside);
+                        let r = Rect::from_min_size(explode + vec2(dx, dy), vec2(4.0, 4.0));
+                        if open {
+                            painter.rect_filled(r, CornerRadius::same(1), fg);
+                        } else {
+                            painter.rect_stroke(r, CornerRadius::same(1), Stroke::new(1.0, fg), egui::StrokeKind::Inside);
+                        }
                     }
                 }
             }
@@ -387,9 +432,18 @@ fn card_at(app: &FigApp, doc: &Document, page: NodeId, pos: Pos2) -> Option<(Nod
     })
 }
 
-/// A press on a card's play or explode button, or a double-click on a card (open its comp in
-/// EffectCraft at the frame shown). Returns whether the pointer was used.
+/// A press on a card's play or explode button or its slider (dragged, it scrubs), or a
+/// double-click on a card (open its comp in EffectCraft at the frame shown). Returns whether the
+/// pointer was used.
 pub fn input(app: &mut FigApp, ctx: &egui::Context, pos: Pos2, hovered: bool, double: bool) -> bool {
+    if let Some(id) = app.effectcraft.scrub {
+        if ctx.input(|i| i.pointer.primary_down()) {
+            scrub_to(app, id, pos);
+        } else {
+            app.effectcraft.scrub = None;
+        }
+        return true;
+    }
     if !hovered {
         return false;
     }
@@ -415,13 +469,30 @@ pub fn input(app: &mut FigApp, ctx: &egui::Context, pos: Pos2, hovered: bool, do
             return true;
         }
     }
+    if pressed && on_slider(pic, pos) {
+        app.effectcraft.scrub = Some(id);
+        scrub_to(app, id, pos);
+        return true;
+    }
     false
 }
 
-/// The `effectcraft.place` steps for the comps nested in card `parent` (`c`, its page box
+/// Put card `id`'s playhead at the slider point under `pos` (it plays on from there when it was
+/// playing).
+fn scrub_to(app: &mut FigApp, id: NodeId, pos: Pos2) {
+    let Ok(doc) = app.session.doc() else { return };
+    let Some(c) = doc.node(id).and_then(|n| n.effectcraft.as_deref()) else { return };
+    let Some(r) = screen_rect(app, doc, id) else { return };
+    let t = slider_time(c, fit(r, c.width, c.height), pos.x);
+    app.effectcraft.shown.insert(id, t);
+    app.run("effectcraft.seek", json!({"id": id, "time": t}));
+}
+
+/// The `effectcraft.place` steps for the comps nested in card `card` (`c`, its page box
 /// `bounds` = x, y, width, height), from EffectCraft's `figcraft.tree` answer: one column per
-/// level to the card's right, each card on the same edit time as the card it is in.
-pub(crate) fn explode_steps(c: &EcComp, bounds: (f64, f64, f64, f64), tree: &Value) -> Vec<(String, Value)> {
+/// level to the card's right, each card on the same edit time as the card it is in and marked as
+/// out of `card` (pressing its explode button again closes them).
+pub(crate) fn explode_steps(card: NodeId, c: &EcComp, bounds: (f64, f64, f64, f64), tree: &Value) -> Vec<(String, Value)> {
     let (x, y, w, _) = bounds;
     let cw = (w * 0.6).max(64.0);
     let gap = (w * 0.08).max(16.0);
@@ -442,7 +513,7 @@ pub(crate) fn explode_steps(c: &EcComp, bounds: (f64, f64, f64, f64), tree: &Val
             "effectcraft.place".to_string(),
             json!({"comp": child.comp, "compId": child.comp_id, "project": child.project, "start": child.start, "end": child.end, "fps": child.fps,
                 "width": child.width, "height": child.height, "offset": child.offset, "rate": child.rate, "sound": false, "name": name,
-                "x": cx, "y": cy, "cardWidth": cw}),
+                "x": cx, "y": cy, "cardWidth": cw, "explodedFrom": card}),
         ));
     });
     out
@@ -843,7 +914,7 @@ impl FigApp {
     fn effectcraft_explode(&mut self, card: NodeId, tree: &Value) {
         let Ok(doc) = self.session.doc() else { return };
         let (Some(c), Some(b)) = (doc.node(card).and_then(|n| n.effectcraft.as_deref()).cloned(), doc.world_bounds(card)) else { return };
-        let mut steps = explode_steps(&c, (b.x0, b.y0, b.x1 - b.x0, b.y1 - b.y0), tree);
+        let mut steps = explode_steps(card, &c, (b.x0, b.y0, b.x1 - b.x0, b.y1 - b.y0), tree);
         if steps.is_empty() {
             self.toast(format!("No comps are nested in {} at this frame", c.comp));
             return;

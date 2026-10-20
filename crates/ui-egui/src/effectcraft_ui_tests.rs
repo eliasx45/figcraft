@@ -3,10 +3,10 @@
 #![allow(clippy::unwrap_used)]
 
 use egui::{Rect, pos2};
-use figcraft_doc::EcComp;
+use figcraft_doc::{EcComp, NodeId};
 use serde_json::json;
 
-use crate::effectcraft_ui::{explode_steps, fit, order, side_for};
+use crate::effectcraft_ui::{explode_steps, fit, order, side_for, slider_time};
 
 fn main_card() -> EcComp {
     EcComp::new("MAIN", 1.4, 5.1, 29.97)
@@ -54,7 +54,7 @@ fn exploded_precomps_share_the_edit_time() {
             "start": 0.0, "stretch": 200.0, "in": 0.0, "out": 600.0, "timeRemap": false, "children": []
         }]
     }]});
-    let steps = explode_steps(&c, (0.0, 0.0, 480.0, 270.0), &tree);
+    let steps = explode_steps(NodeId(12), &c, (0.0, 0.0, 480.0, 270.0), &tree);
     assert_eq!(steps.len(), 2);
     let (page, sheet) = (&steps[0].1, &steps[1].1);
     assert_eq!(page["comp"], json!("Document page"));
@@ -66,4 +66,15 @@ fn exploded_precomps_share_the_edit_time() {
     assert!((sheet["rate"].as_f64().unwrap() - 0.5).abs() < 1e-9);
     assert_eq!(sheet["sound"], json!(false), "only the card itself sounds");
     assert!(sheet["x"].as_f64().unwrap() > page["x"].as_f64().unwrap(), "a column per level");
+    assert!(steps.iter().all(|(_, p)| p["explodedFrom"] == json!(NodeId(12))), "explode closes them again");
+}
+
+#[test]
+fn the_slider_runs_over_the_cards_stretch() {
+    let c = main_card();
+    let pic = Rect::from_min_max(pos2(100.0, 0.0), pos2(500.0, 225.0));
+    assert!((slider_time(&c, pic, 100.0) - 1.4).abs() < 1e-9);
+    assert!((slider_time(&c, pic, 300.0) - 3.25).abs() < 1e-9);
+    assert!((slider_time(&c, pic, 900.0) - 5.1).abs() < 1e-9, "past the end stays on it");
+    assert!((slider_time(&c, pic, -50.0) - 1.4).abs() < 1e-9);
 }
