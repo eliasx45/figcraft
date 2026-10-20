@@ -77,6 +77,8 @@ mod theme_startup_tests;
 #[cfg(test)]
 mod a11y_tests;
 #[cfg(test)]
+mod audio_ui_tests;
+#[cfg(test)]
 mod async_dialog_tests;
 #[cfg(test)]
 mod branch_ui_tests;

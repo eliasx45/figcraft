@@ -112,6 +112,9 @@ pub fn cpu_only(doc: &Document, top: NodeId) -> Option<Fallback> {
         if n.fills.iter().chain(&n.strokes).any(|p| p.visible && matches!(p.kind, PaintKind::Pattern(_))) {
             return Some("pattern fills");
         }
+        if n.audio.is_some() {
+            return Some("audio waveforms");
+        }
         if n.effects.iter().any(|e| e.visible && matches!(e.kind, EffectKind::Texture(_) | EffectKind::Glass(_))) {
             return Some("effects (texture, glass)");
         }
@@ -743,6 +746,8 @@ impl Builder<'_> {
                 over.iter().for_each(|o| o.draw(sc));
                 Ok(())
             }
+            // Waveforms, rulers and markers are drawn by the CPU renderer.
+            _ if n.audio.is_some() => Err("audio waveforms"),
             _ => {
                 let closed = figcraft_doc::geometry::is_closed(n) || matches!(n.kind, NodeKind::BooleanOp { .. });
                 let clips = n.clip && n.kind.is_frame_like() && !n.children.is_empty();

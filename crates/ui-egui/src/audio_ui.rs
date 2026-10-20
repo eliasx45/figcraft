@@ -107,16 +107,43 @@ fn local(doc: &Document, id: NodeId, p: Point) -> Option<Point> {
     (w.determinant().abs() > 1e-12).then(|| w.inverse() * p)
 }
 
-/// The audio layers overlays are drawn for: on the current page, selected or under the playhead.
-fn shown(app: &FigApp) -> Vec<NodeId> {
+/// The topmost visible audio layer on `page` whose box holds page point `p`, however deeply it
+/// sits in frames, groups or auto layout (hovering one shows its play button).
+pub fn audio_at(doc: &Document, page: NodeId, p: Point) -> Option<NodeId> {
+    let mut hit = None;
+    let mut stack = vec![(page, 0usize)];
+    // Children are pushed in reverse so the walk goes in paint order: the last hit is on top.
+    while let Some((id, depth)) = stack.pop() {
+        let Some(n) = doc.node(id) else { continue };
+        if depth > 256 || !n.visible {
+            continue;
+        }
+        if n.audio.is_some()
+            && let Some(l) = local(doc, id, p)
+            && (0.0..=n.width).contains(&l.x)
+            && (0.0..=n.height).contains(&l.y)
+        {
+            hit = Some(id);
+        }
+        stack.extend(n.children.iter().rev().map(|c| (*c, depth + 1)));
+    }
+    hit
+}
+
+/// The audio layers overlays are drawn for: on the current page, selected, under the playhead or
+/// under the pointer at `hover` (screen).
+fn shown(app: &FigApp, hover: Option<Pos2>) -> Vec<NodeId> {
     let Ok(ds) = app.session.ds() else { return Vec::new() };
     let doc = &ds.doc;
     let mut ids: Vec<NodeId> = ds.selection.iter().copied().filter(|i| doc.node(*i).is_some_and(|n| n.audio.is_some())).collect();
-    if let Some(n) = app.session.audio.node
-        && !ids.contains(&n)
-        && doc.page_of(n) == Some(ds.page)
-    {
-        ids.push(n);
+    let hovered = hover.and_then(|h| {
+        let p = app.to_page(h);
+        audio_at(doc, ds.page, p)
+    });
+    for n in [app.session.audio.node, hovered].into_iter().flatten() {
+        if !ids.contains(&n) && doc.page_of(n) == Some(ds.page) {
+            ids.push(n);
+        }
     }
     ids
 }
@@ -137,7 +164,8 @@ pub fn overlay(app: &FigApp, painter: &egui::Painter) {
     let Ok(ds) = app.session.ds() else { return };
     let doc = &ds.doc;
     let t = &app.session.audio;
-    for id in shown(app) {
+    let hover = painter.ctx().input(|i| i.pointer.hover_pos()).filter(|h| painter.clip_rect().contains(*h));
+    for id in shown(app, hover) {
         let Some(n) = doc.node(id) else { continue };
         let Some(a) = n.audio.as_deref() else { continue };
         let w = doc.world_transform(id);
@@ -203,7 +231,7 @@ pub fn input(app: &mut FigApp, ctx: &egui::Context, pos: Pos2, hovered: bool) ->
     let Ok(ds) = app.session.ds() else { return false };
     let doc = ds.doc.clone();
     let sel = ds.selection.clone();
-    for id in shown(app) {
+    for id in shown(app, Some(pos)) {
         if button_at(app, &doc, id).is_some_and(|c| c.distance(pos) <= BUTTON + 2.0) {
             app.run("audio.togglePlay", json!({"id": id}));
             return true;

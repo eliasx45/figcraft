@@ -170,3 +170,17 @@ fn a_render_after_two_without_images_has_the_whole_atlas() {
     m2.resolve(&[]);
     assert!(m2.resolve(&[quarter(5), quarter(6), quarter(7), quarter(8)]));
 }
+
+#[test]
+fn audio_strips_nested_in_frames_draw_their_waveform_on_the_cpu() {
+    // The GPU scene has no waveforms: a board holding an audio strip (selected or not) must fall back,
+    // or the strip shows as its bare fill.
+    let mut d = Document::new("t");
+    let page = d.first_page().unwrap();
+    let board = d.create(page, NodeKind::Frame, "Board", 0.0, 0.0, 600.0, 200.0).unwrap();
+    let card = d.create(board, NodeKind::Frame, "Card", 10.0, 10.0, 500.0, 100.0).unwrap();
+    let strip = d.create(card, NodeKind::Frame, "Audio · S1", 10.0, 10.0, 480.0, 70.0).unwrap();
+    assert_eq!(crate::scene::cpu_only(&d, board), None);
+    d.get_mut(strip).unwrap().audio = Some(Box::new(figcraft_doc::AudioClip::new("h", "x.wav", 1.0, 48_000, 1)));
+    assert_eq!(crate::scene::cpu_only(&d, board), Some("audio waveforms"));
+}
