@@ -87,6 +87,8 @@ pub struct FxNode {
     pub passes: Vec<Pass>,
     /// The textures made so far, in `passes` order (`None`: not yet; a noise pass's has no source).
     pub made: Mutex<Option<Vec<wgpu::Texture>>>,
+    /// Why its textures can't be made on the GPU (its tiles paint on the CPU).
+    pub failed: std::sync::OnceLock<crate::Fallback>,
 }
 
 impl FxNode {

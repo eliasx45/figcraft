@@ -341,6 +341,17 @@ No alpha blockers: the alpha gate in [`roadmap.md`](roadmap.md#alpha-gate) passe
   at a new level (2.4 s, CPU 1.6 s: every layer is built), pattern fills, texture and glass,
   progressive blurs, masks directly on the page, a background blur seeing its own layer's drop
   shadows when it lies inside a layer with effects, macOS measured.
+- **Landed (2026-10-20): images no longer go missing zoomed out on the GPU canvas.** vello's
+  image atlas holds 8192×8192 pixels at most and leaves out, silently, the images that don't fit:
+  a top-level layer's scene holds its images within half a view, and every render took all of
+  them (262 images, 64 megapixels at 12 % on the owner's page), so frames showed their white or
+  black fill. A render now draws a blank pixel for each image off what it shows, the textures of
+  layers with effects are drawn in pieces when their images don't fit together, and before each
+  render a copy of vello's atlas bookkeeping (same allocator, checked against vello's resolver)
+  says whether every image gets a place; when not, renders without images let vello evict the
+  old ones first, and what still doesn't fit paints on the CPU. Left: layers whose nested effects
+  stack 50+ megapixels of textures on one spot (two on the owner's page at 12 % and 51 %) paint
+  on the CPU; their effect textures should cover only what is shown.
 
 ### 8. Platform QA: Linux and the browser left
 - **Missing:** regular runs on Linux and the browser; real screen readers; a repeat of the Windows
@@ -539,6 +550,7 @@ No alpha blockers: the alpha gate in [`roadmap.md`](roadmap.md#alpha-gate) passe
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-20 | patch | Gap 7: images no longer go missing (white or black frames) on the GPU canvas zoomed out: renders leave out the images they don't show, effect textures are drawn in pieces, and a copy of vello's atlas bookkeeping sends what can't fit to the CPU. Ranks and hours unchanged |
 | 2026-10-19 | patch | Gap 7: drop shadows, inner shadows, layer and background blurs, noise and masks drawn on the GPU (compute passes over a smaller copy, kept per tile level); the GPU scene built only where shown, on every core, far images left out, CPU-only layers found without building; images no longer vanish after a render without any (a vello atlas bug). The owner's page: the sharp image after a zoom 0.9–1.8 s → 0.1–0.5 s, zoom steps within a level 4–8 ms. Ranks and hours unchanged |
 | 2026-10-19 | patch | Gap 7: background and layer blurs of 16+ device pixels are blurred from a smaller copy (at most 2/255 off), and the canvas's bands overlap by the blurs reaching the view only. The owner's page, the sharp render after a zoom: 2.6 → 0.6 s at 100 %, 3.0 → 1.5 s at 200 %. Ranks and hours unchanged |
 | 2026-10-19 | patch | Gap 7: soft drop shadows are kept between renders at one zoom (per layer, or per 2048-pixel cell of a very large one), shared by the canvas's bands, tiles and pans; an entry is dropped when anything below the layer changes. The owner's page: a scroll's render 2.6 → 1.95 s and 1.7 → 0.9 s, the first at a new zoom 3.5 → 3.1 s. Ranks and hours unchanged |

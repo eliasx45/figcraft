@@ -71,6 +71,7 @@ fn images_far_from_the_view_are_left_out_until_they_are_near() {
             lod: false,
             top: f,
             fx: Vec::new(),
+            drawn: std::collections::HashMap::new(),
             open: 0,
             in_fx: 0,
             under: None,
@@ -98,4 +99,74 @@ fn a_layer_the_build_never_reaches_doesnt_send_its_top_level_layer_to_the_cpu() 
     // Inside a hidden group.
     d.get_mut(g).unwrap().visible = false;
     assert_eq!(crate::scene::cpu_only(&d, f), None);
+}
+
+#[test]
+fn the_atlas_mirror_places_images_as_vello_does() {
+    // Scenes of new and earlier images of all sizes, through vello's own resolver: it uploads a
+    // new image exactly when the mirror gives it a place, its atlas grows as the mirror's, and
+    // images get left out once it is full.
+    use vello::{kurbo, peniko};
+    let mut resolver = vello::low_level::vello_encoding::Resolver::new();
+    let mut mirror = super::Mirror::new();
+    let mut seed = 7u64;
+    let mut rand = move |n: u64| {
+        seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        (seed >> 33) % n.max(1)
+    };
+    let mut seen: Vec<peniko::ImageData> = Vec::new();
+    let (mut placed, mut dropped) = (0, 0);
+    let mut packed = Vec::new();
+    for round in 0..80 {
+        let mut sc = vello::Scene::new();
+        super::keep_atlas(&mut sc);
+        let mut fresh = Vec::new();
+        for _ in 0..rand(10) {
+            let im = match seen.get(rand(seen.len() as u64) as usize) {
+                Some(im) if rand(3) == 0 => im.clone(),
+                _ => {
+                    let im = super::scene::placeholder(1 + rand(3500) as u32, 1 + rand(3500) as u32, true);
+                    fresh.push(im.data.id());
+                    seen.push(im.clone());
+                    im
+                }
+            };
+            let brush = peniko::ImageBrush { image: im, sampler: peniko::ImageSampler::default() };
+            sc.fill(peniko::Fill::NonZero, kurbo::Affine::IDENTITY, &brush, None, &kurbo::Rect::new(0.0, 0.0, 1.0, 1.0));
+        }
+        // Now and then a render without images (vello then evicts sooner).
+        if rand(5) == 0 {
+            sc = vello::Scene::new();
+            super::keep_atlas(&mut sc);
+            fresh.clear();
+        }
+        mirror.resolve(&super::scene_images(&sc));
+        let (_, _, up) = resolver.resolve(sc.encoding(), &mut packed);
+        let size = mirror.atlas.size();
+        assert_eq!((up.width, up.height), (size.width as u32, size.height as u32), "round {round}");
+        let uploaded: std::collections::HashSet<u64> = up.images.iter().map(|(im, _, _)| im.data.id()).collect();
+        for id in &fresh {
+            assert_eq!(uploaded.contains(id), mirror.map.contains_key(id), "round {round}");
+            if mirror.map.contains_key(id) {
+                placed += 1;
+            } else {
+                dropped += 1;
+            }
+        }
+    }
+    assert!(placed > 50 && dropped > 5, "{placed} placed, {dropped} left out");
+}
+
+#[test]
+fn a_render_after_two_without_images_has_the_whole_atlas() {
+    // vello evicts an image only once two renders didn't use it.
+    let mut m = super::Mirror::new();
+    let quarter = |id| (id, 4096, 4096);
+    assert!(m.resolve(&[quarter(1), quarter(2), quarter(3), quarter(4)]));
+    assert!(!m.resolve(&[quarter(5)]), "the four of the last render are kept");
+    let mut m2 = super::Mirror::new();
+    m2.resolve(&[quarter(1), quarter(2), quarter(3), quarter(4)]);
+    m2.resolve(&[]);
+    m2.resolve(&[]);
+    assert!(m2.resolve(&[quarter(5), quarter(6), quarter(7), quarter(8)]));
 }

@@ -29,6 +29,13 @@ const MAX_CHANGED: usize = 4096;
 const BLOCK: i64 = 4;
 /// The render target's side, device pixels.
 const TARGET_PX: u32 = TILE_PX * BLOCK as u32;
+/// vello's image atlas: its side at first and at most, and how many renders an image stays after
+/// its last one (vello_encoding 0.11's `ImageCache`).
+const ATLAS_START: i32 = 1024;
+const ATLAS_SIDE: i32 = 8192;
+const ATLAS_KEEP: u64 = 2;
+/// Why a render whose images don't fit vello's atlas even when it is empty paints on the CPU.
+const ATLAS_FULL: Fallback = "too many image pixels for the GPU's atlas";
 
 /// A wgpu device (the window's, or one of its own) with a vello renderer.
 pub struct Gpu {
@@ -38,8 +45,242 @@ pub struct Gpu {
     target: Option<Target>,
     /// The effects' compute passes (`None`: they failed to build; layers with effects fall back).
     fx: Option<effects::Pipelines>,
+    atlas: Atlas,
     /// The adapter's name and backend (for reports).
     pub adapter: String,
+}
+
+/// vello's image atlas as the renders left it, and what makes room in it.
+struct Atlas {
+    mirror: Mirror,
+    /// A 1×1 target for renders without images.
+    idle: Option<wgpu::TextureView>,
+    /// What an image a render leaves out draws.
+    blank: vello::peniko::ImageData,
+}
+
+impl Default for Atlas {
+    fn default() -> Self {
+        Self { mirror: Mirror::new(), idle: None, blank: scene::placeholder(1, 1, true) }
+    }
+}
+
+impl Atlas {
+    /// Make sure every image of `scene` gets a place in vello's atlas (one that doesn't draws as
+    /// nothing): when they don't all fit next to those of the last renders, two renders without
+    /// images let vello evict those first. Fails when they don't fit even so.
+    fn fit(&mut self, renderer: &mut Renderer, device: &wgpu::Device, queue: &wgpu::Queue, scene: &Scene) -> Result<(), Fallback> {
+        let patches = &scene.encoding().resources.patches;
+        if patches.is_empty() {
+            // vello doesn't touch its atlas then.
+            return Ok(());
+        }
+        let images = scene_images(scene);
+        let mut next = self.mirror.clone();
+        if next.resolve(&images) {
+            self.mirror = next;
+            return Ok(());
+        }
+        // Two renders without images first: vello then evicts those of the renders before.
+        let mut next = self.mirror.clone();
+        next.resolve(&[]);
+        next.resolve(&[]);
+        let mut strip = None;
+        if !next.resolve_copy(&images) {
+            // Evicted only once one doesn't fit, those images left gaps the scene's don't fit
+            // between: a third with a strip as wide as the atlas (which doesn't fit then) evicts
+            // them all first, and the scene's images go into an atlas holding only the strip.
+            for h in [1, 64, 1024] {
+                let im = scene::placeholder(ATLAS_SIDE as u32, h, true);
+                let mut m = next.clone();
+                m.resolve(&[(im.data.id(), ATLAS_SIDE, h as i32)]);
+                if m.map.len() == 1 {
+                    if m.resolve_copy(&images) {
+                        next = m;
+                        strip = Some(im);
+                    }
+                    break;
+                }
+            }
+            if strip.is_none() {
+                return Err(ATLAS_FULL);
+            }
+        }
+        next.resolve(&images);
+        // vello resolves a scene's images before anything can fail: the atlas moves on either way.
+        self.mirror = next;
+        self.idle(renderer, device, queue, None)?;
+        self.idle(renderer, device, queue, None)?;
+        if let Some(im) = strip {
+            self.idle(renderer, device, queue, Some(im))?;
+        }
+        Ok(())
+    }
+
+    /// A render of nothing (or of `image`, drawn nowhere) into a pixel of its own.
+    fn idle(
+        &mut self,
+        renderer: &mut Renderer,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        image: Option<vello::peniko::ImageData>,
+    ) -> Result<(), Fallback> {
+        let view = self.idle.get_or_insert_with(|| {
+            device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some("figcraft-gpu-idle"),
+                    size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    usage: wgpu::TextureUsages::STORAGE_BINDING,
+                    view_formats: &[],
+                })
+                .create_view(&wgpu::TextureViewDescriptor::default())
+        });
+        let mut sc = Scene::new();
+        keep_atlas(&mut sc);
+        if let Some(image) = image {
+            let brush = vello::peniko::ImageBrush { image, sampler: vello::peniko::ImageSampler::default() };
+            sc.fill(vello::peniko::Fill::NonZero, vello::kurbo::Affine::IDENTITY, &brush, None, &vello::kurbo::Rect::new(0.0, 0.0, 1.0, 1.0));
+        }
+        let params = RenderParams { base_color: vello::peniko::Color::TRANSPARENT, width: 1, height: 1, antialiasing_method: AaConfig::Area };
+        renderer.render_to_texture(device, queue, &sc, view, &params).map_err(|e| {
+            log::warn!("gpu canvas: {e}");
+            "GPU render failed"
+        })
+    }
+}
+
+/// `scene`'s images in the order vello places them: blob, width, height.
+fn scene_images(scene: &Scene) -> Vec<(u64, i32, i32)> {
+    let side = |v: u32| i32::try_from(v).unwrap_or(i32::MAX);
+    scene
+        .encoding()
+        .resources
+        .patches
+        .iter()
+        .filter_map(|p| match p {
+            vello::low_level::vello_encoding::Patch::Image { image, .. } => Some((image.data.id(), side(image.width), side(image.height))),
+            _ => None,
+        })
+        .collect()
+}
+
+/// What vello's atlas holds, kept by the same rules on the same allocator (vello_encoding 0.11's
+/// `ImageCache` and its `Resolver::resolve_pending_images`), to know before a render whether it
+/// leaves an image out.
+#[derive(Clone)]
+struct Mirror {
+    atlas: guillotiere::AtlasAllocator,
+    /// The renders so far.
+    generation: u64,
+    /// Whether this render evicted images already (once per render).
+    evicted: bool,
+    /// Image blob → its place, size and the render that last used it.
+    map: HashMap<u64, (guillotiere::AllocId, i32, i32, u64)>,
+}
+
+impl Mirror {
+    fn new() -> Self {
+        Self {
+            atlas: guillotiere::AtlasAllocator::new(guillotiere::size2(ATLAS_START, ATLAS_START)),
+            generation: 0,
+            evicted: false,
+            map: HashMap::new(),
+        }
+    }
+
+    /// Whether a render of `images` would give each a place (this atlas left as it is).
+    fn resolve_copy(&self, images: &[(u64, i32, i32)]) -> bool {
+        self.clone().resolve(images)
+    }
+
+    /// A render of `images` (blob, width, height, in the scene's order): whether each got a place.
+    fn resolve(&mut self, images: &[(u64, i32, i32)]) -> bool {
+        self.generation = self.generation.wrapping_add(1);
+        self.evicted = false;
+        'pass: loop {
+            // A pass after the atlas grew starts over.
+            let previous = self.generation.wrapping_sub(1);
+            for e in self.map.values_mut() {
+                if e.3 == self.generation {
+                    e.3 = previous;
+                }
+            }
+            let mut all = true;
+            for &(id, w, h) in images {
+                loop {
+                    if self.place(id, w, h) {
+                        break;
+                    }
+                    let size = self.atlas.size();
+                    if w <= size.width && h <= size.height && self.evict() {
+                        continue;
+                    }
+                    if self.grow() {
+                        continue 'pass;
+                    }
+                    all = false;
+                    break;
+                }
+            }
+            return all;
+        }
+    }
+
+    fn place(&mut self, id: u64, w: i32, h: i32) -> bool {
+        if let Some(e) = self.map.get_mut(&id) {
+            e.3 = self.generation;
+            return true;
+        }
+        match self.atlas.allocate(guillotiere::size2(w, h)) {
+            Some(a) => {
+                self.map.insert(id, (a.id, w, h, self.generation));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Free the images the last renders didn't use.
+    fn evict(&mut self) -> bool {
+        if self.evicted {
+            return false;
+        }
+        let Some(before) = self.generation.checked_sub(ATLAS_KEEP) else { return false };
+        let stale: Vec<u64> = self.map.iter().filter(|(_, e)| e.3 < before).map(|(id, _)| *id).collect();
+        for id in &stale {
+            if let Some(e) = self.map.remove(id) {
+                self.atlas.deallocate(e.0);
+            }
+        }
+        self.evicted = !stale.is_empty();
+        self.evicted
+    }
+
+    /// A larger atlas with every image packed again in blob order.
+    fn grow(&mut self) -> bool {
+        let mut side = self.atlas.size().width.saturating_mul(2);
+        while side <= ATLAS_SIDE {
+            let mut atlas = guillotiere::AtlasAllocator::new(guillotiere::size2(side, side));
+            let mut ids: Vec<u64> = self.map.keys().copied().collect();
+            ids.sort_unstable();
+            let mut map = HashMap::with_capacity(ids.len());
+            let fits = ids.iter().all(|id| {
+                let Some(&(_, w, h, last)) = self.map.get(id) else { return true };
+                atlas.allocate(guillotiere::size2(w, h)).map(|a| map.insert(*id, (a.id, w, h, last))).is_some()
+            });
+            if fits {
+                self.atlas = atlas;
+                self.map = map;
+                return true;
+            }
+            side = side.saturating_mul(2);
+        }
+        false
+    }
 }
 
 struct Target {
@@ -91,12 +332,19 @@ impl Gpu {
             }
             None => Some(fx),
         };
-        Ok(Self { device, queue, renderer, target: None, fx, adapter })
+        Ok(Self { device, queue, renderer, target: None, fx, atlas: Atlas::default(), adapter })
     }
 
     /// Make the textures of `fx`'s passes (`backdrop`: what lies under it, in page coordinates, over
     /// `base`) and have the scene's images draw them.
-    fn make(&mut self, fx: &effects::FxNode, backdrop: Option<&Scene>, base: figcraft_color::Color) -> Result<(), Fallback> {
+    /// `drawn`: where the images are drawn ([`Builder::drawn`]).
+    fn make(
+        &mut self,
+        fx: &effects::FxNode,
+        backdrop: Option<&Scene>,
+        base: figcraft_color::Color,
+        drawn: &HashMap<u64, Rect>,
+    ) -> Result<(), Fallback> {
         let Some(pipes) = &self.fx else { return Err("GPU effects unavailable") };
         let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         // Each source drawn once per factor.
@@ -114,9 +362,6 @@ impl Gpu {
                         (None, effects::Source::Content) => (&fx.content, figcraft_color::Color::TRANSPARENT),
                         (None, effects::Source::Backdrop) => (backdrop.ok_or("no backdrop")?, base),
                     };
-                    let mut sc = Scene::new();
-                    keep_atlas(&mut sc);
-                    sc.append(scene, Some(fx.to_texture(p.k)));
                     let (width, height) = (p.image.width, p.image.height);
                     let t = self.device.create_texture(&wgpu::TextureDescriptor {
                         label: Some("figcraft-fx-source"),
@@ -125,20 +370,12 @@ impl Gpu {
                         sample_count: 1,
                         dimension: wgpu::TextureDimension::D2,
                         format: wgpu::TextureFormat::Rgba8Unorm,
-                        usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+                        usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                         view_formats: &[],
                     });
-                    let view = t.create_view(&wgpu::TextureViewDescriptor::default());
-                    let params = RenderParams {
-                        base_color: vello::peniko::Color::new([under.r, under.g, under.b, under.a]),
-                        width,
-                        height,
-                        antialiasing_method: AaConfig::Area,
-                    };
-                    self.renderer.render_to_texture(&self.device, &self.queue, &sc, &view, &params).map_err(|e| {
-                        log::warn!("gpu canvas: effects: {e}");
-                        "GPU render failed"
-                    })?;
+                    let under = vello::peniko::Color::new([under.r, under.g, under.b, under.a]);
+                    let to = Dest { texture: &t, width, height, base: under };
+                    pieces(&mut self.renderer, &self.device, &self.queue, &mut self.atlas, scene, fx.to_texture(p.k), drawn, &to)?;
                     if p.shape.is_none() {
                         sources.push((key, t.clone()));
                     }
@@ -200,6 +437,7 @@ impl Gpu {
             height,
             antialiasing_method: AaConfig::Area,
         };
+        self.atlas.fit(&mut self.renderer, &self.device, &self.queue, scene)?;
         self.target();
         let Some(t) = &self.target else { return Err("no render target") };
         let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -259,6 +497,7 @@ impl Gpu {
         counts: &mut Counts,
     ) -> Result<wgpu::Texture, Fallback> {
         let started = std::time::Instant::now();
+        self.atlas.fit(&mut self.renderer, &self.device, &self.queue, scene)?;
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("figcraft-gpu-canvas"),
             size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
@@ -312,6 +551,7 @@ impl Gpu {
             height: rows * TILE_PX,
             antialiasing_method: AaConfig::Area,
         };
+        self.atlas.fit(&mut self.renderer, &self.device, &self.queue, scene)?;
         self.target();
         let Some(t) = &self.target else { return Err("no render target") };
         let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -415,6 +655,8 @@ struct Built {
     covers: Option<Rect>,
     /// Its layers with effects, each after those inside it.
     fx: Vec<Arc<effects::FxNode>>,
+    /// Where each of its images is drawn ([`Builder::drawn`]).
+    drawn: HashMap<u64, Rect>,
 }
 
 /// What the kept scene was built from.
@@ -468,6 +710,8 @@ pub struct GpuTilePainter {
     /// its pixels are made for the view's scale, the tiles' for theirs.
     view_kept: Option<Kept>,
     frame: Scene,
+    /// What an image off the view draws ([`Self::compose`]).
+    blank: vello::peniko::ImageData,
     /// Why the last tile painted on the CPU was (`None`: none was).
     pub last_fallback: Option<Fallback>,
     pub counts: Counts,
@@ -524,6 +768,7 @@ impl GpuTilePainter {
             kept: None,
             view_kept: None,
             frame: Scene::new(),
+            blank: scene::placeholder(1, 1, true),
             last_fallback: None,
             counts: Counts::default(),
             native: false,
@@ -709,6 +954,7 @@ impl GpuTilePainter {
                         under: None,
                         area: Some(area),
                         partial: false,
+                        drawn: HashMap::new(),
                     };
                     let mut sc = Scene::new();
                     let part = b.node(&mut sc, c, figcraft_geom::Affine::IDENTITY, 0).map(|()| Built {
@@ -717,6 +963,7 @@ impl GpuTilePainter {
                         sampled: b.sampled,
                         covers: b.partial.then_some(area),
                         fx: b.fx,
+                        drawn: b.drawn,
                     });
                     (i, part, images)
                 })
@@ -789,13 +1036,19 @@ impl GpuTilePainter {
         keep_atlas(&mut self.frame);
         let xf = view.transform();
         let shown = view.page_rect();
+        let mut drawn: HashMap<u64, Rect> = HashMap::new();
         for (_, slot) in self.kept.iter().flat_map(|k| k.parts.iter()) {
             if let Some(Ok(b)) = slot.built()
                 && b.at.is_none_or(|r| overlaps(&r, &shown))
             {
                 self.frame.append(&b.scene, Some(xf));
+                merge(&mut drawn, &b.drawn);
             }
         }
+        // Images drawn only off the view (a layer's scene holds those near it too, and vello's
+        // atlas takes every image of a scene) draw a blank pixel there instead.
+        let near = shown.inflate(2.0 / view.scale, 2.0 / view.scale);
+        blank_out(&mut self.frame, &drawn, &near, &self.blank);
     }
 
     /// Make the effect textures the layers over `shown` draw, and those of the layers under the
@@ -839,6 +1092,10 @@ impl GpuTilePainter {
                 }
             }
         }
+        let mut drawn = HashMap::new();
+        for b in kept.parts.iter().filter_map(|(_, s)| s.built()?.as_ref().ok()) {
+            merge(&mut drawn, &b.drawn);
+        }
         for ((i, fx), want) in all.iter().zip(&wanted) {
             if !want {
                 continue;
@@ -860,6 +1117,9 @@ impl GpuTilePainter {
                 }
                 continue;
             }
+            if let Some(why) = fx.failed.get() {
+                return Err(why);
+            }
             let backdrop = match &fx.prefix {
                 Some(prefix) => {
                     let mut sc = Scene::new();
@@ -878,7 +1138,13 @@ impl GpuTilePainter {
                 }
                 None => None,
             };
-            gpu.make(fx, backdrop.as_ref(), base)?;
+            if let Err(why) = gpu.make(fx, backdrop.as_ref(), base, &drawn) {
+                // It won't fit later either: not tried again for every tile.
+                if why == ATLAS_FULL {
+                    let _ = fx.failed.set(why);
+                }
+                return Err(why);
+            }
             if !self.overrides.iter().any(|(f, _)| std::ptr::eq(f.as_ptr(), Arc::as_ptr(fx))) {
                 self.overrides.push((Arc::downgrade(fx), fx.passes.iter().map(|p| p.image.clone()).collect()));
             }
@@ -987,6 +1253,114 @@ impl GpuTilePainter {
             })
             .unwrap_or(figcraft_color::Color::TRANSPARENT)
     }
+}
+
+/// Add `from`'s places of images to `into`'s.
+fn merge(into: &mut HashMap<u64, Rect>, from: &HashMap<u64, Rect>) {
+    for (id, r) in from {
+        into.entry(*id).and_modify(|d| *d = d.union(*r)).or_insert(*r);
+    }
+}
+
+/// Have `sc`'s images that `drawn` places off `near` (in `sc`'s coordinates) draw `blank`.
+fn blank_out(sc: &mut Scene, drawn: &HashMap<u64, Rect>, near: &Rect, blank: &vello::peniko::ImageData) {
+    for p in &mut sc.encoding_mut().resources.patches {
+        if let vello::low_level::vello_encoding::Patch::Image { image, .. } = p
+            && drawn.get(&image.data.id()).is_some_and(|r| !overlaps(r, near))
+        {
+            *image = blank.clone();
+        }
+    }
+}
+
+/// A texture to render into, and what it is cleared to.
+struct Dest<'a> {
+    texture: &'a wgpu::Texture,
+    width: u32,
+    height: u32,
+    base: vello::peniko::Color,
+}
+
+/// Render `scene` (page coordinates, its images placed by `drawn`) through `to_px` into `to`; in
+/// pieces when its images don't fit vello's atlas together, each without the images it doesn't
+/// show (down to 256 pixels a side).
+#[allow(clippy::too_many_arguments)]
+fn pieces(
+    renderer: &mut Renderer,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    atlas: &mut Atlas,
+    scene: &Scene,
+    to_px: figcraft_geom::Affine,
+    drawn: &HashMap<u64, Rect>,
+    to: &Dest,
+) -> Result<(), Fallback> {
+    // Where its images are drawn, in pixels.
+    let places: HashMap<u64, Rect> = drawn.iter().map(|(id, r)| (*id, figcraft_geom::transform_rect_bbox(to_px, *r))).collect();
+    let whole = Rect::new(0.0, 0.0, f64::from(to.width), f64::from(to.height));
+    let mut todo = vec![whole];
+    while let Some(piece) = todo.pop() {
+        let (w, h) = (piece.width(), piece.height());
+        let mut sc = Scene::new();
+        keep_atlas(&mut sc);
+        sc.append(scene, Some(figcraft_geom::Affine::translate((-piece.x0, -piece.y0)) * to_px));
+        let (pw, ph) = (w as u32, h as u32);
+        let one = piece == whole;
+        if !one {
+            let near = Rect::new(-2.0, -2.0, w + 2.0, h + 2.0);
+            let moved: HashMap<u64, Rect> = places.iter().map(|(id, at)| (*id, *at - figcraft_geom::Vec2::new(piece.x0, piece.y0))).collect();
+            blank_out(&mut sc, &moved, &near, &atlas.blank);
+        }
+        if let Err(why) = atlas.fit(renderer, device, queue, &sc) {
+            if w.max(h) <= 256.0 {
+                return Err(why);
+            }
+            // In halves across its longer side, on whole pixels.
+            let (a, b) = if w >= h {
+                let x = (piece.x0 + w / 2.0).floor();
+                (Rect::new(piece.x0, piece.y0, x, piece.y1), Rect::new(x, piece.y0, piece.x1, piece.y1))
+            } else {
+                let y = (piece.y0 + h / 2.0).floor();
+                (Rect::new(piece.x0, piece.y0, piece.x1, y), Rect::new(piece.x0, y, piece.x1, piece.y1))
+            };
+            todo.extend([a, b]);
+            continue;
+        }
+        let params = RenderParams { base_color: to.base, width: pw, height: ph, antialiasing_method: AaConfig::Area };
+        let failed = |e: vello::Error| {
+            log::warn!("gpu canvas: {e}");
+            "GPU render failed"
+        };
+        if one {
+            let view = to.texture.create_view(&wgpu::TextureViewDescriptor::default());
+            renderer.render_to_texture(device, queue, &sc, &view, &params).map_err(failed)?;
+            continue;
+        }
+        let t = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("figcraft-gpu-piece"),
+            size: wgpu::Extent3d { width: pw, height: ph, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        renderer.render_to_texture(device, queue, &sc, &t.create_view(&wgpu::TextureViewDescriptor::default()), &params).map_err(failed)?;
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("figcraft-gpu-piece") });
+        enc.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo { texture: &t, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyTextureInfo {
+                texture: to.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: piece.x0 as u32, y: piece.y0 as u32, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d { width: pw, height: ph, depth_or_array_layers: 1 },
+        );
+        queue.submit([enc.finish()]);
+    }
+    Ok(())
 }
 
 fn ms(t: std::time::Instant) -> f64 {

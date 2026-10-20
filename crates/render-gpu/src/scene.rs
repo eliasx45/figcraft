@@ -91,6 +91,9 @@ pub struct Builder<'a> {
     pub area: Option<Rect>,
     /// Whether an image was left out (the scene then shows only `area` as it is).
     pub partial: bool,
+    /// Where each image is drawn (by blob, page coordinates): a render leaves out those it doesn't
+    /// show (vello's atlas takes every image of a scene, and too many draw as nothing).
+    pub drawn: HashMap<u64, Rect>,
 }
 
 /// Why the GPU can't draw top-level layer `top`, found without building it: what the build would
@@ -146,7 +149,7 @@ impl AsRef<[u8]> for Zeros {
 }
 
 /// A new image of `w`×`h` an effect's texture will replace.
-fn placeholder(w: u32, h: u32, premultiplied: bool) -> ImageData {
+pub(crate) fn placeholder(w: u32, h: u32, premultiplied: bool) -> ImageData {
     ImageData {
         data: Blob::new(Arc::new(Zeros(w as usize * h as usize * 4))),
         format: ImageFormat::Rgba8,
@@ -579,7 +582,21 @@ impl Builder<'_> {
         passes.extend(blurred);
         passes.extend(backdrop);
         passes.extend(noise_passes.into_iter().map(|(p, _)| p));
-        self.fx.push(Arc::new(FxNode { id: n.id, top: self.top, content, prefix, region, scale, passes, made: Mutex::new(None) }));
+        // Its textures draw over its region (the content of a layer with effects around it holds them).
+        for p in &passes {
+            self.drawn.insert(p.image.data.id(), region);
+        }
+        self.fx.push(Arc::new(FxNode {
+            id: n.id,
+            top: self.top,
+            content,
+            prefix,
+            region,
+            scale,
+            passes,
+            made: Mutex::new(None),
+            failed: OnceLock::new(),
+        }));
         Ok(())
     }
 
@@ -730,6 +747,10 @@ impl Builder<'_> {
         let style = fill_rule(rule);
         for p in paints {
             let Some((brush, brush_xf)) = self.brush(p, w, h, scale, xf)? else { continue };
+            if let peniko::Brush::Image(im) = &brush {
+                let at = figcraft_geom::transform_rect_bbox(xf, path.bounding_box());
+                self.drawn.entry(im.image.data.id()).and_modify(|r| *r = r.union(at)).or_insert(at);
+            }
             let blend = !normal(p.blend);
             if blend {
                 sc.push_layer(style, mode(p.blend), 1.0, xf, path);

@@ -434,3 +434,68 @@ fn a_device_error_is_logged_not_fatal() {
     });
     let _ = device.poll(wgpu::PollType::wait_indefinitely());
 }
+
+/// An image of one colour, `side` pixels square, as a `.figcraft` holds one.
+fn solid_image(d: &mut Document, name: &str, side: u32, c: [u8; 3]) {
+    let mut p = Pixmap::new(side, side).unwrap();
+    p.fill(tiny_skia::Color::from_rgba8(c[0], c[1], c[2], 255));
+    d.images.insert(name.into(), ImageData { bytes: Arc::new(figcraft_render::encode_png(&p).unwrap()), width: side, height: side });
+}
+
+const COLOURS: [[u8; 3]; 8] =
+    [[200, 30, 30], [30, 200, 30], [30, 30, 200], [200, 200, 30], [200, 30, 200], [30, 200, 200], [120, 60, 20], [20, 60, 120]];
+
+/// The colour at page point (`x`, `y`) of the level-0 tiles `out`.
+fn colour_at(out: &[(TileKey, Option<Painted>)], x: u32, y: u32) -> [u8; 3] {
+    let key = TileKey { level: 0, x: i64::from(x / TILE_PX), y: i64::from(y / TILE_PX) };
+    let Some((_, Some(Painted::Pixels(p)))) = out.iter().find(|(k, _)| *k == key) else { panic!("tile {key:?} not painted as pixels") };
+    let i = (((y % TILE_PX) * TILE_PX + x % TILE_PX) * 4) as usize;
+    [p.data()[i], p.data()[i + 1], p.data()[i + 2]]
+}
+
+#[test]
+#[ignore = "needs a GPU adapter"]
+fn images_away_from_a_tile_leave_the_atlas_to_those_on_it() {
+    // A frame of eight 3000-pixel images (72 megapixels; vello's atlas holds 67): its scene held
+    // them all and every render of it took them all, so some drew as nothing (the frame's white
+    // showed through, zoomed out on a page of screenshots).
+    let Ok(gpu) = Gpu::new() else { return };
+    let mut gp = GpuTilePainter::new(gpu);
+    let (mut d, p) = new_doc();
+    let f = d.create(p, NodeKind::Frame, "Row", 0.0, 0.0, 8.0 * 3100.0, 3000.0).unwrap();
+    d.get_mut(f).unwrap().fills = vec![Paint::solid(Color::WHITE)];
+    for (i, c) in COLOURS.iter().enumerate() {
+        let name = format!("parity-big-{i}");
+        solid_image(&mut d, &name, 3000, *c);
+        let r = rect(&mut d, f, i as f64 * 3100.0, 0.0, 3000.0, 3000.0, "000000");
+        d.get_mut(r).unwrap().fills = vec![Paint::image(&name, ImageScaleMode::Fill)];
+    }
+    let doc = Arc::new(d);
+    // A row of tiles across all of them, in one go (the scene is built with all their images).
+    let keys: Vec<TileKey> = (0..(8 * 3100 / TILE_PX as i64)).map(|x| TileKey { level: 0, x, y: 2 }).collect();
+    let out = gp.paint(&doc, p, &keys, &Options::default(), &|| false);
+    assert_eq!(gp.counts.cpu, 0, "{:?}", gp.last_fallback);
+    for (i, c) in COLOURS.iter().enumerate() {
+        assert_eq!(colour_at(&out, i as u32 * 3100 + 1500, 1300), *c, "image {i}");
+    }
+}
+
+#[test]
+#[ignore = "needs a GPU adapter"]
+fn images_too_many_for_the_atlas_paint_on_the_cpu() {
+    // Eight 3000-pixel images on one spot can't all be in vello's atlas: drawn on the GPU, those
+    // left out drew as nothing (the one under showed instead of the top one).
+    let Ok(gpu) = Gpu::new() else { return };
+    let mut gp = GpuTilePainter::new(gpu);
+    let (mut d, p) = new_doc();
+    for (i, c) in COLOURS.iter().enumerate() {
+        let name = format!("parity-stack-{i}");
+        solid_image(&mut d, &name, 3000, *c);
+        let r = rect(&mut d, p, 0.0, 0.0, 3000.0, 3000.0, "000000");
+        d.get_mut(r).unwrap().fills = vec![Paint::image(&name, ImageScaleMode::Fill)];
+    }
+    let doc = Arc::new(d);
+    let out = gp.paint(&doc, p, &[TileKey { level: 0, x: 1, y: 1 }], &Options::default(), &|| false);
+    assert_eq!(colour_at(&out, 700, 700), COLOURS[7]);
+    assert_eq!(gp.counts.cpu, 1, "painted on the GPU, without some of its images");
+}

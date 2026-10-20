@@ -1998,6 +1998,7 @@ dependencies = [
  "figcraft-pathops",
  "figcraft-render",
  "figcraft-text",
+ "guillotiere",
  "log",
  "pollster 0.4.0",
  "rayon",
