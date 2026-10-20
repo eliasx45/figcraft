@@ -68,7 +68,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "effectcraft.explode",
             "Explode EffectCraft precomps",
-            "{id?}  the desktop app asks EffectCraft for the comps nested in the card's stretch and places a card for each, to the right of it, all on the same playhead → {requested}",
+            "{id?}  the desktop app asks EffectCraft for the comps nested in the card at the frame it shows and places a card for each (at most 16), to the right of it, all on the same playhead (one undo step) → {requested}",
             false,
             |s, p| {
                 let (id, _) = target("effectcraft.explode", s, p)?;

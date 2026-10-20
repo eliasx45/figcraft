@@ -155,8 +155,8 @@ isn't running.
   `effectcraft.togglePlay`, `effectcraft.seek {time | frame | x}`, `effectcraft.transport`. A playing
   card sounds the comp's own mix; audio strips covering the same edit time (`offset`) follow it,
   and cards follow a playing strip.
-- `effectcraft.explode {id?}`: a card for each comp nested in the card's stretch, to its right, all
-  on the same playhead. `effectcraft.reveal {id?, time?}`: open the comp in EffectCraft there
+- `effectcraft.explode {id?}`: a card for each comp nested in the card at the frame it shows (at
+  most 16), to its right, all on the same playhead; one undo step. `effectcraft.reveal {id?, time?}`: open the comp in EffectCraft there
   (double-clicking a card does it too).
 
 ## Configure a client

@@ -36,6 +36,8 @@ const REVISION_EVERY: f64 = 0.5;
 const RETRY_DOWN: f64 = 2.0;
 /// Frames either side of the playhead kept for long cards.
 const WINDOW: i64 = 300;
+/// Most cards one explode places.
+const MAX_EXPLODE: usize = 16;
 /// Frame sizes asked for (longest side, pixels): the smallest one at least as big as the card
 /// on screen, at most half the comp.
 const SIDES: [u32; 3] = [240, 480, 960];
@@ -98,12 +100,13 @@ pub struct Link {
     sounds: HashMap<SoundKey, SoundState>,
     /// Cards whose poster was asked for this session.
     posters: HashSet<NodeId>,
-    /// The comp time each card showed last (it stays there when nothing moves it).
+    /// The comp time each card showed last (it stays there when nothing moves it; explode takes
+    /// the comps showing there).
     shown: HashMap<NodeId, f64>,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     out: Option<crate::audio_ui::out::Output>,
-    /// The transport generation and card the sound was started for, and the time it was at.
-    out_for: Option<(u64, NodeId)>,
+    /// The transport generation, card and sound piece the output was started for.
+    out_for: Option<(u64, NodeId, SoundKey)>,
     last_time: f64,
     /// Whether the audio strip and the card transport played last frame.
     was: (bool, bool),
@@ -208,8 +211,26 @@ fn ms(t: f64) -> i64 {
     if v.is_finite() { v.clamp(-1e15, 1e15) as i64 } else { 0 }
 }
 
-fn sound_key(c: &EcComp) -> SoundKey {
-    (c.comp.clone(), c.comp_id, ms(c.start), ms(c.end))
+/// Seconds of sound fetched at once (EffectCraft sends at most 300 s per request, and a long
+/// card's whole mix would be a huge reply), and the step those pieces start on.
+const SOUND_WINDOW: f64 = 60.0;
+const SOUND_STEP: f64 = 30.0;
+
+/// The stretch of `c`'s sound (comp seconds) fetched for playhead `t`: all of it for a short
+/// card, else the 60 s piece starting on the 30 s step at or before `t` (so the next piece is
+/// there before the playhead leaves this one).
+pub(crate) fn sound_window(c: &EcComp, t: f64) -> (f64, f64) {
+    if c.span() <= SOUND_WINDOW * 1.5 {
+        return (c.start, c.end);
+    }
+    let t = if t.is_finite() { t.clamp(c.start, c.end) } else { c.start };
+    let k = ((t - c.start) / SOUND_STEP).floor().max(0.0);
+    let a = c.start + k * SOUND_STEP;
+    (a, (a + SOUND_WINDOW).min(c.end))
+}
+
+fn sound_key(c: &EcComp, w: (f64, f64)) -> SoundKey {
+    (c.comp.clone(), c.comp_id, ms(w.0), ms(w.1))
 }
 
 /// The edit time (timeline seconds) the shared playhead is at: the playing card's, else the
@@ -522,36 +543,42 @@ impl FigApp {
         let _ = (now, wanted);
     }
 
-    /// Play the playing card's sound (macOS and Windows), restarting it on a seek, a new play or
-    /// a loop round.
+    /// Play the playing card's sound (macOS and Windows), restarting it on a seek, a new play, a
+    /// loop round or the next piece of a long card's sound.
     fn effectcraft_sound(&mut self) {
         let t = &self.session.effectcraft;
         let (playing, generation, node, time) = (t.playing(), t.generation, t.node, t.time());
         let wrapped = time + 0.05 < self.effectcraft.last_time;
         self.effectcraft.last_time = time;
-        if !playing {
+        let card = node.filter(|_| playing).and_then(|n| Some((n, self.session.doc().ok()?.node(n)?.effectcraft.as_deref().cloned()?)));
+        let Some((node, c)) = card.filter(|(_, c)| c.sound) else {
             self.effectcraft.out_for = None;
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             {
                 self.effectcraft.out = None;
             }
             return;
-        }
-        let Some(node) = node else { return };
-        if self.effectcraft.out_for == Some((generation, node)) && !wrapped {
+        };
+        let w = sound_window(&c, time);
+        let want = (generation, node, sound_key(&c, w));
+        if self.effectcraft.out_for.as_ref() == Some(&want) && !wrapped {
             return;
         }
-        let Some(c) = self.session.doc().ok().and_then(|d| d.node(node)?.effectcraft.as_deref().cloned()) else { return };
-        if !c.sound {
+        let Some(SoundState::Ready(sound)) = self.effectcraft.sounds.get(&want.2) else {
+            // Not here yet (effectcraft_request asks for it): quiet until it is.
+            self.effectcraft.out_for = None;
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            {
+                self.effectcraft.out = None;
+            }
             return;
-        }
-        let Some(SoundState::Ready(sound)) = self.effectcraft.sounds.get(&sound_key(&c)) else { return };
+        };
         let sound = sound.clone();
-        self.effectcraft.out_for = Some((generation, node));
+        self.effectcraft.out_for = Some(want);
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             self.effectcraft.out = None;
-            match crate::audio_ui::out::Output::start(&sound, (time - c.start).max(0.0), c.span()) {
+            match crate::audio_ui::out::Output::start(&sound, (time - w.0).max(0.0), w.1 - w.0) {
                 Ok(o) => self.effectcraft.out = Some(o),
                 Err(e) => log::warn!("EffectCraft card sound: {e}"),
             }
@@ -588,7 +615,9 @@ impl FigApp {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let job = match kind {
-                "effectcraft.explode" => io::Job::Tree { card: id, comp: c.clone() },
+                // The comps showing at the frame the card shows, not every precomp of its stretch
+                // (a 10-minute MAIN holds dozens).
+                "effectcraft.explode" => io::Job::Tree { card: id, comp: c.clone(), at: self.effectcraft.shown.get(&id).copied().unwrap_or(c.start) },
                 _ => io::Job::Reveal { comp: c.clone(), time: data.get("time").and_then(Value::as_f64).unwrap_or(c.start) },
             };
             if !self.effectcraft_send(job) {
@@ -671,9 +700,8 @@ impl FigApp {
                         Some(s) => SoundState::Ready(s),
                         None => SoundState::Silent,
                     };
+                    // Sound that arrives while its card plays starts on the next frame.
                     self.effectcraft.sounds.insert(key, state);
-                    // Sound that arrives while the card plays starts at once.
-                    self.effectcraft.out_for = None;
                 }
                 io::Reply::Revision(r) => {
                     self.effectcraft.revision_out = false;
@@ -726,10 +754,27 @@ impl FigApp {
             self.effectcraft.revision_out = self.effectcraft_send(io::Job::Revision);
             ctx.request_repaint_after(std::time::Duration::from_secs_f64(REVISION_EVERY));
         }
+        let mut keep: HashSet<SoundKey> = HashSet::new();
         for (id, c, side, at) in wanted {
-            if c.sound && !self.effectcraft.sounds.contains_key(&sound_key(c)) {
-                self.effectcraft.sounds.insert(sound_key(c), SoundState::Loading);
-                self.effectcraft_send(io::Job::Sound { key: sound_key(c), comp: c.clone() });
+            if c.sound {
+                // The piece of sound at the playhead, and the next one while the card plays.
+                let w = sound_window(c, *at as f64 / c.fps);
+                let mut pieces = vec![w];
+                let ec = &self.session.effectcraft;
+                if ec.playing() && ec.node == Some(*id) {
+                    let next = sound_window(c, w.0 + SOUND_STEP);
+                    if next != w {
+                        pieces.push(next);
+                    }
+                }
+                for p in pieces {
+                    let key = sound_key(c, p);
+                    keep.insert(key.clone());
+                    if !self.effectcraft.sounds.contains_key(&key) {
+                        self.effectcraft.sounds.insert(key.clone(), SoundState::Loading);
+                        self.effectcraft_send(io::Job::Sound { key, comp: c.clone(), start: p.0, end: p.1 });
+                    }
+                }
             }
             if self.effectcraft.in_flight >= IN_FLIGHT {
                 continue;
@@ -754,19 +799,21 @@ impl FigApp {
             for f in &frames {
                 s.pending.insert(*f, now);
             }
-            // The poster: the middle frame, once a session, for a card without one.
-            let mid = {
-                let r = c.frames();
-                (r.start() + r.end()) / 2
-            };
+            // The poster: the first frame fetched (the one at the playhead), once a session, for a
+            // card without one.
+            let first = frames.first().copied().unwrap_or(*at);
             let has_poster = doc.node(*id).is_some_and(|n| n.fills.iter().any(|p| matches!(p.kind, figcraft_color::PaintKind::Image(_))));
-            let poster = (!has_poster && !self.effectcraft.posters.contains(id) && frames.contains(&mid)).then_some(*id);
+            let poster = (!has_poster && !self.effectcraft.posters.contains(id)).then_some(*id);
             if let Some(p) = poster {
                 self.effectcraft.posters.insert(p);
             }
-            if self.effectcraft_send(io::Job::Frames { store: key, comp: c.clone(), frames, side: *side, poster: poster.map(|p| (p, mid)) }) {
+            if self.effectcraft_send(io::Job::Frames { store: key, comp: c.clone(), frames, side: *side, poster: poster.map(|p| (p, first)) }) {
                 self.effectcraft.in_flight += 1;
             }
+        }
+        // Sound pieces nobody is near any more go (a long card's would pile up).
+        if self.effectcraft.sounds.len() > 12 {
+            self.effectcraft.sounds.retain(|k, s| matches!(s, SoundState::Loading) || keep.contains(k));
         }
         self.effectcraft_evict();
     }
@@ -796,14 +843,17 @@ impl FigApp {
     fn effectcraft_explode(&mut self, card: NodeId, tree: &Value) {
         let Ok(doc) = self.session.doc() else { return };
         let (Some(c), Some(b)) = (doc.node(card).and_then(|n| n.effectcraft.as_deref()).cloned(), doc.world_bounds(card)) else { return };
-        let steps = explode_steps(&c, (b.x0, b.y0, b.x1 - b.x0, b.y1 - b.y0), tree);
+        let mut steps = explode_steps(&c, (b.x0, b.y0, b.x1 - b.x0, b.y1 - b.y0), tree);
         if steps.is_empty() {
-            self.toast(format!("No comps are nested in {} at this time", c.comp));
+            self.toast(format!("No comps are nested in {} at this frame", c.comp));
             return;
         }
+        let total = steps.len();
+        steps.truncate(MAX_EXPLODE);
         let n = steps.len();
+        let more = if total > n { format!(" ({} more left out)", total - n) } else { String::new() };
         match self.session.batch("Explode precomps", &steps) {
-            Ok(_) => self.toast(format!("{n} nested comp{} placed next to {}", if n == 1 { "" } else { "s" }, c.comp)),
+            Ok(_) => self.toast(format!("{n} nested comp{} placed next to {}{more}. ⌘Z takes them away", if n == 1 { "" } else { "s" }, c.comp)),
             Err(e) => self.toast(e.to_string()),
         }
         self.handle_ui_requests();
@@ -833,9 +883,9 @@ mod io {
 
     pub enum Job {
         Frames { store: StoreKey, comp: EcComp, frames: Vec<i64>, side: u32, poster: Option<(NodeId, i64)> },
-        Sound { key: SoundKey, comp: EcComp },
+        Sound { key: SoundKey, comp: EcComp, start: f64, end: f64 },
         Revision,
-        Tree { card: NodeId, comp: EcComp },
+        Tree { card: NodeId, comp: EcComp, at: f64 },
         Reveal { comp: EcComp, time: f64 },
     }
 
@@ -1010,8 +1060,8 @@ mod io {
                     Err(_) => Reply::Revision(0),
                 }),
                 Job::Frames { store, comp, frames, side, poster } => self.frames(store, &comp, frames, side, poster),
-                Job::Sound { key, comp } => {
-                    let p = json!({"comp": comp_ref(&comp), "start": comp.start, "end": comp.end, "rate": 48_000});
+                Job::Sound { key, comp, start, end } => {
+                    let p = json!({"comp": comp_ref(&comp), "start": start, "end": end, "rate": 48_000});
                     let sound = match self.call("figcraft.audio", p)? {
                         Ok(v) if v.get("silent").and_then(Value::as_bool) != Some(true) => {
                             b64(v.get("wav")).and_then(|bytes| figcraft_audio::open(&format!("{}.wav", comp.comp), Arc::from(bytes.as_slice())).ok()).map(Arc::new)
@@ -1020,8 +1070,8 @@ mod io {
                     };
                     Ok(Reply::Sound { key, sound })
                 }
-                Job::Tree { card, comp } => {
-                    let p = json!({"comp": comp_ref(&comp), "start": comp.start, "end": comp.end, "depth": 3});
+                Job::Tree { card, comp, at } => {
+                    let p = json!({"comp": comp_ref(&comp), "start": at, "end": at + 1.0 / comp.fps, "depth": 3});
                     Ok(match self.call("figcraft.tree", p)? {
                         Ok(tree) => Reply::Tree { card, tree },
                         Err(e) if unknown(&e) => Reply::Error("This EffectCraft can't list its precomps yet: update it and restart it".into()),
