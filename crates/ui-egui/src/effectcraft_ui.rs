@@ -37,6 +37,8 @@ const REVISION_EVERY: f64 = 0.5;
 const RETRY_DOWN: f64 = 2.0;
 /// Frames either side of the playhead kept for long cards.
 const WINDOW: i64 = 300;
+/// Seconds from the playhead a frame may be and still stand in for it.
+const NEAR: f64 = 2.0;
 /// Most cards one explode places.
 const MAX_EXPLODE: usize = 16;
 /// Frame sizes asked for (longest side, pixels): the smallest one at least as big as the card
@@ -113,6 +115,10 @@ pub struct Link {
     was: (bool, bool),
     /// The card whose slider is being dragged.
     scrub: Option<NodeId>,
+    /// EffectCraft is closed and frames come from the saved project (`effectcraft-cli`), and
+    /// that file's modification time (seconds) when they were rendered.
+    headless: bool,
+    file_stamp: Option<u64>,
     bytes: usize,
 }
 
@@ -122,11 +128,19 @@ impl Link {
         self.down.as_ref().map(|(e, _)| e.as_str())
     }
 
-    /// The texture of comp frame `f` of `c`, or the nearest one there is.
+    /// The texture of comp frame `f` of `c`, or the nearest one there is within the card's
+    /// stretch and `NEAR` of `f` (else the card shows its poster, not some other moment).
     fn texture_near(&self, c: &EcComp, f: i64) -> Option<&egui::TextureHandle> {
         let mut best: Option<(i64, u32, &egui::TextureHandle)> = None;
+        let r = c.frames();
+        let reach = (c.fps * NEAR).round().max(1.0) as i64;
+        let (lo, hi) = ((f - reach).max(*r.start()), (f + reach).min(*r.end()));
+        if lo > hi {
+            return None;
+        }
+        let f = f.clamp(lo, hi);
         for (k, s) in self.stores.iter().filter(|(k, _)| k.same_comp(c)) {
-            let near = [s.frames.range(..=f).next_back(), s.frames.range(f..).next()];
+            let near = [s.frames.range(lo..=f).next_back(), s.frames.range(f..=hi).next()];
             for (g, slot) in near.into_iter().flatten() {
                 let d = (g - f).abs();
                 if best.is_none_or(|(bd, bs, _)| d < bd || (d == bd && k.side > bs)) {
@@ -377,7 +391,8 @@ pub fn overlay(app: &FigApp, painter: &egui::Painter) {
             chip(painter, pos2(pic.min.x + 6.0, pic.max.y - 22.0), msg, font.clone(), Color32::from_black_alpha(190));
         }
         if hovered || playing {
-            let label = format!("{}  f{}  {}", c.comp, f, crate::audio_ui::timecode(c.timeline_of(t)));
+            let from = if app.effectcraft.headless && app.effectcraft.down().is_some() { "  · saved file" } else { "" };
+            let label = format!("{}  f{}  {}{from}", c.comp, f, crate::audio_ui::timecode(c.timeline_of(t)));
             chip(painter, pic.min + vec2(6.0, 6.0), label, font.clone(), Color32::from_black_alpha(170));
             if let Some((play, explode)) = buttons(pic) {
                 round_button(painter, play);
@@ -725,11 +740,27 @@ impl FigApp {
         let replies: Vec<io::Reply> = io.rx.try_iter().collect();
         for r in replies {
             match r {
-                io::Reply::Frames { store, revision, got, pending, failed, poster } => {
+                io::Reply::Frames { store, revision, got, pending, failed, poster, headless } => {
                     self.effectcraft.in_flight = self.effectcraft.in_flight.saturating_sub(1);
-                    self.effectcraft.down = None;
-                    if revision > self.effectcraft.revision {
-                        self.effectcraft.revision = revision;
+                    match headless {
+                        // Rendered from the saved file: a newer save makes the earlier ones stale.
+                        Some(stamp) => {
+                            if self.effectcraft.file_stamp.is_some_and(|s| s != stamp) {
+                                for s in self.effectcraft.stores.values_mut() {
+                                    s.frames.retain(|_, x| x.rev != 0);
+                                }
+                                self.effectcraft.bytes = self.effectcraft.stores.values().flat_map(|s| s.frames.values()).map(|x| x.bytes).sum();
+                            }
+                            self.effectcraft.file_stamp = Some(stamp);
+                            self.effectcraft.headless = true;
+                        }
+                        None => {
+                            self.effectcraft.down = None;
+                            self.effectcraft.headless = false;
+                            if revision > self.effectcraft.revision {
+                                self.effectcraft.revision = revision;
+                            }
+                        }
                     }
                     let s = self.effectcraft.stores.entry(store).or_default();
                     for (f, tex) in got {
@@ -852,11 +883,14 @@ impl FigApp {
             }
             let key = StoreKey::of(c, *side);
             let rev = self.effectcraft.revision;
+            // While EffectCraft is closed any frame held is as new as the saved file allows.
+            let headless = self.effectcraft.headless;
             let s = self.effectcraft.stores.entry(key.clone()).or_default();
             s.focus = *at;
             let mut frames = Vec::new();
             for f in order(c, *at) {
-                if s.failed.contains(&f) || s.frames.get(&f).is_some_and(|x| x.rev >= rev) || s.pending.get(&f).is_some_and(|t| now - t < REPOLL) {
+                let fresh = |x: &Slot| x.rev >= rev || (headless && x.rev == 0);
+                if s.failed.contains(&f) || s.frames.get(&f).is_some_and(fresh) || s.pending.get(&f).is_some_and(|t| now - t < REPOLL) {
                     continue;
                 }
                 frames.push(f);
@@ -937,9 +971,12 @@ impl FigApp {
 mod io {
     use std::io::{BufRead, BufReader, Write};
     use std::net::{SocketAddr, TcpStream};
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::mpsc::{Receiver, Sender, channel};
-    use std::time::Duration;
+    use std::time::{Duration, Instant, UNIX_EPOCH};
 
     use figcraft_doc::{EcComp, NodeId};
     use serde_json::{Value, json};
@@ -969,7 +1006,9 @@ mod io {
     }
 
     pub enum Reply {
-        Frames { store: StoreKey, revision: u64, got: Vec<(i64, egui::TextureHandle)>, pending: Vec<i64>, failed: Vec<i64>, poster: Option<(NodeId, Vec<u8>)> },
+        /// `headless`: rendered from the saved project (EffectCraft closed), whose modification
+        /// time (seconds) it carries.
+        Frames { store: StoreKey, revision: u64, got: Vec<(i64, egui::TextureHandle)>, pending: Vec<i64>, failed: Vec<i64>, poster: Option<(NodeId, Vec<u8>)>, headless: Option<u64> },
         FramesFailed { store: StoreKey, frames: Vec<i64>, error: String },
         Sound { key: SoundKey, sound: Option<Arc<figcraft_audio::Sound>> },
         Revision(u64),
@@ -1102,7 +1141,15 @@ mod io {
             if self.conn.is_none() {
                 match Conn::open() {
                     Ok(c) => self.conn = Some(c),
-                    Err(error) => return Reply::Down { error, kind },
+                    Err(error) => {
+                        // Closed: frames still come, rendered from the saved project.
+                        if let Job::Frames { store, comp, frames, side, poster } = job
+                            && let Some(r) = headless(&self.ctx, store, &comp, frames, side, poster)
+                        {
+                            return r;
+                        }
+                        return Reply::Down { error, kind };
+                    }
                 }
             }
             match self.job(job) {
@@ -1184,7 +1231,7 @@ mod io {
                                 failed.push(f);
                             }
                         }
-                        return Ok(Reply::Frames { store, revision, got, pending, failed, poster: poster_bytes });
+                        return Ok(Reply::Frames { store, revision, got, pending, failed, poster: poster_bytes, headless: None });
                     }
                     Err(e) if unknown(&e) => self.legacy = true,
                     Err(error) => return Ok(Reply::FramesFailed { store, frames, error }),
@@ -1218,7 +1265,85 @@ mod io {
                     Err(_) => failed.push(f),
                 }
             }
-            Ok(Reply::Frames { store, revision, got, pending, failed, poster: poster_bytes })
+            Ok(Reply::Frames { store, revision, got, pending, failed, poster: poster_bytes, headless: None })
         }
+    }
+
+    /// Frames rendered at once from the saved project, and how long one run may take (seconds).
+    const HEADLESS_BATCH: usize = 12;
+    const HEADLESS_TIMEOUT: u64 = 90;
+
+    /// `effectcraft-cli`: `EFFECTCRAFT_CLI`, the local EffectCraft build, or the one on `PATH`.
+    fn cli() -> Option<PathBuf> {
+        if let Some(p) = std::env::var_os("EFFECTCRAFT_CLI").map(PathBuf::from).filter(|p| p.is_file()) {
+            return Some(p);
+        }
+        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from);
+        let exe = if cfg!(windows) { "effectcraft-cli.exe" } else { "effectcraft-cli" };
+        if let Some(p) = home.map(|h| h.join("Developer/effectcraft/target/local/local").join(exe)).filter(|p| p.is_file()) {
+            return Some(p);
+        }
+        std::env::split_paths(&std::env::var_os("PATH")?).map(|d| d.join(exe)).find(|p| p.is_file())
+    }
+
+    /// EffectCraft is closed: render the first `HEADLESS_BATCH` of `frames` from the card's saved
+    /// project with `effectcraft-cli` (one process, PNGs in a temp folder). `None` when there is no
+    /// project file or no CLI.
+    fn headless(ctx: &egui::Context, store: StoreKey, comp: &EcComp, frames: Vec<i64>, side: u32, poster: Option<(NodeId, i64)>) -> Option<Reply> {
+        let project = Path::new(&comp.project);
+        if comp.project.is_empty() || !project.is_file() {
+            return None;
+        }
+        let cli = cli()?;
+        let stamp = std::fs::metadata(project).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
+        static RUN: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!("figcraft-effectcraft-{}-{}", std::process::id(), RUN.fetch_add(1, Ordering::Relaxed)));
+        std::fs::create_dir_all(&dir).ok()?;
+        let take: Vec<i64> = frames.iter().copied().take(HEADLESS_BATCH).collect();
+        let pending: Vec<i64> = frames.iter().copied().skip(HEADLESS_BATCH).collect();
+        let file = |f: i64| dir.join(format!("{f}.png"));
+        let mut cmd = Command::new(cli);
+        cmd.arg("run");
+        for f in &take {
+            let p = json!({"comp": comp_ref(comp), "time": (*f as f64 + 0.001) / comp.fps, "max_side": side, "path": file(*f)});
+            cmd.arg("render.frame").arg(p.to_string());
+        }
+        cmd.arg("--project").arg(project).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        let finished = match cmd.spawn() {
+            Ok(mut child) => {
+                let start = Instant::now();
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(_)) => break true,
+                        Ok(None) if start.elapsed() < Duration::from_secs(HEADLESS_TIMEOUT) => std::thread::sleep(Duration::from_millis(30)),
+                        _ => {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            break false;
+                        }
+                    }
+                }
+            }
+            Err(_) => false,
+        };
+        let (mut got, mut failed, mut poster_bytes) = (Vec::new(), Vec::new(), None);
+        for f in take {
+            // Frames the run didn't get to (it stopped on an error) count as failed.
+            let bytes = std::fs::read(file(f)).ok();
+            match bytes.as_deref().and_then(|b| decode(ctx, format!("effectcraft-file-{}-{}-{side}-{f}", comp.comp_id, comp.comp), b)) {
+                Some(tex) => got.push((f, tex)),
+                None => failed.push(f),
+            }
+            if let Some(b) = bytes
+                && poster.is_some_and(|(_, pf)| pf == f)
+            {
+                poster_bytes = poster.map(|(id, _)| (id, b));
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        if !finished && got.is_empty() {
+            return Some(Reply::FramesFailed { store, frames: failed, error: "effectcraft-cli couldn't render the saved project".into() });
+        }
+        Some(Reply::Frames { store, revision: 0, got, pending, failed, poster: poster_bytes, headless: Some(stamp) })
     }
 }

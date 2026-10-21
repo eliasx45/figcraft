@@ -158,7 +158,11 @@ isn't running.
 - `effectcraft.explode {id?, open?}`: a card for each comp nested in the card at the frame it shows (at
   most 16), to its right, all on the same playhead; one undo step. Run again on the same card (or
   press its explode button again) it closes the cards it opened, and theirs; `open: true` /
-  `false` forces either. Each card has a slider along its bottom edge: drag it to scrub. `effectcraft.reveal {id?, time?}`: open the comp in EffectCraft there
+  `false` forces either. Each card has a slider along its bottom edge: drag it to scrub.
+- EffectCraft closed: the desktop app renders the cards' frames from the saved `.ecproj` (the
+  card's `project`) with `effectcraft-cli` (`EFFECTCRAFT_CLI`, the local EffectCraft build, or
+  `PATH`), again after each save; sound needs EffectCraft open. A card shows only frames of its
+  own stretch near its playhead, else its poster. `effectcraft.reveal {id?, time?}`: open the comp in EffectCraft there
   (double-clicking a card does it too).
 
 ## Configure a client
