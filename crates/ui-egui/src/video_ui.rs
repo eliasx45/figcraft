@@ -111,6 +111,9 @@ pub struct Videos {
     all_since: f64,
     /// The card whose slider is being dragged.
     scrub: Option<NodeId>,
+    /// The selected card Space plays or pauses when it is let go (a click while it is held pans
+    /// instead).
+    space: Option<NodeId>,
     sounds: HashMap<String, SoundState>,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     out: Option<crate::audio_ui::out::Output>,
@@ -323,6 +326,39 @@ pub fn input(app: &mut FigApp, ctx: &egui::Context, pos: Pos2, hovered: bool) ->
     false
 }
 
+/// Space tapped (pressed and let go with no click in between) while a video card is selected
+/// plays or pauses it; held while dragging, it still pans the canvas. `free`: no text is being
+/// typed.
+pub fn space(app: &mut FigApp, ctx: &egui::Context, free: bool) {
+    let (down, up, click) = ctx.input(|i| {
+        let (mut down, mut up) = (false, false);
+        for e in &i.events {
+            if let egui::Event::Key { key: egui::Key::Space, pressed, repeat, modifiers, .. } = e {
+                down |= *pressed && !*repeat && modifiers.is_none();
+                up |= !*pressed;
+            }
+        }
+        (down, up, i.pointer.any_pressed())
+    });
+    if down && free {
+        app.videos.space = selected_card(app);
+    }
+    if click {
+        app.videos.space = None;
+    }
+    if up && let Some(id) = app.videos.space.take() {
+        app.run("video.togglePlay", json!({"id": id}));
+    }
+}
+
+/// The selected video card (the playing one when several are selected).
+fn selected_card(app: &FigApp) -> Option<NodeId> {
+    let doc = app.session.doc().ok()?;
+    let has = |i: &NodeId| doc.node(*i).is_some_and(|n| n.video.is_some());
+    let sel: Vec<NodeId> = app.session.selection().into_iter().filter(has).collect();
+    sel.iter().copied().find(|i| app.session.video.node == Some(*i)).or_else(|| sel.first().copied())
+}
+
 fn scrub_to(app: &mut FigApp, id: NodeId, pos: Pos2) {
     let Ok(doc) = app.session.doc() else { return };
     let Some(v) = doc.node(id).and_then(|n| n.video.as_deref()) else { return };
@@ -443,7 +479,7 @@ impl FigApp {
         match tr.node.filter(|n| !self.videos.players.contains_key(n)) {
             Some(n) => {
                 if let Some((_, v, side, _)) = visible.iter().find(|(i, ..)| *i == n) {
-                    let t = tr.time();
+                    let t = tr.time().min(v.end - 0.5 / v.fps).max(v.start);
                     let key = (n, (t * 1000.0).round() as i64);
                     // One still out at a time; the newest playhead is asked for once it's back.
                     if !self.videos.still_out && self.videos.still_asked != Some(key) {

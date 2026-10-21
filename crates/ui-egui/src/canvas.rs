@@ -656,6 +656,7 @@ fn input(app: &mut FigApp, ui: &mut Ui, resp: &egui::Response) -> bool {
     let editing_text = app.session.ds().map(|d| d.text_edit.is_some()).unwrap_or(false);
     let typing_elsewhere = crate::a11y::field_focused(&ctx);
     app.canvas.space_pan = space && !editing_text && !typing_elsewhere && !app.canvas.dragging;
+    crate::video_ui::space(app, &ctx, !editing_text && !typing_elsewhere);
     if !app.canvas.dragging && crate::selection_spacing::input(app, &ctx, hover_pos, resp.hovered(), app.canvas.space_pan) {
         return false;
     }

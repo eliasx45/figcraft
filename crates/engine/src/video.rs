@@ -24,8 +24,14 @@ pub struct Transport {
 }
 
 impl Transport {
+    /// Playing, and not stopped at the end of a card that doesn't loop.
     pub fn playing(&self) -> bool {
-        self.since.is_some()
+        self.since.is_some() && !self.ended()
+    }
+
+    /// A card that doesn't loop played to its end (playing it again starts it over).
+    pub fn ended(&self) -> bool {
+        self.since.is_some_and(|t| !self.looping && self.end > self.start && self.time + t.elapsed().as_secs_f64() >= self.end)
     }
 
     /// The playhead in media seconds (wrapping round the stretch while a looping card plays; a

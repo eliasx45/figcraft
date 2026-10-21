@@ -27,8 +27,8 @@ pub struct VideoClip {
     /// The file has sound, and the card plays it (when started with its play button).
     #[serde(default = "yes")]
     pub sound: bool,
-    /// Start again from `start` at the end.
-    #[serde(default = "yes", rename = "loop")]
+    /// Start again from `start` at the end (off by default: a card plays once and stops).
+    #[serde(default, rename = "loop")]
     pub looping: bool,
 }
 
@@ -41,7 +41,7 @@ fn yes() -> bool {
 
 impl VideoClip {
     pub fn new(path: impl Into<String>, duration: f64, width: u32, height: u32, fps: f64) -> Self {
-        let mut v = Self { path: path.into(), duration, width, height, fps, start: 0.0, end: duration, sound: true, looping: true };
+        let mut v = Self { path: path.into(), duration, width, height, fps, start: 0.0, end: duration, sound: true, looping: false };
         v.sanitize();
         v
     }

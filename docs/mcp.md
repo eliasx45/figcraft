@@ -145,10 +145,13 @@ export) without decoding.
   system) pass `duration`, `width` and `height`.
 - `video.info` → `{cards: [{id, path, file, duration, width, height, fps, start, end, sound, loop,
   …}]}`; `video.set {ids?, path?, start?, end?, sound?, loop?}`.
-- Transport: `video.play {id?, time?}` (with the file's sound, looping), `video.pause`,
+- Cards play once and stop at the end unless `loop: true`.
+- Transport: `video.play {id?, time?}` (with the file's sound; from the pause, or over again
+  once it ended), `video.pause`,
   `video.togglePlay`, `video.seek {time | x}`, `video.transport`, `video.playAll {on?}` (every card
   on screen plays, muted). In the desktop app the card under the pointer plays muted, its play
-  button plays it with sound, and the slider along its bottom scrubs. Frames are decoded on the
+  button (or Space, tapped with the card selected) plays and pauses it with sound, and the slider
+  along its bottom scrubs. Frames are decoded on the
   Apple media engine (macOS), scaled to the card, only for cards on screen.
 
 ### EffectCraft comps

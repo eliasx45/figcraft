@@ -74,3 +74,16 @@ fn importing_a_missing_video_is_an_error_not_a_crash() {
     let mut s = Session::new();
     assert!(s.execute("file.import", &json!({"path": "/nowhere/clip.mp4"})).is_err());
 }
+
+#[test]
+fn a_card_plays_once_unless_it_loops() {
+    let mut s = Session::new();
+    let id = card(&mut s);
+    assert_eq!(ok(&mut s, "video.info", json!({"ids": [id]}))["cards"][0]["loop"], json!(false));
+    let end = ok(&mut s, "video.info", json!({"ids": [id]}))["cards"][0]["end"].as_f64().unwrap();
+    ok(&mut s, "video.play", json!({"id": id, "time": end - 0.001}));
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    assert!(s.video.ended() && !s.video.playing(), "it stops at its end");
+    let t = ok(&mut s, "video.togglePlay", json!({"id": id}));
+    assert_eq!((t["playing"].clone(), t["time"].as_f64().unwrap() < 1.0), (json!(true), true), "Space plays it over again: {t}");
+}

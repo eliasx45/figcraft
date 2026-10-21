@@ -19,7 +19,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "video.place",
             "Place video",
-            "{path (a video file: .mp4, .mov, .m4v), x?, y? (default the centre of the view), cardWidth? (default 480), name?, start?, end? (media seconds), sound? (default: the file has sound), loop? (default true), parent?, duration?, width?, height?, fps? (only where the file can't be read here)}  a card that plays the file (linked, not embedded) → {id, ...card}",
+            "{path (a video file: .mp4, .mov, .m4v), x?, y? (default the centre of the view), cardWidth? (default 480), name?, start?, end? (media seconds), sound? (default: the file has sound), loop? (default false: plays once), parent?, duration?, width?, height?, fps? (only where the file can't be read here)}  a card that plays the file (linked, not embedded) → {id, ...card}",
             true,
             place
         ),
@@ -34,7 +34,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "video.play",
             "Play video",
-            "{id?, time? (media seconds)}  plays the card with its sound (looping over its stretch) → the transport",
+            "{id?, time? (media seconds)}  plays the card with its sound over its stretch (from where it was paused; over again once it ended) → the transport",
             false,
             play
         ),
@@ -220,7 +220,7 @@ fn play(s: &mut Session, p: &Value) -> Result<Value> {
     let from = match num(p, "time") {
         Some(t) if t.is_finite() => Some(t),
         Some(_) => return Err(bad(cmd, "`time` must be finite")),
-        None => (s.video.node == Some(id)).then(|| s.video.time()),
+        None => (s.video.node == Some(id) && !s.video.ended()).then(|| s.video.time()),
     };
     s.video.play(id, &v, from);
     Ok(transport_json(s))
