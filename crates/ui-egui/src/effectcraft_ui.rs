@@ -203,11 +203,7 @@ pub(crate) fn fit(r: Rect, w: u32, h: u32) -> Rect {
 pub(crate) fn side_for(px: f32, c: &EcComp) -> u32 {
     let cap = (c.width.max(c.height) / 2).max(SIDES[0]);
     let px = if px.is_finite() { px.max(0.0) } else { 0.0 };
-    SIDES
-        .into_iter()
-        .filter(|s| *s <= cap)
-        .find(|s| *s as f32 >= px)
-        .unwrap_or_else(|| SIDES.into_iter().rfind(|s| *s <= cap).unwrap_or(SIDES[0]))
+    SIDES.into_iter().filter(|s| *s <= cap).find(|s| *s as f32 >= px).unwrap_or_else(|| SIDES.into_iter().rfind(|s| *s <= cap).unwrap_or(SIDES[0]))
 }
 
 /// The frames of `c` to fetch, nearest the playhead frame `at` first (on to the end, then from
