@@ -264,6 +264,7 @@ pub fn show(app: &mut FigApp, ui: &mut Ui, worker: &mut Worker) {
     crate::theme::set_canvas_page(&ctx, bg);
     draw_canvas_image(app, &painter, ppp, shown, tiled);
     crate::effectcraft_ui::overlay(app, &painter);
+    crate::video_ui::overlay(app, &painter);
     app.session.tool.labels = overlays(app, &painter, &t);
     crate::audio_ui::overlay(app, &painter);
     crate::frame_labels::rename_field(app, ui);
@@ -756,6 +757,10 @@ fn input(app: &mut FigApp, ui: &mut Ui, resp: &egui::Response) -> bool {
         && app.session.ds().is_ok_and(|d| d.vector_edit.is_none())
         && matches!(app.session.tool.tool, ToolId::Move | ToolId::Scale);
     // EffectCraft cards: play and explode buttons; a double-click opens the comp in EffectCraft.
+    // Video cards: play and play-all buttons, the scrub slider.
+    if !app.canvas.dragging && crate::video_ui::input(app, &ctx, pos, resp.hovered()) {
+        return true;
+    }
     if !app.canvas.dragging && crate::effectcraft_ui::input(app, &ctx, pos, resp.hovered(), resp.double_clicked() && !keep_drilling) {
         return true;
     }

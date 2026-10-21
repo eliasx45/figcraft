@@ -524,6 +524,9 @@ pub struct Node {
     /// A live EffectCraft comp this layer shows and plays (see [`crate::effectcraft`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effectcraft: Option<Box<crate::effectcraft::EcComp>>,
+    /// A video file this layer shows and plays (see [`crate::video`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video: Option<Box<crate::video::VideoClip>>,
 }
 
 pub(crate) fn yes() -> bool {
@@ -636,6 +639,7 @@ impl Node {
             dev_resources: Vec::new(),
             audio: None,
             effectcraft: None,
+            video: None,
         }
     }
 

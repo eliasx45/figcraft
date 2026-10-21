@@ -24,6 +24,7 @@ craft-docpath = { workspace = true }
 figcraft-plugin = { workspace = true }
 figcraft-script = { workspace = true }
 figcraft-audio = { workspace = true }
+figcraft-video = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

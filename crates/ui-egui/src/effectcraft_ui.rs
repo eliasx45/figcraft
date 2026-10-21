@@ -181,7 +181,7 @@ fn cards(doc: &Document, page: NodeId) -> Vec<NodeId> {
 }
 
 /// The card's box on screen (the bounds of its four corners).
-fn screen_rect(app: &FigApp, doc: &Document, id: NodeId) -> Option<Rect> {
+pub(crate) fn screen_rect(app: &FigApp, doc: &Document, id: NodeId) -> Option<Rect> {
     let n = doc.node(id)?;
     let w = doc.world_transform(id);
     let pts = [Point::new(0.0, 0.0), Point::new(n.width, 0.0), Point::new(0.0, n.height), Point::new(n.width, n.height)].map(|p| {
@@ -203,7 +203,11 @@ pub(crate) fn fit(r: Rect, w: u32, h: u32) -> Rect {
 pub(crate) fn side_for(px: f32, c: &EcComp) -> u32 {
     let cap = (c.width.max(c.height) / 2).max(SIDES[0]);
     let px = if px.is_finite() { px.max(0.0) } else { 0.0 };
-    SIDES.into_iter().filter(|s| *s <= cap).find(|s| *s as f32 >= px).unwrap_or_else(|| SIDES.into_iter().filter(|s| *s <= cap).last().unwrap_or(SIDES[0]))
+    SIDES
+        .into_iter()
+        .filter(|s| *s <= cap)
+        .find(|s| *s as f32 >= px)
+        .unwrap_or_else(|| SIDES.into_iter().rfind(|s| *s <= cap).unwrap_or(SIDES[0]))
 }
 
 /// The frames of `c` to fetch, nearest the playhead frame `at` first (on to the end, then from
@@ -331,7 +335,7 @@ fn exploded(doc: &Document, id: NodeId) -> bool {
     doc.nodes().any(|n| n.effectcraft.is_some() && n.plugin_data.get(EXPLODED_FROM) == Some(&key))
 }
 
-fn pointer(painter: &egui::Painter) -> Option<Pos2> {
+pub(crate) fn pointer(painter: &egui::Painter) -> Option<Pos2> {
     painter.ctx().input(|i| i.pointer.hover_pos()).filter(|h| painter.clip_rect().contains(*h))
 }
 
@@ -368,12 +372,22 @@ pub fn overlay(app: &FigApp, painter: &egui::Painter) {
         let active = hovered || playing || scrubbing;
         if pic.width() > 40.0 && (active || (total > 0 && have < total)) {
             let grip = scrubbing || hover.is_some_and(|h| on_slider(pic, h));
-            let th = if grip { 5.0 } else if active { 3.0 } else { 2.0 };
+            let th = if grip {
+                5.0
+            } else if active {
+                3.0
+            } else {
+                2.0
+            };
             let track = Rect::from_min_max(pos2(pic.min.x, pic.max.y - th), pic.max);
             painter.rect_filled(track, CornerRadius::ZERO, Color32::from_black_alpha(140));
             if total > 0 {
                 let x = pic.min.x + pic.width() * have as f32 / total as f32;
-                painter.rect_filled(Rect::from_min_max(track.min, pos2(x, track.max.y)), CornerRadius::ZERO, Color32::from_rgba_unmultiplied(0x2F, 0xB3, 0x6F, 170));
+                painter.rect_filled(
+                    Rect::from_min_max(track.min, pos2(x, track.max.y)),
+                    CornerRadius::ZERO,
+                    Color32::from_rgba_unmultiplied(0x2F, 0xB3, 0x6F, 170),
+                );
             }
             if active && c.span() > 0.0 {
                 let u = ((t - c.start) / c.span()).clamp(0.0, 1.0) as f32;
@@ -402,7 +416,11 @@ pub fn overlay(app: &FigApp, painter: &egui::Painter) {
                         painter.rect_filled(Rect::from_min_size(play + vec2(dx, -4.5), vec2(2.5, 9.0)), CornerRadius::ZERO, fg);
                     }
                 } else {
-                    painter.add(egui::Shape::convex_polygon(vec![play + vec2(-3.0, -5.0), play + vec2(5.0, 0.0), play + vec2(-3.0, 5.0)], fg, Stroke::NONE));
+                    painter.add(egui::Shape::convex_polygon(
+                        vec![play + vec2(-3.0, -5.0), play + vec2(5.0, 0.0), play + vec2(-3.0, 5.0)],
+                        fg,
+                        Stroke::NONE,
+                    ));
                 }
                 if hovered {
                     // Explode: four small boxes, the comps inside; lit while they are out (a
@@ -426,12 +444,12 @@ pub fn overlay(app: &FigApp, painter: &egui::Painter) {
     }
 }
 
-fn round_button(painter: &egui::Painter, c: Pos2) {
+pub(crate) fn round_button(painter: &egui::Painter, c: Pos2) {
     painter.circle_filled(c, BUTTON, Color32::from_black_alpha(170));
     painter.circle_stroke(c, BUTTON, Stroke::new(1.0, Color32::from_white_alpha(90)));
 }
 
-fn chip(painter: &egui::Painter, at: Pos2, text: String, font: egui::FontId, bg: Color32) {
+pub(crate) fn chip(painter: &egui::Painter, at: Pos2, text: String, font: egui::FontId, bg: Color32) {
     let g = painter.layout_no_wrap(text, font, Color32::WHITE);
     let r = Rect::from_min_size(at, g.size() + vec2(8.0, 4.0));
     painter.rect_filled(r, CornerRadius::same(3), bg);
@@ -1008,14 +1026,35 @@ mod io {
     pub enum Reply {
         /// `headless`: rendered from the saved project (EffectCraft closed), whose modification
         /// time (seconds) it carries.
-        Frames { store: StoreKey, revision: u64, got: Vec<(i64, egui::TextureHandle)>, pending: Vec<i64>, failed: Vec<i64>, poster: Option<(NodeId, Vec<u8>)>, headless: Option<u64> },
-        FramesFailed { store: StoreKey, frames: Vec<i64>, error: String },
-        Sound { key: SoundKey, sound: Option<Arc<figcraft_audio::Sound>> },
+        Frames {
+            store: StoreKey,
+            revision: u64,
+            got: Vec<(i64, egui::TextureHandle)>,
+            pending: Vec<i64>,
+            failed: Vec<i64>,
+            poster: Option<(NodeId, Vec<u8>)>,
+            headless: Option<u64>,
+        },
+        FramesFailed {
+            store: StoreKey,
+            frames: Vec<i64>,
+            error: String,
+        },
+        Sound {
+            key: SoundKey,
+            sound: Option<Arc<figcraft_audio::Sound>>,
+        },
         Revision(u64),
-        Tree { card: NodeId, tree: Value },
+        Tree {
+            card: NodeId,
+            tree: Value,
+        },
         Revealed(String),
         Error(String),
-        Down { error: String, kind: Kind },
+        Down {
+            error: String,
+            kind: Kind,
+        },
     }
 
     pub struct Io {
@@ -1181,9 +1220,9 @@ mod io {
                 Job::Sound { key, comp, start, end } => {
                     let p = json!({"comp": comp_ref(&comp), "start": start, "end": end, "rate": 48_000});
                     let sound = match self.call("figcraft.audio", p)? {
-                        Ok(v) if v.get("silent").and_then(Value::as_bool) != Some(true) => {
-                            b64(v.get("wav")).and_then(|bytes| figcraft_audio::open(&format!("{}.wav", comp.comp), Arc::from(bytes.as_slice())).ok()).map(Arc::new)
-                        }
+                        Ok(v) if v.get("silent").and_then(Value::as_bool) != Some(true) => b64(v.get("wav"))
+                            .and_then(|bytes| figcraft_audio::open(&format!("{}.wav", comp.comp), Arc::from(bytes.as_slice())).ok())
+                            .map(Arc::new),
                         _ => None,
                     };
                     Ok(Reply::Sound { key, sound })
@@ -1295,7 +1334,8 @@ mod io {
             return None;
         }
         let cli = cli()?;
-        let stamp = std::fs::metadata(project).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
+        let stamp =
+            std::fs::metadata(project).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
         static RUN: AtomicU64 = AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!("figcraft-effectcraft-{}-{}", std::process::id(), RUN.fetch_add(1, Ordering::Relaxed)));
         std::fs::create_dir_all(&dir).ok()?;

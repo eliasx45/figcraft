@@ -8,7 +8,6 @@
 pub mod a11y;
 pub mod assets_panel;
 pub mod audio_ui;
-pub mod effectcraft_ui;
 pub mod bidi;
 pub mod branch_ui;
 pub mod canvas;
@@ -23,6 +22,7 @@ pub mod cursors;
 pub mod dev_compare;
 pub mod dev_mode;
 pub mod dialogs;
+pub mod effectcraft_ui;
 pub mod export_panel;
 pub mod field_math;
 pub mod font_preview;
@@ -70,6 +70,7 @@ pub mod variable_ui;
 pub mod variables_panel;
 pub mod vector_panel;
 pub mod versions;
+pub mod video_ui;
 pub mod widgets;
 pub mod windows;
 
@@ -79,11 +80,9 @@ mod theme_startup_tests;
 #[cfg(test)]
 mod a11y_tests;
 #[cfg(test)]
-mod audio_ui_tests;
-#[cfg(test)]
-mod effectcraft_ui_tests;
-#[cfg(test)]
 mod async_dialog_tests;
+#[cfg(test)]
+mod audio_ui_tests;
 #[cfg(test)]
 mod branch_ui_tests;
 #[cfg(test)]
@@ -108,6 +107,8 @@ mod design_paste_tests;
 mod dev_mode_tests;
 #[cfg(test)]
 mod duplicate_paint_tests;
+#[cfg(test)]
+mod effectcraft_ui_tests;
 #[cfg(test)]
 mod export_preview_tests;
 #[cfg(test)]
@@ -228,6 +229,8 @@ mod variables_rename_tests;
 mod vector_panel_tests;
 #[cfg(test)]
 mod vector_tail_ui_tests;
+#[cfg(test)]
+mod video_ui_tests;
 #[cfg(test)]
 mod web_clipboard_tests;
 #[cfg(test)]
@@ -822,6 +825,8 @@ pub struct FigApp {
     pub(crate) audio: audio_ui::Player,
     /// EffectCraft cards: the link to EffectCraft and the frames it sent ([`effectcraft_ui`]).
     pub(crate) effectcraft: effectcraft_ui::Link,
+    /// Video cards: posters, players, stills and the playing card's sound.
+    pub(crate) videos: video_ui::Videos,
 }
 
 /// What to do with the result of a command run in the background.
@@ -856,6 +861,7 @@ impl FigApp {
             automation_roots: None,
             audio: Default::default(),
             effectcraft: Default::default(),
+            videos: Default::default(),
         }
     }
 
@@ -1574,6 +1580,7 @@ impl FigApp {
         self.frame(ui);
         self.audio_sync(&ctx);
         self.effectcraft_sync(&ctx);
+        self.video_sync(&ctx);
         windows::settle(self, &ctx, files);
         if self.session.prefs != prefs {
             windows::repaint_others(self, &ctx);

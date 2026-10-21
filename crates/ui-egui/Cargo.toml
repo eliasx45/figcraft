@@ -27,6 +27,7 @@ image = { workspace = true }
 egui_extras = { workspace = true }
 web-time = "1.1.0"
 figcraft-audio = { workspace = true }
+figcraft-video = { workspace = true }
 
 # Sound output for audio layers: macOS and Windows for now (Linux and FreeBSD need ALSA in their
 # packages first; the browser build has none yet).

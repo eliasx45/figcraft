@@ -65,7 +65,8 @@ code.
 - `figcraft_engine::guard` turns a panicking command into `EngineError::Internal` and the document
   is rolled back; the desktop app also guards each UI frame and writes recovery copies. These are
   safety nets, not substitutes for `Result`.
-- `unsafe_code = "forbid"` workspace-wide.
+- `unsafe_code = "forbid"` workspace-wide, except `crates/video`'s macOS module (Apple media FFI for
+  video cards; [`docs/adr/0001-video-ffi.md`](docs/adr/0001-video-ffi.md)). Nowhere else.
 - Every crash fix comes with a regression test. The engine has a junk-parameter sweep over every
   command (`crates/engine/src/tests.rs`): extend fuzz/sweep tests when you add parsers or commands.
 

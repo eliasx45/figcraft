@@ -1,0 +1,37 @@
+[package]
+name = "figcraft-video"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "FigCraft video: probe video files, poster frames and playback frames scaled to the card, decoded on the Apple media engine through AVFoundation (macOS; elsewhere `Error::Unsupported`)"
+
+# The one crate allowed to contain `unsafe` (Apple media FFI; docs/adr/0001-video-ffi.md). The
+# workspace lints, except that `unsafe_code` is `deny` instead of `forbid`: only the macOS module
+# opts in with `#[allow(unsafe_code)]`, and every `unsafe` block carries a `// SAFETY:` comment.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+dbg_macro = "warn"
+needless_range_loop = "allow"
+chunks_exact_to_as_chunks = "allow"
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+undocumented_unsafe_blocks = "deny"
+
+[dependencies]
+
+# Apple framework bindings (generated declarations; Zlib OR Apache-2.0 OR MIT; macOS only).
+# objc2, objc2-foundation and objc2-core-foundation were already in Cargo.lock (through eframe /
+# winit); EffectCraft uses the same versions of the CoreMedia / CoreVideo bindings.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.5"
+objc2-foundation = "0.3.2"
+objc2-core-foundation = "0.3.2"
+objc2-core-media = "0.3.2"
+objc2-core-video = "0.3.2"
+objc2-av-foundation = { version = "0.3.2", features = ["objc2-core-media", "objc2-core-video", "objc2-core-foundation"] }

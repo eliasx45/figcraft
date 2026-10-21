@@ -16,6 +16,8 @@ const TABLE: &[(&str, u8)] = &[
     ("plugin", 2),
     ("script", 2),
     ("audio", 2),
+    // Video files: the one crate with `unsafe` (Apple media FFI, docs/adr/0001-video-ffi.md).
+    ("video", 2),
     ("render", 3),
     ("format", 3),
     ("svg", 4),

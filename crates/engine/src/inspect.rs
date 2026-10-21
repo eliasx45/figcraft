@@ -151,6 +151,13 @@ pub fn node_json(doc: &Document, id: NodeId, depth: usize) -> Value {
                     "startFrame": c.frames().start(), "endFrame": c.frames().end(), "sound": c.sound}),
             );
         }
+        if let Some(v) = n.video.as_deref() {
+            o.insert(
+                "video".into(),
+                json!({"path": v.path, "duration": v.duration, "width": v.width, "height": v.height, "fps": v.fps, "start": v.start, "end": v.end,
+                    "sound": v.sound, "loop": v.looping}),
+            );
+        }
         if !n.annotations.is_empty() {
             o.insert("annotations".into(), serde_json::to_value(&n.annotations).unwrap_or(Value::Null));
         }

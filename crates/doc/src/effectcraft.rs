@@ -63,7 +63,19 @@ fn is_one(v: &f64) -> bool {
 
 impl EcComp {
     pub fn new(comp: impl Into<String>, start: f64, end: f64, fps: f64) -> Self {
-        let mut c = Self { comp: comp.into(), comp_id: 0, project: String::new(), start, end, fps, width: 1920, height: 1080, offset: 0.0, rate: 1.0, sound: true };
+        let mut c = Self {
+            comp: comp.into(),
+            comp_id: 0,
+            project: String::new(),
+            start,
+            end,
+            fps,
+            width: 1920,
+            height: 1080,
+            offset: 0.0,
+            rate: 1.0,
+            sound: true,
+        };
         c.sanitize();
         c
     }

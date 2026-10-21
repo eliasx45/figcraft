@@ -2,11 +2,11 @@
 
 pub mod arrange;
 pub mod audio;
-pub mod effectcraft;
 pub mod comment;
 pub mod component;
 pub mod create;
 pub mod edit;
+pub mod effectcraft;
 pub mod file;
 pub mod image;
 pub mod layout;
@@ -22,6 +22,7 @@ pub mod styles;
 pub mod text;
 pub mod variables;
 pub mod variables_io;
+pub mod video;
 pub mod view;
 
 use std::collections::HashMap;
@@ -87,6 +88,7 @@ fn registry() -> &'static Registry {
         list.extend(image::specs());
         list.extend(audio::specs());
         list.extend(effectcraft::specs());
+        list.extend(video::specs());
         list.extend(variables::specs());
         list.extend(variables_io::specs());
         list.extend(component::specs());

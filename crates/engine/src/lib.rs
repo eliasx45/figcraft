@@ -13,7 +13,6 @@ pub mod al_keys;
 pub mod annotations;
 pub mod arc_handles;
 pub mod audio;
-pub mod effectcraft;
 pub mod background;
 pub mod booleans;
 pub mod branches;
@@ -30,6 +29,7 @@ pub mod devinspect;
 pub mod distance;
 pub mod doc_urls;
 pub mod drop;
+pub mod effectcraft;
 pub mod effectcraft_clipboard;
 pub mod file_access;
 pub mod fonts;
@@ -66,6 +66,7 @@ pub mod textedit;
 pub mod textpreview;
 pub mod tools;
 pub mod vectoredit;
+pub mod video;
 pub mod widgets;
 
 pub use cmd::{CommandSpec, all_commands, find_command};
@@ -813,6 +814,8 @@ pub struct Session {
     pub audio: audio::Transport,
     /// The EffectCraft card playhead (see [`effectcraft::Transport`]).
     pub effectcraft: effectcraft::Transport,
+    /// The video card playhead (see [`video`]).
+    pub video: video::Transport,
 }
 
 impl Default for Session {
@@ -863,6 +866,7 @@ impl Session {
             background: background::Background::default(),
             audio: audio::Transport::default(),
             effectcraft: effectcraft::Transport::default(),
+            video: video::Transport::default(),
         }
     }
 
@@ -1610,8 +1614,6 @@ mod annotation_categories_tests;
 #[cfg(test)]
 mod annotations_tests;
 #[cfg(test)]
-mod effectcraft_tests;
-#[cfg(test)]
 mod arc_fields_tests;
 #[cfg(test)]
 mod arc_handles_tests;
@@ -1679,6 +1681,8 @@ mod double_click_tests;
 mod draw_tools_tests;
 #[cfg(test)]
 mod duplicate_spacing_tests;
+#[cfg(test)]
+mod effectcraft_tests;
 #[cfg(test)]
 mod effects_tests;
 #[cfg(test)]
@@ -1913,6 +1917,8 @@ mod vector_offset_tests;
 mod version_preview_tests;
 #[cfg(test)]
 mod version_tests;
+#[cfg(test)]
+mod video_tests;
 #[cfg(test)]
 mod view_behaviour_tests;
 #[cfg(test)]

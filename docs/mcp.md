@@ -137,6 +137,20 @@ export) without decoding.
   {time | frame | x}`, `audio.transport` → `{id, playing, time, frame}`. The playhead runs on the
   wall clock, so headless sessions report it too; the desktop app sounds it on macOS and Windows.
 
+### Video cards
+
+- `video.place {path, x?, y?, cardWidth?, name?, start?, end?, sound?, loop?}`: a card that plays a
+  video file (`.mp4`, `.mov`, `.m4v`; linked, not embedded). Dropping one on the canvas (or
+  `file.import {path}`) does the same. Where the file can't be read (no video support on the
+  system) pass `duration`, `width` and `height`.
+- `video.info` → `{cards: [{id, path, file, duration, width, height, fps, start, end, sound, loop,
+  …}]}`; `video.set {ids?, path?, start?, end?, sound?, loop?}`.
+- Transport: `video.play {id?, time?}` (with the file's sound, looping), `video.pause`,
+  `video.togglePlay`, `video.seek {time | x}`, `video.transport`, `video.playAll {on?}` (every card
+  on screen plays, muted). In the desktop app the card under the pointer plays muted, its play
+  button plays it with sound, and the slider along its bottom scrubs. Frames are decoded on the
+  Apple media engine (macOS), scaled to the card, only for cards on screen.
+
 ### EffectCraft comps
 
 A layer can show a live EffectCraft comp, like Dynamic Link: the desktop app asks the running

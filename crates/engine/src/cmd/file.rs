@@ -1252,6 +1252,21 @@ fn export_frames_pdf(s: &mut Session, p: &Value) -> Result<Value> {
 fn import(s: &mut Session, p: &Value) -> Result<Value> {
     let path = string(p, "path");
     let variables = variables_param("file.import", p)?;
+    // A video file with a picture becomes a video card that plays it from where it is (not read
+    // in: a library page links hundreds of clips). Without a picture, or where video can't be
+    // read, it imports as sound below.
+    if let Some(path) = &path
+        && figcraft_video::is_video_name(path)
+        && figcraft_video::probe(std::path::Path::new(path)).is_ok()
+    {
+        let mut v = json!({"path": path});
+        for k in ["x", "y"] {
+            if let Some(n) = num(p, k) {
+                v[k] = json!(n);
+            }
+        }
+        return super::video::place(s, &v);
+    }
     let (bytes, name) = if let Some(path) = &path {
         (read(path)?, path.clone())
     } else if let Some(d) = string(p, "data") {

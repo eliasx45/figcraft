@@ -34,6 +34,7 @@ figcraft-collab-net = { path = "crates/collab-net" }
 figcraft-plugin = { path = "crates/plugin" }
 figcraft-script = { path = "crates/script" }
 figcraft-audio = { path = "crates/audio" }
+figcraft-video = { path = "crates/video" }
 
 # Audio decoding: FilmCraft's pure-Rust codecs (the same pin as EffectCraft's).
 filmcraft-codecs = { git = "https://github.com/storytold/filmcraft", rev = "2c5ba7a72619935f0481f99d59409e0d1844b234" }

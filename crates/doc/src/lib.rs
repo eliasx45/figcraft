@@ -24,11 +24,12 @@ pub mod text;
 pub mod vector;
 pub mod vector_faces;
 pub mod vector_regions;
+pub mod video;
 
 pub use audio::{AudioClip, AudioData, AudioMarker, Peaks};
-pub use effectcraft::EcComp;
 pub use colors::*;
 pub use comments::*;
+pub use effectcraft::EcComp;
 pub use figcraft_color as color;
 pub use figcraft_geom as geom;
 pub use handoff::*;
@@ -39,6 +40,7 @@ pub use styles::*;
 pub use text::*;
 pub use vector::*;
 pub use vector_faces::Face;
+pub use video::VideoClip;
 
 use figcraft_color::{Color, ColorProfile};
 use figcraft_geom::{Affine, Point, Rect};
