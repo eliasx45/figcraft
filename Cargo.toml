@@ -2,7 +2,7 @@
 resolver = "3"
 members = ["crates/*", "apps/*", "xtask"]
 # The plugin SDK and examples build for wasm32 in a workspace of their own (`cargo xtask plugins`).
-exclude = ["plugins"]
+exclude = ["plugins", "third_party"]
 # default-members = ["crates/*", "apps/figcraft", "apps/figcraft-cli", "xtask"]
 
 [workspace.package]
@@ -132,3 +132,9 @@ codegen-units = 1
 debug = false
 strip = true
 panic = "abort"
+
+# vello with gradients in 16 bits and its output dithered (third_party/README.md): in 8 bits, faint
+# gradients and glows band.
+[patch.crates-io]
+vello_encoding = { path = "third_party/vello_encoding" }
+vello_shaders = { path = "third_party/vello_shaders" }

@@ -235,3 +235,29 @@ fn soft_effects_are_dithered_at_the_scenes_pixels() {
     assert_eq!((p.image.width, p.image.height), crate::effects::texture_size(p.region, 1.0, 1).unwrap());
     assert_eq!(p.src, crate::effects::texture_size(p.region, 1.0, p.k).unwrap());
 }
+
+#[test]
+fn gradients_resolve_in_16_bits() {
+    // A dark card's fill (0.09 to 0.05 grey) spans ten 8-bit levels: ramps in 8 bits draw it as
+    // ten flat bands. The patched vello (third_party/) keeps 16 bits, as two rows of 8.
+    use vello::{kurbo, peniko};
+    let mut sc = vello::Scene::new();
+    let g = peniko::Gradient::new_linear((0.0, 0.0), (0.0, 586.0))
+        .with_stops([peniko::Color::new([0.09, 0.09, 0.11, 1.0]), peniko::Color::new([0.05, 0.05, 0.067, 1.0])]);
+    sc.fill(peniko::Fill::NonZero, kurbo::Affine::IDENTITY, &g, None, &kurbo::Rect::new(0.0, 0.0, 330.0, 586.0));
+    let mut resolver = vello::low_level::vello_encoding::Resolver::new();
+    let mut packed = Vec::new();
+    let (_, ramps, _) = resolver.resolve(sc.encoding(), &mut packed);
+    assert_eq!(ramps.height, 2, "one ramp, two rows");
+    let w = ramps.width as usize;
+    let red = |i: usize| {
+        let (hi, lo) = (ramps.data[i].to_ne_bytes()[0], ramps.data[w + i].to_ne_bytes()[0]);
+        f64::from(u16::from(hi) << 8 | u16::from(lo)) / 65535.0
+    };
+    for i in [0, w / 2, w - 1] {
+        let want = 0.09 + (0.05 - 0.09) * i as f64 / (w - 1) as f64;
+        assert!((red(i) - want).abs() < 2.0 / 65535.0, "sample {i}: {} for {want}", red(i));
+    }
+    let levels: std::collections::BTreeSet<u16> = (0..w).map(|i| (red(i) * 65535.0).round() as u16).collect();
+    assert!(levels.len() > 100, "{} levels", levels.len());
+}

@@ -33,8 +33,8 @@ fn weight(i: i32) -> f32 {
     return exp(-x * x / (2.0 * p.sigma * p.sigma));
 }
 
-// Up to one 8-bit step of noise (triangular, from a hash of the pixel), added before an 8-bit
-// store at the scene's own pixels. A soft glow of low opacity spans only a few dozen levels over
+// Up to half an 8-bit step of noise (from a hash of the pixel), added before an 8-bit store at
+// the scene's own pixels: values between two levels dither, exact ones stay exact. A soft glow of low opacity spans only a few dozen levels over
 // hundreds of pixels: without it each level is a ring many pixels wide (banding).
 fn hash(c: vec2<i32>, salt: u32) -> f32 {
     var h = bitcast<u32>(c.x) * 1664525u + bitcast<u32>(c.y) * 22695477u + salt * 2654435769u;
@@ -47,7 +47,7 @@ fn hash(c: vec2<i32>, salt: u32) -> f32 {
 }
 
 fn dither(c: vec2<i32>) -> f32 {
-    return (hash(c, 1u) + hash(c, 2u) - 1.0) / 255.0;
+    return (hash(c, 1u) - 0.5) / 255.0;
 }
 
 fn inside(c: vec2<i32>, size: vec2<u32>) -> bool {
