@@ -1120,7 +1120,7 @@ fn main(
             case CMD_BEGIN_CLIP: {
                 if clip_depth < BLEND_STACK_SPLIT {
                     for (var i = 0u; i < PIXELS_PER_THREAD; i += 1u) {
-                        blend_stack[clip_depth][i] = pack4x8unorm(rgba[i]);
+                        blend_stack[clip_depth][i] = pack_dithered(rgba[i], vec2<u32>(xy) + vec2(i, 0u), clip_depth + 1u);
                         rgba[i] = vec4(0.0);
                     }
                 } else {
@@ -1128,7 +1128,7 @@ fn main(
                     let local_tile_ix = local_id.x * PIXELS_PER_THREAD + local_id.y * TILE_WIDTH;
                     let local_blend_start = blend_offset + blend_in_scratch * TILE_WIDTH * TILE_HEIGHT + local_tile_ix;
                     for (var i = 0u; i < PIXELS_PER_THREAD; i += 1u) {
-                        blend_spill[local_blend_start + i] = pack4x8unorm(rgba[i]);
+                        blend_spill[local_blend_start + i] = pack_dithered(rgba[i], vec2<u32>(xy) + vec2(i, 0u), clip_depth + 1u);
                         rgba[i] = vec4(0.0);
                     }
                 }
@@ -1391,7 +1391,7 @@ fn main(
             let rgba_sep = vec4(fg.rgb * a_inv, fg.a);
             // FigCraft patch: up to half an 8-bit step of noise, so colours between two levels
             // (a faint gradient, a soft glow) dither instead of banding; exact levels stay exact.
-            let noise = (dither_hash(coords) - 0.5) / 255.0;
+            let noise = (dither_hash(coords, 0u) - 0.5) / 255.0;
             textureStore(output, vec2<i32>(coords), vec4(clamp(rgba_sep.rgb + noise, vec3(0.0), vec3(1.0)), rgba_sep.a));
         }
     } 
@@ -1409,9 +1409,17 @@ fn ramp(t: f32, index: u32) -> vec4<f32> {
     return mix(c0, c1, x - f32(x0)) / 65535.0;
 }
 
-// FigCraft patch: a number in 0..1 from a hash of the pixel.
-fn dither_hash(c: vec2<u32>) -> f32 {
-    var h = c.x * 1664525u + c.y * 22695477u + 1013904223u;
+// FigCraft patch: a clip layer's backdrop (`c`, premultiplied, at pixel `xy`) packed into 8 bits
+// for the blend stack, dithered by up to half a step: rounded exactly, whatever lies under a clip
+// (a frame's own gradient fill under its children) bands, and the output dither keeps exact levels.
+fn pack_dithered(c: vec4<f32>, xy: vec2<u32>, salt: u32) -> u32 {
+    let noise = (dither_hash(xy, salt) - 0.5) / 255.0;
+    return pack4x8unorm(vec4(clamp(c.rgb + noise, vec3(0.0), vec3(c.a)), c.a));
+}
+
+// FigCraft patch: a number in 0..1 from a hash of the pixel (`salt`: another sequence).
+fn dither_hash(c: vec2<u32>, salt: u32) -> f32 {
+    var h = c.x * 1664525u + c.y * 22695477u + salt * 2654435769u + 1013904223u;
     h ^= h >> 16u;
     h *= 2246822519u;
     h ^= h >> 13u;

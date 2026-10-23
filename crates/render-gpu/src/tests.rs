@@ -230,9 +230,15 @@ fn soft_effects_are_dithered_at_the_scenes_pixels() {
     let blurs: Vec<_> = b.fx.iter().flat_map(|f| &f.passes).filter(|p| matches!(p.kind, crate::effects::Kind::Blur { .. })).collect();
     assert_eq!(blurs.len(), 1);
     let p = blurs[0];
-    // Made at least 8 times smaller, drawn at the scene's pixels.
-    assert!(p.k >= 8 && p.out == 1, "made at 1/{}, drawn at 1/{}", p.k, p.out);
-    assert_eq!((p.image.width, p.image.height), crate::effects::texture_size(p.region, 1.0, 1).unwrap());
+    // Made 16 times smaller, drawn at (nearly) the scene's pixels: at most the atlas's share.
+    assert!(p.k >= 8 && p.out * 4 <= p.k, "made at 1/{}, drawn at 1/{}", p.k, p.out);
+    let (w, h) = crate::effects::texture_size(p.region, 1.0, p.out).unwrap();
+    assert_eq!((p.image.width, p.image.height), (w, h));
+    assert!(u64::from(w) * u64::from(h) <= crate::effects::MAX_UP_PX);
+    assert!(
+        p.out == 1
+            || crate::effects::texture_size(p.region, 1.0, p.out / 2).is_none_or(|(w, h)| u64::from(w) * u64::from(h) > crate::effects::MAX_UP_PX)
+    );
     assert_eq!(p.src, crate::effects::texture_size(p.region, 1.0, p.k).unwrap());
 }
 
@@ -260,4 +266,55 @@ fn gradients_resolve_in_16_bits() {
     }
     let levels: std::collections::BTreeSet<u16> = (0..w).map(|i| (red(i) * 65535.0).round() as u16).collect();
     assert!(levels.len() > 100, "{} levels", levels.len());
+}
+
+#[test]
+#[ignore = "needs a GPU"]
+fn a_clipped_frames_own_gradient_is_dithered() {
+    // vello keeps what lies under a clip layer in an 8-bit blend stack: rounded exactly there, a
+    // card's own dark gradient fill (under its clipped children) showed flat bands tens of pixels
+    // tall, while the children drawn inside the clip were dithered.
+    use figcraft_color::{ColorStop, Gradient, GradientKind};
+    use figcraft_render::tiles::{Painted, TilePainter, tiles_in};
+    let mut d = Document::new("t");
+    let page = d.first_page().unwrap();
+    let card = d.create(page, NodeKind::Frame, "Card", 0.0, 0.0, 330.0, 586.0).unwrap();
+    let inner = d.create(card, NodeKind::Rectangle, "Inner", 100.0, 100.0, 50.0, 50.0).unwrap();
+    let stop = |position, hex| ColorStop { position, color: Color::from_hex(hex).unwrap() };
+    let n = d.get_mut(card).unwrap();
+    n.clip = true;
+    n.fills = vec![Paint::gradient(Gradient {
+        kind: GradientKind::Linear,
+        stops: vec![stop(0.0, "17171C"), stop(1.0, "0D0D11")],
+        from: (0.5, 0.0),
+        to: (0.5, 1.0),
+        width: (0.0, 0.0),
+    })];
+    d.get_mut(inner).unwrap().fills = vec![Paint::solid(Color::from_hex("808080").unwrap())];
+    let Ok(gpu) = crate::Gpu::new() else { return };
+    let mut p = crate::GpuTilePainter::new(gpu);
+    p.keep_on_gpu(false);
+    let doc = std::sync::Arc::new(d);
+    let r = figcraft_geom::Rect::new(160.0, 0.0, 330.0, 586.0);
+    let out = p.paint(&doc, page, &tiles_in(r, 1, 64).unwrap(), &figcraft_render::Options::default(), &|| false);
+    // 16×16 blocks of the card's fill (right of the inner square) all of one colour.
+    let (mut flat, mut blocks) = (0, 0);
+    for (k, painted) in out {
+        let Some(Painted::Pixels(px)) = painted else { continue };
+        let (t, s, w) = (k.rect(), k.scale(), px.width() as usize);
+        for by in 0..px.height() as usize / 16 {
+            for bx in 0..w / 16 {
+                let (x, y) = (t.x0 + (bx * 16) as f64 / s, t.y0 + (by * 16) as f64 / s);
+                if x < 170.0 || x + 16.0 / s > 320.0 || y < 10.0 || y + 16.0 / s > 576.0 {
+                    continue;
+                }
+                let first = &px.data()[(by * 16 * w + bx * 16) * 4..][..3];
+                let same = (0..16).all(|yy| (0..16).all(|xx| &px.data()[((by * 16 + yy) * w + bx * 16 + xx) * 4..][..3] == first));
+                blocks += 1;
+                flat += usize::from(same);
+            }
+        }
+    }
+    assert!(blocks > 100, "{blocks} blocks");
+    assert!(flat * 20 < blocks, "{flat} of {blocks} blocks flat (banded)");
 }
