@@ -1209,8 +1209,9 @@ fn overlays(app: &FigApp, painter: &egui::Painter, t: &Tokens) -> Vec<(NodeId, [
             let tiny = figcraft_engine::tools::box_sides_px(&b, zoom).1 < figcraft_engine::tools::SMALL_BOX_PX;
             // Measuring to another layer (Alt held) shows just the outlines: no handles or size.
             let measuring = app.session.tool.overlay.measure_box.is_some();
-            // Locked layers (selected in the layers panel) can't be resized: no handles either.
-            let handles = if measuring || sel.iter().any(|i| figcraft_engine::tools::locked_in(&doc, *i)) {
+            // Locked layers (selected in the layers panel) can't be resized, nor anything in Dev
+            // Mode: no handles either.
+            let handles = if measuring || app.session.tool.dev_mode || sel.iter().any(|i| figcraft_engine::tools::locked_in(&doc, *i)) {
                 0
             } else if is_line {
                 2

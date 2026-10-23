@@ -366,7 +366,7 @@ fn version_index(cmd: &str, ds: &DocState, p: &Value) -> Result<usize> {
     if i < ds.versions.len() { Ok(i) } else { Err(bad(cmd, format!("no version at index {i}"))) }
 }
 
-fn read_version(v: &Version) -> Result<Arc<Document>> {
+pub(crate) fn read_version(v: &Version) -> Result<Arc<Document>> {
     v.document().map_err(|e| EngineError::Other(format!("version “{}” can't be read: {e}", v.name)))
 }
 

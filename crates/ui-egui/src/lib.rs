@@ -106,6 +106,8 @@ mod design_paste_tests;
 #[cfg(test)]
 mod dev_mode_tests;
 #[cfg(test)]
+mod devmode_tail_tests;
+#[cfg(test)]
 mod duplicate_paint_tests;
 #[cfg(test)]
 mod effectcraft_ui_tests;
@@ -958,6 +960,22 @@ impl FigApp {
         }
     }
 
+    /// Dev Mode (the Inspect tab): the canvas measures on hover without Alt and edits nothing;
+    /// entering it ends editing text or vectors.
+    fn sync_dev_mode(&mut self) {
+        let dev = self.ui.right_tab == RightTab::Inspect;
+        if dev && !self.session.tool.dev_mode {
+            let _ = self.session.drop_gesture();
+            let editing = self.session.ds().map(|d| (d.text_edit.is_some(), d.vector_edit.is_some())).unwrap_or_default();
+            for (on, cmd) in [(editing.0, "text.edit.end"), (editing.1, "vector.edit.end")] {
+                if on {
+                    self.run(cmd, json!({}));
+                }
+            }
+        }
+        self.session.tool.dev_mode = dev;
+    }
+
     /// Leaving Design ends a pen path as Escape does and goes back to Move: Prototype and Inspect
     /// don't draw (#307). Checked as the frame starts (the control channel) and after the panels
     /// and shortcuts (the mode switcher, the tabs, Shift+E/Shift+D), before the canvas sees more.
@@ -1031,7 +1049,7 @@ impl FigApp {
                 }
                 "panel.versionHistory" => versions::open(self),
                 "view.devCompare" => {
-                    self.ui.dev.compare = r.data.get("id").and_then(figcraft_engine::params::id_of).map(dev_compare::CompareView::new);
+                    self.ui.dev.compare = dev_compare::CompareView::requested(&r.data);
                 }
                 "panel.libraries" => {
                     self.ui.left_tab = LeftTab::Assets;
@@ -1623,8 +1641,7 @@ impl FigApp {
         }
         theme::set_doc_profile(&ctx, self.session.doc().map_or(figcraft_color::ColorProfile::Srgb, |d| d.color_profile));
         widgets::set_nudge(&ctx, self.session.prefs.nudge_small, self.session.prefs.nudge_big);
-        // The Inspect tab measures on hover without Alt.
-        self.session.tool.redlines = self.ui.right_tab == RightTab::Inspect;
+        self.sync_dev_mode();
         self.end_pen_outside_design();
         tabs::tab_bar(self, ui);
         if self.ui.present.is_some() {
@@ -1828,7 +1845,7 @@ impl FigApp {
             "variables": self.ui.variables.is_some(),
             "versionHistory": self.ui.versions.open,
             "branchReview": self.ui.branch_review.as_ref().map(|r| json!({"id": r.id, "picks": r.picks, "mode": if r.mode == dev_compare::Mode::Overlay { "overlay" } else { "sideBySide" }})),
-            "devCompare": self.ui.dev.compare.as_ref().map(|c| json!({"id": c.id, "mode": if c.mode == dev_compare::Mode::Overlay { "overlay" } else { "sideBySide" }, "split": c.split})),
+            "devCompare": self.ui.dev.compare.as_ref().map(|c| json!({"id": c.id, "mode": if c.mode == dev_compare::Mode::Overlay { "overlay" } else { "sideBySide" }, "split": c.split, "version": c.version})),
             "devFocus": self.session.ds().ok().and_then(figcraft_engine::DocState::focused),
             "annotationFilter": self.ui.dev.categories.id(),
             "colorProfileDialog": self.ui.color_profile.map(|p| p.id()),

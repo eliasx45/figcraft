@@ -210,6 +210,8 @@ pub fn swallowed_paste(app: &mut FigApp, ctx: &Context) -> Swallowed {
 /// Run the command a shortcut is bound to, with the keyboard's own twists (Escape steps out
 /// before it deselects, Delete ends a pen path, Enter edits the selected text or vector).
 pub fn run_binding(app: &mut FigApp, id: &str) {
+    // Dev Mode places and edits nothing: Enter selects children.
+    let dev = app.ui.right_tab == crate::RightTab::Inspect;
     match id {
         "select.none" => {
             if let Some(ctx) = &app.ui_context
@@ -226,10 +228,10 @@ pub fn run_binding(app: &mut FigApp, id: &str) {
             let _ = app.session.pen_finish();
         }
         // Enter with a shape or frame tool chosen places one in the middle of the view.
-        "select.children" if app.session.tool.tool.draws_shape() => {
+        "select.children" if !dev && app.session.tool.tool.draws_shape() => {
             app.run("tool.place", json!({}));
         }
-        "select.children" if enter_text(app) => {}
+        "select.children" if !dev && enter_text(app) => {}
         _ => crate::menus::invoke(app, id),
     }
 }
@@ -299,6 +301,8 @@ fn key_event(app: &mut FigApp, key: Key, physical: Option<Key>, m: Modifiers, re
     if (dx, dy) != (0.0, 0.0) {
         if app.session.selection().is_empty() {
             app.run("view.pan", json!({"dx": dx, "dy": dy, "big": m.shift}));
+        } else if crate::menus::dev_mode_refuses(app, "transform.nudge") {
+            // Dev Mode: said so, nothing moves.
         } else if m.command {
             // Cmd/Ctrl+arrows resize: right/down grow, left/up shrink.
             app.run("transform.nudgeSize", json!({"dw": dx, "dh": dy, "big": m.shift}));
@@ -394,6 +398,9 @@ pub fn opacity_digit(app: &mut FigApp, key: Key, now: f64) -> bool {
     let Some(d) = digit(key) else { return false };
     if !app.session.prefs.number_keys_opacity || app.session.selection().is_empty() {
         return false;
+    }
+    if crate::menus::dev_mode_refuses(app, "object.opacityKeys") {
+        return true;
     }
     let first = app.ui.opacity_digit.take().filter(|(_, t)| now - t <= OPACITY_CHAIN_SECS).map(|(d, _)| d);
     let digits = match first {

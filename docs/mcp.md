@@ -1388,7 +1388,9 @@ permissions: without it nothing is downloaded); `plugin.directory.publish {path 
   strings, any other `{…}` stays as written (`unknown` lists placeholder names that aren't
   properties). Then `inspect.code` on an instance or the component returns the import line and the
   snippet instead of generated code (`connected: true`), connected instances inside a generated
-  layer tree are their snippet, and `inspect.componentCode` returns `connected: {importPath, name,
+  layer tree (also in a component's definition, in the content an instance puts in its slots, and
+  the components a connected template's instance swaps place) are their snippet with their import
+  lines once each at the top of the code, per language, and `inspect.componentCode` returns `connected: {importPath, name,
   template, import, code}` with the snippet as `usage`. Example: template `<Button
   variant="primary" icon="{Has icon ? "cart" : "none"}">{label}</Button>` with import path
   `@acme/ui` gives `import { Button } from "@acme/ui";` then `<Button variant="primary" icon="none">{"Buy
@@ -1401,7 +1403,8 @@ permissions: without it nothing is downloaded); `plugin.directory.publish {path 
   warning). `get_node` lists a component's links as `codeLinks`. In the app, the Inspect tab's
   Connect to code section edits them in the Code section's language, with a live preview and a
   Connected badge. An editor extension isn't needed: agents and editors read the same snippets
-  through this server. Plugins whose manifest asks only for `read` also run from the Inspect tab.
+  through this server. Plugins whose manifest asks only for `read` also run from the Inspect tab,
+  with their panels (`plugin.ui`); their callbacks can only read.
 - **Dev resources:** links for developers (docs, code, tickets) on any layer, each a URL and a
   name. `devResource.add {id?, url, name?}` → `{id, index}` (no name: the URL without its scheme,
   `www.` and a trailing slash; no page title is looked up), `devResource.edit {id?, index, url?,
@@ -1440,17 +1443,23 @@ permissions: without it nothing is downloaded); `plugin.directory.publish {path 
   tab filters the callouts by category and edits the categories (colour, name, delete, add); each
   note has a category menu.
 - **Ready for dev:** frames at the top of a page or section, and sections, carry a handoff status
-  (`node.set {devStatus: none|readyForDev|completed}`). `inspect.readyForDev {status?:
-  readyForDev|completed|any, page?}` lists them across pages (or on one page) in page and layer
-  order: `{items: [{id, name, page, status}]}`. The Inspect tab sets the status of the selected
-  frames and, with nothing selected, lists them with a status filter (click one to go to it, or its
-  focus button to open it in the focus view).
+  (`node.set {devStatus: none|readyForDev|completed}`; other layers are refused a status).
+  `inspect.readyForDev {status?: readyForDev|changed|completed|any, page?}` lists them across pages
+  (or on one page) in page and layer order: `{items: [{id, name, page, status, changed}]}`
+  (`changed`: ready for dev and edited since). The Inspect tab sets the status of the selected
+  frames and, with nothing selected, lists them with a status filter (Ready for dev, Changed,
+  Completed, Any status; changed ones carry a Changed badge; click one to go to it, or its focus
+  button to open it in the focus view). In the app's Dev Mode the canvas only inspects: presses
+  select (and pan, and comment), never move, resize, draw or edit text and vectors, and the menus
+  and shortcuts refuse commands that edit the design (Dev Mode's own annotations, statuses, dev
+  resources, code connections and comments still work); choosing a drawing tool in the toolbar
+  goes back to the design. Commands sent over MCP or the control channel aren't affected.
 - **Compare changes:** when a layer marked Ready for dev first changes (it turns "Changed"), the
   file keeps a copy of it and everything in it as it was just before that edit (saved in the
   `.figcraft` file only while there is a change; resolving the change, marking it again, another
   status or deleting it drops the copy, so the next change compares with that state).
-  `dev.compare {id?, show?}` → `{id, name, changed, snapshot, added, removed, modified, truncated,
-  changes: [{id, name, type, change: added|removed|changed, depth, layers, properties?: [{section,
+  `dev.compare {id?, version?, show?}` → `{id, name, changed, snapshot, added, removed, modified,
+  truncated, version: {id, name, time} | null, changes: [{id, name, type, change: added|removed|changed, depth, layers, properties?: [{section,
   property, before, after, text}]}]}`: layers matched by id, added and removed ones listed as a
   whole (`layers` counts what's inside), changed ones with their properties formatted like Inspect
   (`width 120 → 136`, `fill #FF0000 → #E03030`, `text “Welcome” → “Hello”`, `parent Badge → Screen`,
@@ -1458,7 +1467,11 @@ permissions: without it nothing is downloaded); `plugin.directory.publish {path 
   opacity, visibility, name), nested layers and instance contents included. `snapshot: false` means
   the frame changed before copies were kept (an older file). `show: true` opens the compare view in
   the app: before and now side by side (or overlaid with a slider), changed layers outlined (added
-  green, changed orange, removed red), the list of changes and Resolve change.
+  green, changed orange, removed red), the list of changes and Resolve change. With `version` (an id
+  from `version.list`) any top-level frame or section, ready for dev or not, is compared with that
+  saved version instead (a layer the version doesn't have was added as a whole); the compare view
+  picks it at the bottom (Compare with: When marked ready, or a version; a frame that isn't ready
+  for dev compares with the newest version), and `ui.set {devCompareVersion}` sets it.
 - **Focus view:** `dev.focus {id? | direction: next|previous}` → `{id, name, page, index, count}`
   shows one top-level frame or section alone on the canvas (fitted, selected, other layers neither
   drawn nor hit), switching page when needed; `direction` steps through the ready-for-dev frames
