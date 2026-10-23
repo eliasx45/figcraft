@@ -67,16 +67,17 @@ fn panels_fit_the_window() {
     let (l0, l1, r0, r1) = (*LEFT_PANEL.start(), *LEFT_PANEL.end(), *RIGHT_PANEL.start(), *RIGHT_PANEL.end());
     // (room beside the icon rail, left asked (none: closed), right asked) → (left, right) drawn
     let rows = [
-        ((1384.0, Some(240.0), 240.0), (240.0, 240.0), "as asked in a wide window"),
-        ((1384.0, Some(100.0), 100.0), (l0, r0), "never narrower than their least"),
-        ((1384.0, Some(900.0), 900.0), (l1, r1), "never wider than their most"),
-        ((1384.0, None, 300.0), (0.0, 300.0), "the left panel closed"),
-        ((744.0, Some(240.0), 240.0), (240.0, 240.0), "the smallest window with the default widths"),
-        ((744.0, Some(480.0), 480.0), (l0, 744.0 - l0 - CANVAS_MIN), "the smallest window: the left panel gives way first, then the right"),
-        ((744.0, Some(480.0), 240.0), (744.0 - 240.0 - CANVAS_MIN, 240.0), "the left panel gives the canvas its room"),
-        ((744.0, None, 480.0), (0.0, 480.0), "with the left panel closed the right one has room"),
-        ((300.0, Some(240.0), 240.0), (l0, r0), "a window smaller than any layout: the least widths"),
-        ((1384.0, Some(f32::NAN), f32::INFINITY), (PANEL_DEFAULT, PANEL_DEFAULT), "junk widths: the default"),
+        ((1384.0, Some(240.0), Some(240.0)), (240.0, 240.0), "as asked in a wide window"),
+        ((1384.0, Some(100.0), Some(100.0)), (l0, r0), "never narrower than their least"),
+        ((1384.0, Some(900.0), Some(900.0)), (l1, r1), "never wider than their most"),
+        ((1384.0, None, Some(300.0)), (0.0, 300.0), "the left panel closed"),
+        ((744.0, Some(240.0), Some(240.0)), (240.0, 240.0), "the smallest window with the default widths"),
+        ((744.0, Some(480.0), Some(480.0)), (l0, 744.0 - l0 - CANVAS_MIN), "the smallest window: the left panel gives way first, then the right"),
+        ((744.0, Some(480.0), Some(240.0)), (744.0 - 240.0 - CANVAS_MIN, 240.0), "the left panel gives the canvas its room"),
+        ((744.0, None, Some(480.0)), (0.0, 480.0), "with the left panel closed the right one has room"),
+        ((300.0, Some(240.0), Some(240.0)), (l0, r0), "a window smaller than any layout: the least widths"),
+        ((1384.0, Some(f32::NAN), Some(f32::INFINITY)), (PANEL_DEFAULT, PANEL_DEFAULT), "junk widths: the default"),
+        ((744.0, Some(480.0), None), (480.0, 0.0), "the right panel closed (a board's): the left one keeps its width"),
     ];
     for ((avail, left, right), want, why) in rows {
         assert_eq!(fit_panels(avail, left, right), want, "{why}");
@@ -85,7 +86,7 @@ fn panels_fit_the_window() {
     for avail in [744.0, 900.0, 1384.0] {
         for left in [None, Some(l0), Some(300.0), Some(l1)] {
             for right in [r0, 333.0, r1] {
-                let (l, r) = fit_panels(avail, left, right);
+                let (l, r) = fit_panels(avail, left, Some(right));
                 assert!(avail - l - r >= CANVAS_MIN, "{avail} {left:?} {right}: canvas {}", avail - l - r);
             }
         }

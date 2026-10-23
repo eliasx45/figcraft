@@ -9,7 +9,7 @@ summarizes it; [`gaps.md`](gaps.md) is the ranked work list; the measured menu c
 [`hardware-parity.md`](hardware-parity.md), [`localization-parity.md`](localization-parity.md),
 [`auto-layout-parity.md`](auto-layout-parity.md), [`components-parity.md`](components-parity.md),
 [`prototyping-parity.md`](prototyping-parity.md), [`dev-mode-parity.md`](dev-mode-parity.md),
-[`collaboration-parity.md`](collaboration-parity.md).
+[`collaboration-parity.md`](collaboration-parity.md), [`boards-parity.md`](boards-parity.md).
 
 ## Headline
 
@@ -84,8 +84,10 @@ Weights are the share of a typical product designer's working time in Figma Desi
 so they can be argued with. Areas 1–16 keep the original rubric's weights (they sum to 94, not the 100 the rubric claimed);
 areas 17–21 are added (sum 19) because Figma users depend on them. Percentages below divide by the
 total, 113.
-Out of scope as separate products: FigJam, Figma Slides, Sites, Make, Buzz, Weave (the `.jam` and
-`.deck` document kinds belong to them).
+Out of scope as separate products: Figma Slides, Sites, Make, Buzz, Weave (the `.deck` document
+kind belongs to them). Whiteboarding is covered by FigCraft's boards (area 22, weight 0: a separate
+workflow, tracked here but not in the weighted sum; [`boards-parity.md`](boards-parity.md)); the
+`.jam` document kind is not read or written.
 
 ## By feature area
 
@@ -115,6 +117,7 @@ Breadth: does it exist. Ready: depth, correctness and fidelity for real projects
 | 19 | Team libraries & organization | 2 | 70% | 40% | Libraries kept on `figcraft-server` under their file and enabled by a share link (per-asset versions, background update checks, overrides kept), usage counts per component and file, swapping a library by names. Left: team-wide library lists, accounts and permissions, analytics over time, pushed update notices | 4–8 |
 | 20 | Figma Draw extras | 2 | 88% | 60% | Have: variable width, lasso, shape builder, noise/texture, text on a path, pattern fills, stretch and scatter brushes, pen pressure (Windows pens, browser styluses), multi-edit (several vector layers in edit mode at once). Missing: pressure from macOS/Linux tablets | 1–3 |
 | 21 | AI features | 3 | 0% | 0% | First draft, rename layers, image edit/remove background, visual search, Make: needs local models (owner decision) | 30–60 |
+| 22 | Boards (whiteboarding) | 0 | ~35% | ~20% | Board files with sticky notes, shapes with text, connectors that follow what they join, marker, highlighter and eraser, stamps, text and sections, in live sessions (M12); missing: timer, voting, board widgets, templates, tables, mind maps, washi tape, audio, quick-create handles, stamps sticking to objects, `.jam` files ([boards-parity](boards-parity.md)). Not in the weighted sum | 30–60 |
 | | **Weighted (÷113)** | 113 | **~85%** | **~63%** | | **117–255** |
 | | Core editor only (1–16, ÷94) | 94 | ~94% | ~72% | | 32–74 |
 
@@ -640,6 +643,7 @@ Carried over from the ROADMAP's "Shipped so far" (2026-10-10). The test count th
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-24 | minor | Boards (M12): a file kind of its own (`file.newBoard`, saved in `.figcraft`, carried to live-session joiners) with sticky notes, shapes with text, connectors that re-route when what they join moves (an engine recompute, the same for local edits, undo and others' edits), marker, highlighter and eraser, stamps with the placer's name, a board toolbar and a contextual bar; prototyping and Dev Mode refuse on boards; design files and boards have their own marks on tabs and file rows. Area 22 added at weight 0 (breadth ~35%, ready ~20%); headline numbers unchanged (the weighted sum leaves area 22 out) |
 | 2026-10-20 | minor | Layer data reads back (#879): `node.get` (the command, the control method and MCP `get_node`) and `document.inspect` report a layer's or page's `pluginData` as `{key: value}` when it has any, so a tool that keeps state in a file with `node.set {props: {pluginData}}` can read it on its next run (`plugin_data_tests`). Numbers unchanged |
 | 2026-10-19 | patch | Text row: files that name SF Pro Text or SF Pro Display draw with the variable SF Pro (its optical size follows the font size) when only that is installed, as Apple ships it today, instead of listing them as missing fonts. Grade unchanged |
 | 2026-10-19 | minor | Performance row: the desktop app's GPU canvas is on by default (gap 7): Preferences ▸ Draw the canvas on the GPU (`pref.gpuCanvas`, from the next start) turns it off, `FIGCRAFT_GPU_TILES=0` or `=1` overrides it for one run; the CPU still paints effects, masks, pattern fills and anything the device can't run; measured on macOS too (M1 Max: 0.4 cores instead of 2.1 while zooming). Grade and hours unchanged |

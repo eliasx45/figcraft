@@ -416,6 +416,53 @@ tips; headless, it only sets the preference.
 {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"export","arguments":{"format":"png","path":"dashboard.png"}}}
 ```
 
+### Boards
+
+A board is a file of its own kind for thinking together: `file.newBoard {name?}` opens one (its
+page is light; `inspect_document` says `kind: "board"`). Board objects are ordinary layers with a
+`board` entry `get_node` shows (`{type: sticky|shape|connector|label|stamp|ink, …}`), so the usual
+commands move, resize, recolour, copy, delete and undo them. On a design file the board commands
+refuse; on a board `proto.*`, `dev.*`, `view.prototype` and `view.devMode` refuse. Each of these is
+one undo step and returns the ids it made:
+
+- `board.sticky {x, y, text?, color?, author?, parent?}` → `{id, text}`: a sticky note (a square
+  frame whose height grows with its note; its text size shrinks as the note gets longer). `color`
+  is a board colour (`yellow orange red pink violet blue green gray`) or a hex colour; `author`
+  defaults to your name (`pref.userName`, or the one a live session gave you; `false` for none).
+- `board.nextSticky {id?, side?: right|below|left|above, edit?}` → `{id, text}`: a sticky of the
+  same colour beside the selected (or edited) one; with `edit: true` the app goes on typing in it
+  (`Shift+Cmd/Ctrl+Enter` in the app does both).
+- `board.shape {shape, x, y, width?, height?, text?, color?, parent?}` → `{id, text}`: a shape with centred,
+  wrapping text: `rectangle roundedRectangle ellipse diamond triangle speechBubble chevron`.
+- `board.connector {from, to, fromSide?, toSide?, style?: straight|elbow, startCap?, endCap?, label?}`
+  → `{id, label?}`: `from`/`to` are layer ids or `{x, y}` page points; sides are `auto` (the side
+  facing the other end) or `top right bottom left`; caps are stroke caps (default an arrow at the
+  end). The connector re-routes itself whenever what it joins moves or resizes, also when someone
+  else in a live session moves it; a deleted end stays where it was as a point. `board.label {id,
+  text}` sets its label (empty removes it).
+- `board.stamp {x, y, stamp: thumbsUp|heart|plusOne|star|question|check}` → `{id}`: a round badge
+  centred there, with your name on it for hover.
+- `board.ink {path | points, highlighter?, color?, select? (default true)}` → `{id}`: a marker (or
+  wide, see-through highlighter) stroke.
+- `board.setColor {ids?, color}`: stickies and shapes take it as their fill, connectors and ink as
+  their line. `board.setStyle {ids?, shape?, fontSize?, style?, startCap?, endCap?}`: a shape's
+  outline and text size, a connector's routing and arrowheads.
+- Tools for `pointer`: `tool.sticky {color?}`, `tool.shape {shape?}`, `tool.connector {style?}`
+  (drag from one object to another), `tool.marker {color?}`, `tool.highlighter {color?}`,
+  `tool.eraser` (drag over strokes), `tool.stamp {stamp?}`; Text and Section are the usual tools.
+
+```json
+{"command": "file.newBoard", "params": {"name": "Retro"}}
+{"command": "board.sticky", "params": {"x": 0, "y": 0, "text": "Went well", "color": "green"}}
+{"command": "board.sticky", "params": {"x": 240, "y": 0, "text": "To improve", "color": "pink"}}
+{"command": "board.connector", "params": {"from": 2, "to": 4, "style": "elbow", "label": "leads to"}}
+{"command": "board.stamp", "params": {"x": 200, "y": 0, "stamp": "plusOne"}}
+```
+
+`from` and `to` are the `id`s the two `board.sticky` calls returned (here `{"id": 2, "text": 3}` and
+`{"id": 4, "text": 5}` in a new board without an author name; a sticky with its author's name takes
+one more id). In a `batch`, step references (`{"from": {"$step": 1}, "to": {"$step": 2}}`, the `id`s steps 1 and 2 returned) avoid counting.
+
 ### Sections, handoff and arrow keys
 
 `run_command` with `object.wrapInSection {ids?, name?}` (Wrap in new section: layers on the page or
@@ -450,6 +497,10 @@ on; `key` resolves keys the way the canvas does. Commands behind keys:
 - `view.designPrototype` (`Shift+E`), `view.devMode` (`Shift+D`) and `view.leftSidebar`
   (`Shift+Cmd+\`) switch the right panel's tab or hide the left sidebar in the app (no-ops headless).
 - `doc.nextTab` / `doc.previousTab` (`Ctrl+Tab` / `Ctrl+Shift+Tab`): the next or previous open file.
+- Board tools (boards only): `tool.sticky` (`Q`), `tool.shape` (`B`), `tool.connector` (`X`),
+  `tool.marker` (`M`), `tool.highlighter` (`U`), `tool.eraser` (`E`), `tool.stamp` (`W`), and
+  `board.nextSticky` (`Shift+Cmd/Ctrl+Enter`, also while typing in a sticky). Keys no design-file
+  shortcut uses; on a design file they refuse.
 - `view.pan {dx, dy, big?}`: the arrow keys with nothing selected (`key ArrowRight` does the same)
   pan the view by 20 screen pixels a step, 200 with `big` (Shift).
 - `view.multiplayerCursors {on?}` (`Alt+Cmd+\`): show or hide others' cursors in a live session.

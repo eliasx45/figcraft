@@ -39,10 +39,18 @@ pub enum ToolId {
     Comment,
     Eyedropper,
     ShapeBuilder,
+    // Board tools.
+    Sticky,
+    BoardShape,
+    Connector,
+    Marker,
+    Highlighter,
+    Eraser,
+    Stamp,
 }
 
 impl ToolId {
-    pub const ALL: [ToolId; 18] = [
+    pub const ALL: [ToolId; 25] = [
         ToolId::Move,
         ToolId::Scale,
         ToolId::Hand,
@@ -61,6 +69,13 @@ impl ToolId {
         ToolId::Comment,
         ToolId::Eyedropper,
         ToolId::ShapeBuilder,
+        ToolId::Sticky,
+        ToolId::BoardShape,
+        ToolId::Connector,
+        ToolId::Marker,
+        ToolId::Highlighter,
+        ToolId::Eraser,
+        ToolId::Stamp,
     ];
     pub fn id(self) -> &'static str {
         match self {
@@ -82,6 +97,13 @@ impl ToolId {
             ToolId::Comment => "comment",
             ToolId::Eyedropper => "eyedropper",
             ToolId::ShapeBuilder => "shapeBuilder",
+            ToolId::Sticky => "sticky",
+            ToolId::BoardShape => "shape",
+            ToolId::Connector => "connector",
+            ToolId::Marker => "marker",
+            ToolId::Highlighter => "highlighter",
+            ToolId::Eraser => "eraser",
+            ToolId::Stamp => "stamp",
         }
     }
     pub fn from_id(s: &str) -> Option<ToolId> {
@@ -107,7 +129,22 @@ impl ToolId {
             ToolId::Comment => "Comment",
             ToolId::Eyedropper => "Pick color",
             ToolId::ShapeBuilder => "Shape builder",
+            ToolId::Sticky => "Sticky note",
+            ToolId::BoardShape => "Shapes",
+            ToolId::Connector => "Connector",
+            ToolId::Marker => "Marker",
+            ToolId::Highlighter => "Highlighter",
+            ToolId::Eraser => "Eraser",
+            ToolId::Stamp => "Stamp",
         }
+    }
+
+    /// The tools of a board's toolbar (a design file's toolbar has the others).
+    pub fn on_boards(self) -> bool {
+        matches!(
+            self,
+            ToolId::Sticky | ToolId::BoardShape | ToolId::Connector | ToolId::Marker | ToolId::Highlighter | ToolId::Eraser | ToolId::Stamp
+        )
     }
     /// The tool's key (from [`crate::keymap`]; empty when it has none).
     pub fn shortcut(self) -> &'static str {
@@ -422,6 +459,15 @@ pub(crate) enum Gesture {
     },
     /// Dragging the rotation origin handle (see [`crate::rotation_origin`]).
     Origin,
+    /// The connector tool: dragging from `from` (pressed at `start`).
+    Connect {
+        from: figcraft_doc::End,
+        start: Point,
+    },
+    /// The eraser: the strokes it took so far.
+    Erase {
+        gone: Vec<NodeId>,
+    },
     /// Shape builder: regions collected so far (handled in `shapebuilder`).
     ShapeBuild {
         picked: Vec<usize>,
@@ -482,6 +528,8 @@ pub struct ToolState {
     pub labels: Vec<(NodeId, [Point; 4])>,
     /// The brush the Pencil draws with (`tool.pencilBrush`; `None`: a plain stroke).
     pub pencil_brush: Option<figcraft_doc::Brush>,
+    /// The board tools' colours and choices.
+    pub board: crate::board::BoardTool,
 }
 
 /// Pen pressure along drawn samples as width profile points `[t, scale]`: `t` by length, at most
@@ -1023,6 +1071,7 @@ impl Session {
                     Ok(())
                 }
                 ToolId::Eyedropper => self.eyedrop(ev),
+                t if t.on_boards() => self.board_down(ev),
                 t if t.draws_shape() => self.draw_down(ev),
                 _ => Ok(()),
             },
@@ -1221,12 +1270,13 @@ impl Session {
         }
         // A frame's name label picks the frame itself. The background of a top-level frame with
         // layers in it is like the canvas (a press starts a marquee inside it) unless the frame is
-        // selected; an empty frame (or a widget) is picked and dragged.
+        // selected; an empty frame (or a widget, or a board object such as a sticky) is picked and
+        // dragged.
         let board_background = |leaf: NodeId| {
             !sel.contains(&leaf)
-                && doc
-                    .node(leaf)
-                    .is_some_and(|n| n.parent == Some(page) && n.kind.is_frame_like() && !n.children.is_empty() && !crate::widgets::is_widget(n))
+                && doc.node(leaf).is_some_and(|n| {
+                    n.parent == Some(page) && n.kind.is_frame_like() && !n.children.is_empty() && !crate::widgets::is_widget(n) && !n.is_board_atom()
+                })
         };
         let target = label_at(&doc, page, &self.tool.labels, ev.p()).or_else(|| {
             self.hit(&doc, page, ev.p(), ev.tol() * 2.0)
@@ -1346,6 +1396,9 @@ impl Session {
                             let idx = doc.index_in_parent(*i).map(|x| x + 1);
                             copies.push(crate::components::copy_in_file(doc, *i, parent, idx)?);
                         }
+                        // Connectors copied with what they join join the copies.
+                        let map = crate::board::copy_map(doc, &ids, &copies);
+                        crate::board::rejoin(doc, &crate::board::copied_items(doc, &map), &map, false);
                         moving = copies;
                         *sel = moving.clone();
                     }
@@ -1514,6 +1567,15 @@ impl Session {
                 Ok(())
             }
             Gesture::Vector(_) | Gesture::ShapeBuild { .. } | Gesture::Origin => Ok(()),
+            Gesture::Connect { from, start } => {
+                let (from, start) = (*from, *start);
+                self.connect_drag(ev, from, start);
+                return Ok(());
+            }
+            Gesture::Erase { gone } => {
+                self.tool.gesture = Gesture::Erase { gone: gone.clone() };
+                return self.erase_at(ev);
+            }
             Gesture::PenDrag { anchor } => {
                 // A click's wobble pulls out no handle.
                 let out = if within_slop(ev, *anchor) { Vec2::ZERO } else { ev.p() - *anchor };
@@ -1877,10 +1939,17 @@ impl Session {
                     self.tool.tool = t;
                 }
             }
-            Gesture::Pencil { points, pressure } => {
+            Gesture::Pencil { mut points, mut pressure } => {
                 self.tool.overlay.pen.clear();
+                // The stroke ends where the button came up, even without a move to get there.
+                if points.last().is_none_or(|l| (*l - ev.p()).hypot() > 0.5 / ev.zoom.max(1e-6)) {
+                    points.push(ev.p());
+                    pressure.push(ev.pressure);
+                }
                 self.pencil_finish(&points, &pressure)?;
             }
+            Gesture::Connect { from, start } => self.connect_up(ev, from, start)?,
+            Gesture::Erase { .. } => self.erase_up()?,
             Gesture::TextSelect { .. } | Gesture::TextBox { .. } | Gesture::Marquee { .. } | Gesture::None => {}
             Gesture::PenDrag { .. } | Gesture::ShapeBuild { .. } | Gesture::Origin => {}
             Gesture::Vector(_) => self.commit_interaction()?,
@@ -1931,6 +2000,9 @@ impl Session {
             self.cancel_interaction()?;
         }
         let Some(leaf) = self.hit(&doc, page, ev.p(), ev.tol() * 2.0) else { return Ok(()) };
+        if matches!(self.tool.tool, ToolId::Move | ToolId::Scale) && self.board_double_click(&doc, leaf, &sel)? {
+            return Ok(());
+        }
         let target = select_target(&doc, leaf, &sel, true);
         // Text: edit at the click.
         if edits
@@ -2277,6 +2349,9 @@ impl Session {
         }
         let fitted = figcraft_geom::kurbo::simplify::simplify_bezpath(poly.iter(), 0.75, &Default::default());
         let d = fitted.to_svg();
+        if matches!(self.tool.tool, ToolId::Marker | ToolId::Highlighter) {
+            return self.ink_finish(&d);
+        }
         let page = self.page()?;
         let parent = frame_at(self.doc()?, page, points.first().copied().unwrap_or_default(), &[]).unwrap_or(page);
         let pw = self.doc()?.world_transform(parent);

@@ -288,6 +288,8 @@ pub fn show(app: &mut FigApp, ui: &mut Ui, worker: &mut Worker) {
         worker.submit_tiles(batch);
     }
     crate::handles::draw(app, &painter);
+    crate::board_bar::stamp_author(app, &painter, ctx.input(|i| i.pointer.hover_pos()).filter(|p| rect.contains(*p)));
+    crate::board_bar::show(app, &ctx);
     crate::selection_spacing::draw(app, &painter);
     crate::comments::draw(app, &painter);
     crate::live_text::draw(app, &painter);
@@ -1104,7 +1106,8 @@ fn overlays(app: &FigApp, painter: &egui::Painter, t: &Tokens) -> Vec<(NodeId, [
             }
         }
         // The focus view's bar names its frame.
-        let labelled = focus.is_none() && (n.kind.is_frame_like() || matches!(n.kind, NodeKind::Section { .. }));
+        // Board objects (stickies, shapes with text, stamps) are frames without a name label.
+        let labelled = focus.is_none() && (n.kind.is_frame_like() || matches!(n.kind, NodeKind::Section { .. })) && !n.is_board_atom();
         if labelled && let Some(q) = crate::frame_labels::draw(app, painter, t, &doc, *c, sel.contains(c), ds.hover == Some(*c)) {
             labels.push((*c, q.map(|p| app.to_page(p))));
         }

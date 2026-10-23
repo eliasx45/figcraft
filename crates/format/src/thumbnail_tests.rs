@@ -148,7 +148,12 @@ fn previews_carry_the_first_pages_colour() {
     assert!(p.picture.is_some());
     // A file with nothing on it: its colour, no picture.
     let bytes = crate::save_bytes(&doc_on([0.9, 0.9, 0.9]), None).unwrap();
-    assert_eq!(archive_preview(Cursor::new(&bytes), 640), Preview { page: Some([0.9, 0.9, 0.9, 1.0]), picture: None });
+    assert_eq!(archive_preview(Cursor::new(&bytes), 640), Preview { page: Some([0.9, 0.9, 0.9, 1.0]), picture: None, kind: Default::default() });
+    // A board says so (the home screen marks it).
+    let mut board = doc_on([0.9, 0.9, 0.9]);
+    board.kind = figcraft_doc::FileKind::Board;
+    let bytes = crate::save_bytes(&board, None).unwrap();
+    assert_eq!(archive_preview(Cursor::new(&bytes), 640).kind, figcraft_doc::FileKind::Board);
     // Damaged or odd metadata: no colour, never a panic.
     for meta in [&b"{"[..], b"{\"client_meta\":{\"background_color\":{\"r\":\"x\",\"g\":0,\"b\":0}}}", b"[]", b"{\"client_meta\":7}"] {
         assert_eq!(archive_preview(Cursor::new(zip(&[("meta.json", meta)])), 640).page, None, "{}", String::from_utf8_lossy(meta));

@@ -255,6 +255,18 @@ pub fn select_target(doc: &Document, leaf: NodeId, context: &[NodeId], deep: boo
     if deep {
         return leaf;
     }
+    let target = level_target(doc, leaf, context);
+    // A board object is picked whole (a sticky, not its text), unless a layer inside it is selected.
+    let mut chain = doc.ancestors(target);
+    chain.reverse();
+    chain.push(target);
+    chain
+        .into_iter()
+        .find(|c| doc.node(*c).is_some_and(Node::is_board_atom) && !context.iter().any(|s| s != c && doc.is_ancestor(*c, *s)))
+        .unwrap_or(target)
+}
+
+fn level_target(doc: &Document, leaf: NodeId, context: &[NodeId]) -> NodeId {
     // Chain from the page's child down to the leaf.
     let mut chain: Vec<NodeId> = doc.ancestors(leaf);
     chain.reverse();

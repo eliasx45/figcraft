@@ -109,6 +109,8 @@ pub fn file_thumbnail(path: &Path, fit: u32) -> Option<Thumbnail> {
 pub struct Preview {
     pub page: Option<[f32; 4]>,
     pub picture: Option<Thumbnail>,
+    /// A design file or a board (`.fig` files and images: design).
+    pub kind: figcraft_doc::FileKind,
 }
 
 /// The [`Preview`] of the file at `path`, its picture at most `fit` pixels on its longer side.
@@ -119,7 +121,7 @@ pub fn file_preview(path: &Path, fit: u32) -> Preview {
             let Ok(file) = std::fs::File::open(path) else { return Preview::default() };
             archive_preview(std::io::BufReader::new(file), fit)
         }
-        FileKind::Image => Preview { page: None, picture: file_thumbnail(path, fit) },
+        FileKind::Image => Preview { picture: file_thumbnail(path, fit), ..Preview::default() },
         FileKind::Svg | FileKind::Other => Preview::default(),
     }
 }
@@ -129,31 +131,33 @@ pub fn file_preview(path: &Path, fit: u32) -> Preview {
 pub fn archive_preview<R: Read + Seek>(archive: R, fit: u32) -> Preview {
     let Ok(mut z) = zip::ZipArchive::new(archive) else { return Preview::default() };
     let picture = crate::read_member(&mut z, "thumbnail.png", MAX_THUMBNAIL_BYTES).ok().and_then(|png| decode_thumbnail(&png, fit));
-    let page = if z.file_names().any(|n| n == "document.json") {
-        crate::read_member(&mut z, "document.json", MAX_DOCUMENT_BYTES).ok().and_then(|json| figcraft_page(&json))
+    let (page, kind) = if z.file_names().any(|n| n == "document.json") {
+        crate::read_member(&mut z, "document.json", MAX_DOCUMENT_BYTES).ok().map(|json| figcraft_page(&json)).unwrap_or_default()
     } else {
-        crate::read_member(&mut z, "meta.json", MAX_META_BYTES).ok().and_then(|json| fig_page(&json))
+        (crate::read_member(&mut z, "meta.json", MAX_META_BYTES).ok().and_then(|json| fig_page(&json)), figcraft_doc::FileKind::Design)
     };
-    Preview { page, picture }
+    Preview { page, picture, kind }
 }
 
-/// The first page's background in a `.figcraft` `document.json`.
-fn figcraft_page(json: &[u8]) -> Option<[f32; 4]> {
+/// The first page's background in a `.figcraft` `document.json`, and the file's kind.
+fn figcraft_page(json: &[u8]) -> (Option<[f32; 4]>, figcraft_doc::FileKind) {
     #[derive(serde::Deserialize)]
     struct Head {
         #[serde(default)]
         pages: Vec<u64>,
         #[serde(default)]
         nodes: std::collections::BTreeMap<String, Node>,
+        #[serde(default)]
+        kind: figcraft_doc::FileKind,
     }
     #[derive(serde::Deserialize)]
     struct Node {
         #[serde(default)]
         background: Option<serde_json::Value>,
     }
-    let head: Head = serde_json::from_slice(json).ok()?;
-    let first = head.pages.first()?;
-    rgba(head.nodes.get(&first.to_string())?.background.as_ref()?)
+    let Ok(head) = serde_json::from_slice::<Head>(json) else { return (None, figcraft_doc::FileKind::Design) };
+    let page = head.pages.first().and_then(|first| head.nodes.get(&first.to_string())).and_then(|n| n.background.as_ref()).and_then(rgba);
+    (page, head.kind)
 }
 
 /// The canvas colour a `.fig` file's `meta.json` gives (`client_meta.background_color`).

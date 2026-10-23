@@ -193,6 +193,17 @@ icons! {
     LiveShared,
     /// A file of yours on a server that only you get into: a point inside a closed ring.
     LivePrivate,
+    /// A design file: a pen nib leaning to the left, its grip filled.
+    PenNib,
+    /// A board file (and the sticky note tool): a note with its bottom corner folded up.
+    Board,
+    /// Board tools: a chisel-tipped marker; a broad highlighter over its band; a connector
+    /// between two boxes; shapes (a square behind a circle); a stamp (a badge with a check).
+    Marker,
+    Highlighter,
+    Connector,
+    Shapes,
+    Stamp,
 }
 
 /// Points along a circular arc from angle `a0` to `a1` (radians, y down: increasing is clockwise).
@@ -1118,6 +1129,49 @@ fn draw(p: &P, icon: Icon) {
             p.line(8.0, 6.0, 8.0, 9.5);
             p.dot(8.0, 11.5, 0.9);
         }
+        PenNib => {
+            // Drawn pointing down, then leant 35° to the left about the middle.
+            let (sin, cos) = (0.61f32, 0.79f32);
+            let at = |x: f32, y: f32| (8.0 + x * cos - y * sin, 8.0 + x * sin + y * cos);
+            let nib: Vec<(f32, f32)> = [(0.0, 6.5), (3.4, 1.0), (2.4, -2.5), (-2.4, -2.5), (-3.4, 1.0)].iter().map(|&(x, y)| at(x, y)).collect();
+            p.path(&nib, true);
+            let (a, b) = (at(0.0, 6.5), at(0.0, 2.0));
+            p.path(&[a, b], false);
+            let (dx, dy) = at(0.0, 0.6);
+            p.dot(dx, dy, 1.0);
+            let grip: Vec<(f32, f32)> = [(-2.4, -3.4), (2.4, -3.4), (2.4, -5.6), (-2.4, -5.6)].iter().map(|&(x, y)| at(x, y)).collect();
+            p.fill(&grip);
+        }
+        Board => {
+            p.poly(&[(2.5, 2.5), (13.5, 2.5), (13.5, 9.5), (9.5, 13.5), (2.5, 13.5)], true);
+            p.fill(&[(9.5, 13.5), (9.5, 9.5), (13.5, 9.5)]);
+            p.line(5.0, 6.5, 11.0, 6.5);
+            p.line(5.0, 9.5, 8.0, 9.5);
+        }
+        Marker => {
+            p.poly(&[(3.0, 13.0), (3.0, 10.5), (10.0, 3.5), (12.5, 6.0), (5.5, 13.0)], true);
+            p.line(8.5, 5.0, 11.0, 7.5);
+            p.fill(&[(2.0, 14.0), (2.0, 11.5), (4.5, 14.0)]);
+        }
+        Highlighter => {
+            p.poly(&[(4.0, 10.0), (10.5, 3.5), (13.5, 6.5), (7.0, 13.0)], true);
+            p.poly(&[(4.0, 10.0), (2.5, 12.5), (4.5, 12.5), (7.0, 13.0)], false);
+            p.fill_rect(1.0, 14.0, 15.0, 15.5, 0.0);
+        }
+        Connector => {
+            p.rect(1.5, 1.5, 6.5, 6.5, 1.0);
+            p.rect(9.5, 9.5, 14.5, 14.5, 1.0);
+            p.poly(&[(6.5, 4.0), (12.0, 4.0), (12.0, 9.0)], false);
+            p.head((12.0, 9.0), FRAC_PI_2, 2.4);
+        }
+        Shapes => {
+            p.rect(1.5, 5.5, 9.5, 13.5, 1.0);
+            p.circle(10.5, 5.5, 4.0);
+        }
+        Stamp => {
+            p.circle(8.0, 8.0, 6.0);
+            p.poly(&[(5.0, 8.3), (7.2, 10.5), (11.0, 6.0)], false);
+        }
         Logo => {
             // FigCraft's own mark: the curled tail of the chameleon on the app icon. One bold
             // stroke: a shaft along the bottom, then three half turns, each tighter than the last.
@@ -1160,6 +1214,46 @@ pub fn button(ui: &mut egui::Ui, icon: Icon, size: f32, active: bool, tooltip: &
         crate::a11y::toggle(&resp, tooltip, true);
     }
     resp
+}
+
+/// The mark of a file of `kind` on tabs and file rows: a pen nib for design files, a sticky note
+/// for boards.
+pub fn file_mark(kind: figcraft_doc::FileKind) -> Icon {
+    match kind {
+        figcraft_doc::FileKind::Design => Icon::PenNib,
+        figcraft_doc::FileKind::Board => Icon::Board,
+    }
+}
+
+/// SVG path data outlines on a `size`-unit box, painted into `rect`: each part filled, or
+/// stroked `width` box units wide. Board shapes and stamp marks are drawn this way in the UI from
+/// the same outlines the canvas has.
+pub fn paint_outlines(painter: &Painter, rect: Rect, size: f64, parts: &[(&figcraft_geom::BezPath, bool)], color: Color32, width: f32) {
+    let s = rect.width().min(rect.height()) / size as f32;
+    let px = 1.0 / painter.ctx().pixels_per_point();
+    let o = rect.center() - Vec2::splat(size as f32 * s / 2.0);
+    let p = P { painter, o, s, px, stroke: Stroke::new((width * s).max(px), color), color };
+    for (path, filled) in parts {
+        let mut sub: Vec<(f32, f32)> = Vec::new();
+        let flush = |sub: &mut Vec<(f32, f32)>, closed: bool| {
+            if sub.len() >= 2 {
+                if *filled { p.fill(sub) } else { p.path(sub, closed) }
+            }
+            sub.clear();
+        };
+        let mut closed = false;
+        figcraft_geom::kurbo::flatten(path.iter(), 0.25, |el| match el {
+            figcraft_geom::kurbo::PathEl::MoveTo(q) => {
+                flush(&mut sub, closed);
+                closed = false;
+                sub.push((q.x as f32, q.y as f32));
+            }
+            figcraft_geom::kurbo::PathEl::LineTo(q) => sub.push((q.x as f32, q.y as f32)),
+            figcraft_geom::kurbo::PathEl::ClosePath => closed = true,
+            _ => {}
+        });
+        flush(&mut sub, closed);
+    }
 }
 
 /// Every icon at the sizes the UI uses, labelled: for reviewing the set (`ui.set {iconGallery}`).

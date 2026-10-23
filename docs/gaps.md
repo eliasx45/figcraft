@@ -37,6 +37,7 @@ No alpha blockers: the alpha gate in [`roadmap.md`](roadmap.md#alpha-gate) passe
 | 21 | Menu items without a command: none left (landed 2026-10-11) | Feature | — | [parity-checklist](parity-checklist.md) |
 | 22 | Screen readers never run; browser has no accessibility tree | UI/UX | 4–8 | [ui-parity](ui-parity.md) |
 | 23 | CMYK output intent for print PDFs | File format | 2–4 | [file-format-parity](file-format-parity.md) |
+| 24 | Boards: the whiteboard tail (timer, voting, widgets, templates, tables, mind maps…) | Feature | 30–60 | [boards-parity](boards-parity.md) |
 
 ## Entries
 
@@ -566,10 +567,23 @@ No alpha blockers: the alpha gate in [`roadmap.md`](roadmap.md#alpha-gate) passe
   repository (licensing).
 - **Estimate:** 2–4 h once an openly licensed profile is found.
 
+### 24. Boards: the whiteboard tail
+- **Landed (2026-10-24, M12):** board files (`file.newBoard`) with sticky notes, shapes with text,
+  connectors that re-route when what they join moves, marker, highlighter and eraser, stamps, text
+  and sections; a board toolbar and a contextual bar; live sessions sync it all.
+- **Missing:** timer and music, voting sessions, board widgets, templates, tables, mind maps, washi
+  tape, code blocks, audio and huddles, quick-create handles, curved connectors and waypoints,
+  stamps sticking to the objects they land on, a dot grid, `.jam` files
+  ([`boards-parity.md`](boards-parity.md)).
+- **User impact:** boards cover a brainstorm or a flow sketch; facilitated workshops need the
+  timer, voting and templates.
+- **Estimate:** 30–60 h.
+
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-24 | minor | Boards (M12): a file kind of its own (`file.newBoard`, saved in `.figcraft`, carried to live-session joiners) with sticky notes, shapes with text, connectors that re-route when what they join moves (an engine recompute, the same for local edits, undo and others' edits), marker, highlighter and eraser, stamps with the placer's name, a board toolbar and a contextual bar; prototyping and Dev Mode refuse on boards; design files and boards have their own marks on tabs and file rows. New gap 24 (the board tail, 30–60 h); the ranking above it is unchanged |
 | 2026-10-20 | patch | Gap 7: nested effects on large layers stay on the GPU canvas: effect textures cover only what the scene needs (each as far as it reaches), layers holding layers with effects are drawn into one texture, and blocks whose textures don't fit are built again for themselves. The owner's page at 51 %: 28 tiles 20.6 s on the CPU → 0.26 s. Ranks and hours unchanged |
 | 2026-10-20 | patch | Gap 7: images no longer go missing (white or black frames) on the GPU canvas zoomed out: renders leave out the images they don't show, effect textures are drawn in pieces, and a copy of vello's atlas bookkeeping sends what can't fit to the CPU. Ranks and hours unchanged |
 | 2026-10-19 | patch | Gap 7: drop shadows, inner shadows, layer and background blurs, noise and masks drawn on the GPU (compute passes over a smaller copy, kept per tile level); the GPU scene built only where shown, on every core, far images left out, CPU-only layers found without building; images no longer vanish after a render without any (a vello atlas bug). The owner's page: the sharp image after a zoom 0.9–1.8 s → 0.1–0.5 s, zoom steps within a level 4–8 ms. Ranks and hours unchanged |

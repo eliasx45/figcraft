@@ -234,6 +234,8 @@ pub struct Shown {
     pub name: String,
     /// `None` until the file has been looked at.
     pub stat: Option<Stat>,
+    /// A design file or a board (design until its picture has been read).
+    pub kind: figcraft_doc::FileKind,
 }
 
 impl Shown {
@@ -241,7 +243,7 @@ impl Shown {
         // Shown without its extension, like a document's name; the full path is the tooltip.
         let p = Path::new(path);
         let name = p.file_stem().or_else(|| p.file_name()).map_or_else(|| path.to_string(), |f| f.to_string_lossy().into_owned());
-        Shown { path: path.to_string(), name, stat }
+        Shown { path: path.to_string(), name, stat, kind: figcraft_doc::FileKind::Design }
     }
 
     fn date(&self, key: SortKey) -> Option<u64> {
@@ -293,6 +295,7 @@ struct Ready {
     modified: Option<u64>,
     page: Option<Color32>,
     texture: Option<egui::TextureHandle>,
+    kind: figcraft_doc::FileKind,
     /// When it came in (for its fade).
     arrived: f64,
 }
@@ -461,7 +464,7 @@ impl Recents {
                         let page = preview.page.map(|[r, g, b, a]| crate::theme::c32(figcraft_color::Color { r, g, b, a }));
                         // A changed file's new picture shows at once; a first one fades in.
                         let arrived = if k.shown.is_some() { f64::NEG_INFINITY } else { time };
-                        k.shown = Some(Ready { modified, page, texture, arrived });
+                        k.shown = Some(Ready { modified, page, texture, kind: preview.kind, arrived });
                         k.wanted = None;
                     }
                 }
@@ -501,7 +504,13 @@ impl Recents {
 
     /// The files as listed, with what is known about them.
     fn shown(&self, paths: &[String]) -> Vec<Shown> {
-        paths.iter().map(|p| Shown::new(p, self.files.get(p).and_then(|k| k.stat))).collect()
+        paths
+            .iter()
+            .map(|p| {
+                let k = self.files.get(p);
+                Shown { kind: k.and_then(|k| k.shown.as_ref()).map_or_else(Default::default, |r| r.kind), ..Shown::new(p, k.and_then(|k| k.stat)) }
+            })
+            .collect()
     }
 
     /// For `ui.inspect`: each file listed, whether it is there and whether its picture is in.
@@ -733,13 +742,13 @@ fn arrows(ui: &Ui, recents: &mut Recents, files: &[Shown], across: usize, down: 
     }
 }
 
-/// The square file-type mark before a name.
-fn file_icon(ui: &Ui, t: &Tokens, center: egui::Pos2, path: &str) {
+/// The square file-type mark before a name (a design file's pen nib, a board's note).
+fn file_icon(ui: &Ui, t: &Tokens, center: egui::Pos2, file: &Shown) {
     let r = Rect::from_center_size(center, vec2(16.0, 16.0));
-    match FileKind::of(Path::new(path)) {
+    match FileKind::of(Path::new(&file.path)) {
         FileKind::FigCraft | FileKind::Fig => {
             ui.painter().rect_filled(r, CornerRadius::same(4), t.accent);
-            icons::paint(ui.painter(), r.shrink(3.0), Icon::Logo, t.accent_on);
+            icons::paint(ui.painter(), r.shrink(3.0), icons::file_mark(file.kind), t.accent_on);
         }
         kind => {
             ui.painter().rect_filled(r, CornerRadius::same(4), t.field);
@@ -849,7 +858,7 @@ fn card(
     }
     p.line_segment([pos2(rect.min.x, area.max.y + 0.5), pos2(rect.max.x, area.max.y + 0.5)], Stroke::new(1.0, t.border));
     let y = area.max.y + 1.0 + FOOTER_H / 2.0;
-    file_icon(ui, t, pos2(rect.min.x + 24.0, y), &file.path);
+    file_icon(ui, t, pos2(rect.min.x + 24.0, y), file);
     let (x, w) = (rect.min.x + 44.0, rect.width() - 56.0);
     let name = widgets::elide_font(ui, &file.name, w, semibold(12.5));
     p.text(pos2(x, y - 8.0), Align2::LEFT_CENTER, name, semibold(12.5), t.text);
@@ -917,6 +926,8 @@ fn list(ui: &mut Ui, t: &Tokens, recents: &mut Recents, files: &[Shown], now: u6
         if !ui.is_rect_visible(r) {
             continue;
         }
+        // The row's mark says what kind of file it is: read it like a card's picture.
+        recents.picture(&file.path, true, ui.input(|i| i.time));
         let selected = recents.selected.as_deref() == Some(file.path.as_str());
         let p = ui.painter();
         if selected {
@@ -927,7 +938,7 @@ fn list(ui: &mut Ui, t: &Tokens, recents: &mut Recents, files: &[Shown], now: u6
         if resp.has_focus() && !selected {
             p.rect_stroke(r, CornerRadius::same(5), Stroke::new(2.0, t.focus), StrokeKind::Inside);
         }
-        file_icon(ui, t, pos2(r.min.x + 20.0, r.center().y), &file.path);
+        file_icon(ui, t, pos2(r.min.x + 20.0, r.center().y), file);
         let name_w = date_x(1) - 52.0;
         p.text(
             pos2(r.min.x + 40.0, r.center().y),

@@ -428,6 +428,15 @@ fn enter_text(app: &mut FigApp) -> bool {
         return false;
     }
     let Some(id) = sel.first().copied() else { return false };
+    // A board object (a sticky, a shape with text, a label): type in its text.
+    match figcraft_engine::board::edit_text(&mut app.session, id) {
+        Ok(true) => return true,
+        Ok(false) => {}
+        Err(e) => {
+            app.toast(e.to_string());
+            return true;
+        }
+    }
     let kind = app.session.doc().ok().and_then(|d| d.node(id)).map(|n| (matches!(n.kind, figcraft_doc::NodeKind::Text(_)), n.kind.is_shape()));
     match kind {
         Some((true, _)) => {

@@ -169,6 +169,10 @@ pub fn invoke(app: &mut FigApp, id: &str) {
             app.run(id, json!({}));
         }
         "file.open" => app.open_dialog(),
+        // From the keyboard or a menu, typing goes on in the new sticky.
+        "board.nextSticky" => {
+            app.run(id, json!({"edit": true}));
+        }
         "plugin.import" => crate::plugins_ui::import_dialog(app),
         "file.import" => app.import_dialog(false),
         "file.placeImage" => app.import_dialog(true),
@@ -1106,7 +1110,7 @@ fn palette(app: &mut FigApp, ctx: &egui::Context) {
     let t = Tokens::get(ctx);
     // Same centre and width as the toolbar pill (it centres on the canvas, not the window),
     // floating 8 px above it. Fixed size: switching tabs never resizes the panel.
-    let bar_w = crate::toolbar::main_width();
+    let bar_w = crate::toolbar::bar_width(app);
     let bar = crate::toolbar::pill_rect(app.canvas.rect, bar_w);
     let area = Rect::from_min_max(pos2(bar.min.x, bar.min.y - 8.0 - (PALETTE_H + 16.0)), pos2(bar.max.x, bar.min.y - 8.0));
     let mut run: Option<String> = None;

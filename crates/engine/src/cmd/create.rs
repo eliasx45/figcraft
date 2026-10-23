@@ -111,7 +111,8 @@ pub fn frame_at(doc: &Document, page: NodeId, pt: Point, exclude: &[NodeId]) -> 
             return None;
         }
         let n = doc.node(id)?;
-        if !n.visible || n.locked {
+        // Board objects (stickies, shapes with text) never take layers in.
+        if !n.visible || n.locked || n.is_board_atom() {
             return None;
         }
         let is_container = n.kind.is_frame_like() || matches!(n.kind, NodeKind::Section { .. });

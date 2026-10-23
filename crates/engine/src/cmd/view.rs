@@ -200,7 +200,7 @@ fn pref(s: &mut Session, p: &Value, f: fn(&mut crate::Prefs) -> &mut bool) -> Re
     Ok(json!({"on": *slot}))
 }
 
-fn tool(s: &mut Session, t: ToolId) -> Result<Value> {
+pub(crate) fn tool(s: &mut Session, t: ToolId) -> Result<Value> {
     // A file you can't edit now (view only, or on its way to a server): moving around only.
     if let Some(why) = s.active_read_only().filter(|_| !matches!(t, ToolId::Move | ToolId::Hand)) {
         return Err(EngineError::Disabled(format!("tool.{}", t.id()), why.into()));
@@ -466,11 +466,14 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "tool.set",
             "Choose tool",
-            "{tool: move|scale|hand|frame|section|slice|rectangle|line|arrow|ellipse|polygon|star|pen|pencil|text|comment|shapeBuilder}",
+            "{tool: move|scale|hand|frame|section|slice|rectangle|line|arrow|ellipse|polygon|star|pen|pencil|text|comment|shapeBuilder | on boards: sticky|shape|connector|marker|highlighter|eraser|stamp}",
             false,
             |s, p| {
                 let t = req_string("tool.set", p, "tool")?;
                 let t = ToolId::from_id(&t).ok_or_else(|| bad("tool.set", format!("unknown tool `{t}`")))?;
+                if t.on_boards() {
+                    crate::board::require(s, &format!("tool.{}", t.id()))?;
+                }
                 tool(s, t)
             }
         ),

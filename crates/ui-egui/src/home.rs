@@ -329,13 +329,14 @@ fn action_card(ui: &mut Ui, t: &Tokens, icon: Icon, title: &str, sub: &str) -> b
 
 fn recents(app: &mut FigApp, ui: &mut Ui, t: &Tokens) {
     heading(ui, t, tr("Recents"));
-    let (mut new_file, mut open) = (false, false);
-    ui.horizontal(|ui| {
-        new_file = action_card(ui, t, Icon::Plus, tr("New design file"), tr("Start from a blank canvas"));
+    let (mut new_file, mut new_board, mut open) = (false, false, false);
+    ui.horizontal_wrapped(|ui| {
+        new_file = action_card(ui, t, Icon::PenNib, tr("New design file"), tr("Start from a blank canvas"));
+        new_board = action_card(ui, t, Icon::Board, tr("New board"), tr("Sticky notes, shapes and connectors"));
         open = action_card(ui, t, Icon::Page, tr("Open file"), tr("Open .figcraft, .svg or images"));
     });
-    if new_file {
-        app.run("file.new", json!({}));
+    if new_file || new_board {
+        app.run(if new_board { "file.newBoard" } else { "file.new" }, json!({}));
         app.ui.home = false;
     }
     if open {
@@ -384,8 +385,14 @@ fn open_files(app: &mut FigApp, ui: &mut Ui, t: &Tokens, query: &str) -> usize {
     let mut switch = None;
     for (i, d) in app.session.docs.iter().enumerate().filter(|(_, d)| hit(d)) {
         let detail = d.path.as_deref().unwrap_or_default();
-        let row =
-            FileRow { mark: Some((Icon::Logo, ACCENT)), name: &d.doc.name, ink: t.text, detail, detail_size: 11.0, detail_ink: t.text_secondary };
+        let row = FileRow {
+            mark: Some((icons::file_mark(d.doc.kind), ACCENT)),
+            name: &d.doc.name,
+            ink: t.text,
+            detail,
+            detail_size: 11.0,
+            detail_ink: t.text_secondary,
+        };
         if listed(ui, t, ui.id().with(("open", d.uid)), 36.0, &row) {
             switch = Some(i);
         }

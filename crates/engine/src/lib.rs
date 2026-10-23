@@ -14,6 +14,7 @@ pub mod annotations;
 pub mod arc_handles;
 pub mod audio;
 pub mod background;
+pub mod board;
 pub mod booleans;
 pub mod branches;
 pub mod catalog;
@@ -957,6 +958,7 @@ impl Session {
     /// as it was.
     pub fn execute(&mut self, id: &str, params: &Value) -> Result<Value> {
         let spec = find_command(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
+        board::refuse_on_board(self, id)?;
         // Revert replaces the document's uid: refuse before ending previews or syncing branches.
         if id == "file.revert" && self.live().doc_uid.is_some() {
             return Err(EngineError::Disabled(id.into(), "leave the live session before reverting to the saved file".into()));
@@ -1413,7 +1415,9 @@ pub fn normalize(doc: &mut Document, before: &Document) {
         figcraft_layout::coherent_sizing(doc, id);
     }
     touched.extend(doc.take_dirty());
-    // 1. Text auto-size.
+    // 1. Text auto-size (a sticky's note first takes the size its length calls for).
+    board::settle_text(doc, before, &touched);
+    touched.extend(doc.take_dirty());
     for id in live(doc, &touched) {
         let Some(n) = doc.node(id) else { continue };
         if let Some((w, h)) = figcraft_text::auto_size(n)
@@ -1493,6 +1497,9 @@ pub fn normalize(doc: &mut Document, before: &Document) {
             doc.keep_if_unchanged(a, was_dirty);
         }
     }
+    touched.extend(doc.take_dirty());
+    // 4b. Board connectors follow the layers they join; their labels sit at their middles.
+    board::settle_routes(doc, before, &touched);
     touched.extend(doc.take_dirty());
     // 5. Ready-for-dev layers whose contents changed show "Changed".
     mark_dev_changes(doc, before, &touched);
@@ -1627,6 +1634,10 @@ mod batch_rollback_tests;
 mod batch_step_ref_tests;
 #[cfg(test)]
 mod binding_lists_tests;
+#[cfg(test)]
+mod board_tests;
+#[cfg(test)]
+mod board_tools_tests;
 #[cfg(test)]
 mod booleans_tests;
 #[cfg(test)]
