@@ -57,7 +57,7 @@ message FontName string family, string style, string postscript
 message TextData string characters, uint[] characterStyleIDs, NodeChange[] styleOverrideTable
 message Path WindingRule windingRule, uint commandsBlob
 message GUIDPath GUID[] guids
-message SymbolData GUID symbolID, NodeChange[] symbolOverrides
+message SymbolData GUID symbolID, NodeChange[] symbolOverrides, float uniformScaleFactor
 message StyleId GUID guid
 message PropValue bool boolValue, TextData textValue
 message PropDef GUID id, string name, PropValue initialValue, PropType type
@@ -1088,6 +1088,57 @@ fn resized_instances_lay_their_layers_out_by_their_constraints() {
     assert_eq!(letters, [[45.0, 15.0], [45.0, 15.0], [45.0, 15.0], [66.0, 22.0]]);
     assert_eq!(box_of("Derived logo", "Mark")[2..], [50.0, 5.0]);
     assert_eq!(box_of("Resized badge", "Badge"), [58.0, 5.0, 20.0, 10.0]);
+}
+
+#[test]
+fn instances_scaled_as_a_whole_scale_their_layers() {
+    // A 24 px icon scaled to 52 with the Scale tool: the file says so with `uniformScaleFactor`
+    // and gives no derived layout. Its layers are drawn 52/24 times larger, strokes and corners
+    // too; resized instead, the eye only follows its constraints (it stays 19.5 wide).
+    let k = 52.0 / 24.0;
+    let nodes = vec![
+        node(0, None, "DOCUMENT", "D", vec![]),
+        node(1, Some((0, "!")), "CANVAS", "P", vec![]),
+        node(5, Some((1, "!")), "SYMBOL", "Icon / 24", vec![("size", xy(24.0, 24.0)), ("transform", at(0.0, 0.0))]),
+        node(
+            6,
+            Some((5, "!")),
+            "ROUNDED_RECTANGLE",
+            "Eye",
+            vec![
+                ("size", xy(19.5, 14.25)),
+                ("transform", at(2.25, 4.75)),
+                ("horizontalConstraint", e("CENTER")),
+                ("verticalConstraint", e("MIN")),
+                ("strokeWeight", f(1.5)),
+                ("cornerRadius", f(2.0)),
+            ],
+        ),
+        node(
+            9,
+            Some((1, "\"")),
+            "INSTANCE",
+            "Scaled icon",
+            vec![("size", xy(52.0, 52.0)), ("transform", at(0.0, 100.0)), ("symbolData", o(vec![("symbolID", g(5)), ("uniformScaleFactor", f(k))]))],
+        ),
+        node(
+            10,
+            Some((1, "#")),
+            "INSTANCE",
+            "Resized icon",
+            vec![("size", xy(52.0, 52.0)), ("transform", at(0.0, 200.0)), ("symbolData", o(vec![("symbolID", g(5))]))],
+        ),
+    ];
+    let (doc, _) = import(&canvas(&schema(), &o(vec![("nodeChanges", arr(nodes))])), "x").unwrap();
+    let eye = |inst: &str| {
+        let i = named(&doc, inst);
+        let n = i.children.iter().map(|c| doc.node(*c).unwrap()).find(|n| n.name == "Eye").unwrap();
+        let t = n.transform.translation();
+        [t.x, t.y, n.width, n.height, n.stroke.weight, n.corners.radii[0]].map(|x| (x * 1e3).round() / 1e3)
+    };
+    let r = |x: f64| (x * k * 1e3).round() / 1e3;
+    assert_eq!(eye("Scaled icon"), [r(2.25), r(4.75), r(19.5), r(14.25), r(1.5), r(2.0)]);
+    assert_eq!(eye("Resized icon"), [16.25, 4.75, 19.5, 14.25, 1.5, 2.0]);
 }
 
 #[test]

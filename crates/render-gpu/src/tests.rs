@@ -184,3 +184,14 @@ fn audio_strips_nested_in_frames_draw_their_waveform_on_the_cpu() {
     d.get_mut(strip).unwrap().audio = Some(Box::new(figcraft_doc::AudioClip::new("h", "x.wav", 1.0, 48_000, 1)));
     assert_eq!(crate::scene::cpu_only(&d, board), Some("audio waveforms"));
 }
+
+#[test]
+fn soft_effects_are_dithered_before_their_8_bit_stores() {
+    // A large, faint glow is blurred into a texture many times smaller than the screen, in 8 bits:
+    // undithered, each of its few levels is drawn as a ring many pixels wide (banding).
+    let src = include_str!("fx.wgsl");
+    for entry in ["fn alpha_v_tint", "fn rgba_v"] {
+        let body = src.split(entry).nth(1).and_then(|b| b.split("\n}\n").next()).unwrap();
+        assert!(body.contains("dither(c)"), "{entry} stores 8-bit texels undithered");
+    }
+}

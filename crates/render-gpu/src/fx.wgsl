@@ -32,6 +32,23 @@ fn weight(i: i32) -> f32 {
     return exp(-x * x / (2.0 * p.sigma * p.sigma));
 }
 
+// Up to one 8-bit step of noise (triangular, from a hash of the pixel), added before an 8-bit
+// store. A soft glow of low opacity spans only a few dozen levels, and its texture is drawn up to
+// 64 times larger: without this each level becomes a ring many pixels wide (banding).
+fn hash(c: vec2<i32>, salt: u32) -> f32 {
+    var h = bitcast<u32>(c.x) * 1664525u + bitcast<u32>(c.y) * 22695477u + salt * 2654435769u;
+    h ^= h >> 16u;
+    h *= 2246822519u;
+    h ^= h >> 13u;
+    h *= 3266489917u;
+    h ^= h >> 16u;
+    return f32(h >> 8u) / 16777216.0;
+}
+
+fn dither(c: vec2<i32>) -> f32 {
+    return (hash(c, 1u) + hash(c, 2u) - 1.0) / 255.0;
+}
+
 fn inside(c: vec2<i32>, size: vec2<u32>) -> bool {
     return c.x < i32(size.x) && c.y < i32(size.y);
 }
@@ -95,8 +112,10 @@ fn alpha_h(@builtin(global_invocation_id) id: vec3<u32>) {
 fn alpha_v_tint(@builtin(global_invocation_id) id: vec3<u32>) {
     let c = vec2<i32>(id.xy);
     if !inside(c, textureDimensions(dst_shadow)) { return; }
-    let a = clamp(gauss_r(c, vec2<i32>(0, 1)), 0.0, 1.0);
-    textureStore(dst_shadow, c, vec4<f32>(p.color.rgb, p.color.a * a));
+    let a = clamp(gauss_r(c, vec2<i32>(0, 1)), 0.0, 1.0) * p.color.a;
+    // Fully clear and fully covered pixels stay so.
+    let d = select(dither(c), 0.0, a <= 0.0 || a >= 1.0);
+    textureStore(dst_shadow, c, vec4<f32>(p.color.rgb, clamp(a + d, 0.0, 1.0)));
 }
 
 // Colour blurs (layer and background blurs), premultiplied between the passes.
@@ -132,6 +151,9 @@ fn rgba_v(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     // Premultiplied out (the image is drawn as such).
     let v = clamp(sum / max(total, 1e-6), vec4<f32>(0.0), vec4<f32>(1.0));
-    textureStore(dst_rgba, c, vec4<f32>(min(v.rgb, vec3<f32>(v.a)), v.a));
+    // Dithered (clear pixels stay clear, opaque ones opaque).
+    let d = select(dither(c), 0.0, v.a <= 0.0);
+    let a = select(clamp(v.a + d, 0.0, 1.0), v.a, v.a >= 1.0);
+    textureStore(dst_rgba, c, vec4<f32>(clamp(v.rgb + vec3<f32>(d), vec3<f32>(0.0), vec3<f32>(a)), a));
 }
 

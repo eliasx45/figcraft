@@ -400,6 +400,10 @@ struct Inst<'a> {
     slot_content: bool,
     /// Mains being expanded (an instance inside its own main stops there).
     symbols: Vec<String>,
+    /// How many times larger than its main the instance is drawn, scaled as a whole (the Scale
+    /// tool: `uniformScaleFactor`, times that of the instances around it): every length of the
+    /// main's layers, unless the file gives the scaled value (derived data).
+    scale: f64,
 }
 
 struct Mapper<'a> {
@@ -873,10 +877,25 @@ impl<'a> Mapper<'a> {
             && view.str("stackPositioning") != Some("ABSOLUTE");
         let main = View::of(base);
         let set = |k: &str| entries.iter().rev().filter(|e| e.entry != Entry::Stale).find_map(|e| e.row.get(k));
-        if let (Some(f), false, false, Some((w, h))) = (fit, derived, stacked, main.size()) {
-            let t = main.transform().unwrap_or_default();
+        let given = |k: &str| entries.iter().any(|e| e.entry != Entry::Stale && e.row.get(k).is_some());
+        // In an instance scaled as a whole the main's layer is `k` times larger, and further away
+        // from its parent's corner, before its constraints follow any resize on top of that.
+        let k = inst.map_or(1.0, |i| i.scale);
+        let scaled = (k - 1.0).abs() > 1e-9;
+        let grown = |(w, h): (f64, f64), t: Affine| {
+            let [a, b, c, d, e, f] = t.as_coeffs();
+            ((w * k, h * k), Affine::new([a, b, c, d, e * k, f * k]))
+        };
+        if let (Some(f), false, false, Some(s)) = (fit, derived, stacked, main.size()) {
+            let ((w, h), t) = grown(s, main.transform().unwrap_or_default());
             let (fw, ft) = f.apply(w, h, t, view.str("horizontalConstraint"), view.str("verticalConstraint"));
             view.fitted = Some((set("size").and_then(size).unwrap_or(fw), set("transform").and_then(matrix).unwrap_or(ft)));
+        } else if scaled
+            && !derived
+            && let Some(s) = main.size()
+        {
+            let (gs, gt) = grown(s, main.transform().unwrap_or_default());
+            view.fitted = Some((set("size").and_then(size).unwrap_or(gs), set("transform").and_then(matrix).unwrap_or(gt)));
         } else if entries.iter().any(|e| e.entry == Entry::Stale && (e.row.get("size").is_some() || e.row.get("transform").is_some()))
             && let Some(s) = set("size").and_then(size).or_else(|| main.size())
         {
@@ -985,12 +1004,17 @@ impl<'a> Mapper<'a> {
         } else if ty == "INSTANCE" {
             if let Some((sub, sym)) = self.instance(&mut o, &view, id, inst, &rest_id) {
                 let main = self.nodes.get(&sym).map(|m| View::of(m));
-                let fit = Fit::frame(main.as_ref().and_then(View::size), view.size());
+                let fit = Fit::frame(main.as_ref().and_then(View::size).map(|(w, h)| (w * sub.scale, h * sub.scale)), view.size());
                 // An instance that records no auto layout of its own has its main's.
                 let view = match main {
                     Some(m) if view.get("stackMode").is_none() && m.get("stackMode").is_some() => {
                         let layered = View { fitted: view.fitted, ..m.with(view.layers.iter().copied()) };
                         self.auto_layout(&mut o, &layered);
+                        // The main's gaps and padding, at the instance's own scale (those around
+                        // it are applied with the rest of its lengths below).
+                        if (sub.scale / k - 1.0).abs() > 1e-9 {
+                            scale_lengths(&mut o, sub.scale / k, &|f| !f.starts_with("stack"));
+                        }
                         layered
                     }
                     _ => view.clone(),
@@ -1011,10 +1035,11 @@ impl<'a> Mapper<'a> {
         } else {
             // Inside an instance a layer's children are its main's: they follow it from the main's
             // size to its own.
+            let from = View::of(base).size().map(|(w, h)| (w * k, h * k));
             let fit = match (inst, ty) {
                 (None, _) => None,
-                (Some(_), "GROUP" | "BOOLEAN_OPERATION") => Fit::scale(View::of(base).size(), view.size()),
-                (Some(_), _) => Fit::frame(View::of(base).size(), view.size()),
+                (Some(_), "GROUP" | "BOOLEAN_OPERATION") => Fit::scale(from, view.size()),
+                (Some(_), _) => Fit::frame(from, view.size()),
             };
             for c in self.children(id) {
                 kids.extend(self.layer_filtered(&c, inst, child_space, Some(&view), fit, depth + 1, included));
@@ -1023,6 +1048,9 @@ impl<'a> Mapper<'a> {
         if stand.is_some_and(|s| s.0 == "FRAME") {
             kids.splice(0..0, self.shape_with_text(&mut o, &view, own, &rest_id));
             kids.extend(self.inner_text(&o, &view, &rest_id, own == "STICKY"));
+        }
+        if scaled {
+            scale_lengths(&mut o, k, &given);
         }
         if !kids.is_empty() {
             o.insert("children".into(), Value::Array(kids));
@@ -2120,6 +2148,7 @@ impl<'a> Mapper<'a> {
         }
         let mut symbols = outer.map(|i| i.symbols.clone()).unwrap_or_default();
         symbols.push(sym.clone());
+        let factor = sd.and_then(|s| num(s, "uniformScaleFactor")).filter(|k| k.is_finite() && *k > 1e-6 && *k < 1e4).unwrap_or(1.0);
         let root = outer.map_or_else(|| rest_id.to_string(), |i| i.root.clone());
         Some((
             Inst {
@@ -2130,6 +2159,7 @@ impl<'a> Mapper<'a> {
                 slot_contents: Rc::new(slot_contents),
                 slot_content: false,
                 symbols,
+                scale: outer.map_or(1.0, |i| i.scale) * factor,
             },
             sym,
         ))
@@ -2445,6 +2475,86 @@ fn text_binding_key(field: &str) -> Option<&'static str> {
         "PARAGRAPH_INDENT" => "paragraphIndent",
         _ => return None,
     })
+}
+
+/// A layer's lengths `k` times longer (a layer of an instance scaled as a whole): strokes,
+/// corners, effects, auto layout gaps and padding, type. `given`: whether the file gives the
+/// field (by its name in the file) already scaled.
+fn scale_lengths(o: &mut Obj, k: f64, given: &dyn Fn(&str) -> bool) {
+    fn times(v: Option<&mut Value>, k: f64) {
+        if let Some(v) = v
+            && let Some(x) = v.as_f64()
+        {
+            *v = json!(x * k);
+        }
+    }
+    fn all(v: Option<&mut Value>, k: f64) {
+        match v {
+            Some(Value::Array(a)) => a.iter_mut().for_each(|x| times(Some(x), k)),
+            Some(Value::Object(m)) => m.values_mut().for_each(|x| times(Some(x), k)),
+            _ => {}
+        }
+    }
+    // A text's type: `own` false for a per-character style (it goes with the text's data).
+    fn kind(s: &mut Obj, k: f64, given: &dyn Fn(&str) -> bool, own: bool) {
+        let sized = own && given("fontSize");
+        if !sized {
+            times(s.get_mut("fontSize"), k);
+        }
+        // Spacing in percent was made pixels at the font's size.
+        let percent = s.contains_key("_letterSpacingPercent");
+        if (percent && !sized) || (!percent && !(own && given("letterSpacing"))) {
+            times(s.get_mut("letterSpacing"), k);
+        }
+        for (rest, fig) in [("lineHeightPx", "lineHeight"), ("paragraphSpacing", "paragraphSpacing"), ("paragraphIndent", "paragraphIndent")] {
+            if !(own && given(fig)) {
+                times(s.get_mut(rest), k);
+            }
+        }
+    }
+    for (rest, fig) in [
+        ("strokeWeight", "strokeWeight"),
+        ("cornerRadius", "cornerRadius"),
+        ("itemSpacing", "stackSpacing"),
+        ("counterAxisSpacing", "stackCounterSpacing"),
+    ] {
+        if !given(fig) {
+            times(o.get_mut(rest), k);
+        }
+    }
+    // A side's padding defaults to the other's: one given, all are.
+    if !["stackHorizontalPadding", "stackVerticalPadding", "stackPaddingRight", "stackPaddingBottom"].iter().any(|f| given(f)) {
+        for side in ["paddingLeft", "paddingTop", "paddingRight", "paddingBottom"] {
+            times(o.get_mut(side), k);
+        }
+    }
+    for (rest, fig) in
+        [("individualStrokeWeights", "borderTopWeight"), ("rectangleCornerRadii", "rectangleTopLeftCornerRadius"), ("strokeDashes", "dashPattern")]
+    {
+        if !given(fig) {
+            all(o.get_mut(rest), k);
+        }
+    }
+    if !given("effects")
+        && let Some(Value::Array(effects)) = o.get_mut("effects")
+    {
+        for e in effects.iter_mut().filter_map(Value::as_object_mut) {
+            for key in ["radius", "spread", "startRadius"] {
+                times(e.get_mut(key), k);
+            }
+            all(e.get_mut("offset"), k);
+        }
+    }
+    if let Some(Value::Object(s)) = o.get_mut("style") {
+        kind(s, k, given, true);
+    }
+    if !given("textData")
+        && let Some(Value::Object(table)) = o.get_mut("styleOverrideTable")
+    {
+        for s in table.values_mut().filter_map(Value::as_object_mut) {
+            kind(s, k, given, false);
+        }
+    }
 }
 
 fn stroke(o: &mut Obj, v: &View) {
