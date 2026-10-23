@@ -1,11 +1,12 @@
 // Effects on the GPU (see effects.rs): separable Gaussian blurs and square spreads over a layer
-// drawn smaller. Every pass reads `src` with textureLoad (past its edges reads as transparent)
+// drawn smaller, then scaled up to the scene's pixels and dithered into 8 bits. Every pass reads `src` with textureLoad (past its edges reads as transparent)
 // and writes one pixel of its output (a binding of its own per format) per invocation.
 
 struct Params {
     // The blur's standard deviation, in this texture's pixels.
     sigma: f32,
-    // Taps each side (blur), or the spread's radius (morph).
+    // Taps each side (blur), the spread's radius (morph), or how many times larger the output is
+    // than the source (scaling up).
     reach: i32,
     // 1: grow (morph), 0: shrink.
     grow: i32,
@@ -33,8 +34,8 @@ fn weight(i: i32) -> f32 {
 }
 
 // Up to one 8-bit step of noise (triangular, from a hash of the pixel), added before an 8-bit
-// store. A soft glow of low opacity spans only a few dozen levels, and its texture is drawn up to
-// 64 times larger: without this each level becomes a ring many pixels wide (banding).
+// store at the scene's own pixels. A soft glow of low opacity spans only a few dozen levels over
+// hundreds of pixels: without it each level is a ring many pixels wide (banding).
 fn hash(c: vec2<i32>, salt: u32) -> f32 {
     var h = bitcast<u32>(c.x) * 1664525u + bitcast<u32>(c.y) * 22695477u + salt * 2654435769u;
     h ^= h >> 16u;
@@ -105,14 +106,32 @@ fn alpha_h(@builtin(global_invocation_id) id: vec3<u32>) {
     textureStore(dst_r, c, vec4<f32>(gauss_r(c, vec2<i32>(1, 0)), 0.0, 0.0, 0.0));
 }
 
-// The shadow: blurred coverage, tinted (straight alpha).
+@compute @workgroup_size(8, 8)
+fn alpha_v(@builtin(global_invocation_id) id: vec3<u32>) {
+    let c = vec2<i32>(id.xy);
+    if !inside(c, textureDimensions(dst_r)) { return; }
+    textureStore(dst_r, c, vec4<f32>(gauss_r(c, vec2<i32>(0, 1)), 0.0, 0.0, 0.0));
+}
+
+// The source at output pixel `c`, `p.reach` times smaller, read bilinearly (as the scene would
+// have drawn it).
+fn bilinear(c: vec2<i32>) -> vec4<f32> {
+    let s = (vec2<f32>(c) + 0.5) / f32(max(p.reach, 1)) - 0.5;
+    let i = vec2<i32>(floor(s));
+    let t = s - floor(s);
+    let top = mix(at(i), at(i + vec2<i32>(1, 0)), t.x);
+    let bottom = mix(at(i + vec2<i32>(0, 1)), at(i + vec2<i32>(1, 1)), t.x);
+    return mix(top, bottom, t.y);
+}
+
+// The shadow: blurred coverage scaled up, tinted (straight alpha).
 @group(0) @binding(3) var dst_shadow: texture_storage_2d<rgba8unorm, write>;
 
 @compute @workgroup_size(8, 8)
-fn alpha_v_tint(@builtin(global_invocation_id) id: vec3<u32>) {
+fn up_tint(@builtin(global_invocation_id) id: vec3<u32>) {
     let c = vec2<i32>(id.xy);
     if !inside(c, textureDimensions(dst_shadow)) { return; }
-    let a = clamp(gauss_r(c, vec2<i32>(0, 1)), 0.0, 1.0) * p.color.a;
+    let a = clamp(bilinear(c).r, 0.0, 1.0) * p.color.a;
     // Fully clear and fully covered pixels stay so.
     let d = select(dither(c), 0.0, a <= 0.0 || a >= 1.0);
     textureStore(dst_shadow, c, vec4<f32>(p.color.rgb, clamp(a + d, 0.0, 1.0)));
@@ -136,12 +155,10 @@ fn rgba_h(@builtin(global_invocation_id) id: vec3<u32>) {
     textureStore(dst_wide, c, sum / max(total, 1e-6));
 }
 
-@group(0) @binding(5) var dst_rgba: texture_storage_2d<rgba8unorm, write>;
-
 @compute @workgroup_size(8, 8)
 fn rgba_v(@builtin(global_invocation_id) id: vec3<u32>) {
     let c = vec2<i32>(id.xy);
-    if !inside(c, textureDimensions(dst_rgba)) { return; }
+    if !inside(c, textureDimensions(dst_wide)) { return; }
     var sum = vec4<f32>(0.0);
     var total = 0.0;
     for (var i = -p.reach; i <= p.reach; i++) {
@@ -149,8 +166,17 @@ fn rgba_v(@builtin(global_invocation_id) id: vec3<u32>) {
         sum += at(c + vec2<i32>(0, i)) * w;
         total += w;
     }
-    // Premultiplied out (the image is drawn as such).
-    let v = clamp(sum / max(total, 1e-6), vec4<f32>(0.0), vec4<f32>(1.0));
+    textureStore(dst_wide, c, sum / max(total, 1e-6));
+}
+
+@group(0) @binding(5) var dst_rgba: texture_storage_2d<rgba8unorm, write>;
+
+// The blur scaled up, premultiplied out (the image is drawn as such).
+@compute @workgroup_size(8, 8)
+fn up_rgba(@builtin(global_invocation_id) id: vec3<u32>) {
+    let c = vec2<i32>(id.xy);
+    if !inside(c, textureDimensions(dst_rgba)) { return; }
+    let v = clamp(bilinear(c), vec4<f32>(0.0), vec4<f32>(1.0));
     // Dithered (clear pixels stay clear, opaque ones opaque).
     let d = select(dither(c), 0.0, v.a <= 0.0);
     let a = select(clamp(v.a + d, 0.0, 1.0), v.a, v.a >= 1.0);

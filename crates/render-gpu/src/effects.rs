@@ -2,7 +2,9 @@
 //! `figcraft_render::draw` is the reference). A layer with effects is drawn on its own into a
 //! texture, smaller by the factor its blur allows (as the CPU's soft shadows: a blur of 16+ pixels
 //! hides the detail an eighth of it would show), and compute passes ([`fx.wgsl`](fx.wgsl)) blur
-//! that; noise is made by its own pass ([`grain.wgsl`](grain.wgsl)) from the CPU's hash. The page
+//! that, and a last pass scales the result up to the scene's pixels, dithered there (an 8-bit
+//! texture scaled up by the image's own sampling smooths a dither away, and a faint glow's few
+//! levels show as bands many pixels wide); noise is made by its own pass ([`grain.wgsl`](grain.wgsl)) from the CPU's hash. The page
 //! scene then draws the results as images, scaled back up, where the CPU would composite them:
 //! drop shadows under the layer, the blurred backdrop inside its shape, inner shadows over its
 //! fills, a blurred layer in its place, grains over it.
@@ -23,6 +25,9 @@ use vello::wgpu;
 pub const MAX_SIDE: u32 = 4096;
 /// Most taps each side of a blur pass, and the widest spread, in the texture's pixels.
 const MAX_REACH: i32 = 512;
+/// Most pixels of the image a soft effect is scaled up to: past it, it stays smaller (each time
+/// by half), as vello's image atlas holds all the images of a scene.
+pub const MAX_UP_PX: u64 = 2048 * 2048;
 
 /// What one effect draws from (`Content`: the layer alone, `Backdrop`: everything under it).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -64,8 +69,13 @@ pub struct Grains {
 pub struct Pass {
     pub source: Source,
     pub kind: Kind,
-    /// How many times smaller than the scene's scale the texture is.
+    /// How many times smaller than the scene's scale the texture is made.
     pub k: u32,
+    /// How many times smaller than the scene's scale its image is (it divides `k`): a soft effect
+    /// is made smaller and scaled up to it.
+    pub out: u32,
+    /// The size of the texture it is made in (at `k`; the image's is at `out`).
+    pub src: (u32, u32),
     /// What it is cast from instead of the content (a shadow's spread outline, page coordinates).
     pub shape: Option<Scene>,
     /// The image the scene draws, whose pixels this pass makes (its size is the texture's).
@@ -76,7 +86,7 @@ pub struct Pass {
 }
 
 impl Pass {
-    /// Page units → texture pixels, at the scene's `scale`.
+    /// Page units → the pixels of the texture it is made in, at the scene's `scale`.
     pub fn to_texture(&self, scale: f64) -> Affine {
         let s = scale / f64::from(self.k.max(1));
         Affine::scale(s) * Affine::translate((-self.region.x0, -self.region.y0))
@@ -160,9 +170,11 @@ pub struct Pipelines {
     morph_h: wgpu::ComputePipeline,
     morph_v: wgpu::ComputePipeline,
     alpha_h: wgpu::ComputePipeline,
-    alpha_v_tint: wgpu::ComputePipeline,
+    alpha_v: wgpu::ComputePipeline,
+    up_tint: wgpu::ComputePipeline,
     rgba_h: wgpu::ComputePipeline,
     rgba_v: wgpu::ComputePipeline,
+    up_rgba: wgpu::ComputePipeline,
     layouts: [wgpu::BindGroupLayout; 4],
 }
 
@@ -278,9 +290,11 @@ impl Pipelines {
             morph_h: pipe("morph_h", r),
             morph_v: pipe("morph_v", r),
             alpha_h: pipe("alpha_h", r),
-            alpha_v_tint: pipe("alpha_v_tint", shadow),
+            alpha_v: pipe("alpha_v", r),
+            up_tint: pipe("up_tint", shadow),
             rgba_h: pipe("rgba_h", wide),
-            rgba_v: pipe("rgba_v", rgba),
+            rgba_v: pipe("rgba_v", wide),
+            up_rgba: pipe("up_rgba", rgba),
             layouts: layouts.clone(),
         }
     }
@@ -307,7 +321,22 @@ impl Pipelines {
         src: &wgpu::Texture,
         p: [u8; 32],
     ) -> wgpu::Texture {
-        let (w, h) = (src.width(), src.height());
+        self.step_to(device, queue, enc, pipe, out, src, p, (src.width(), src.height()))
+    }
+
+    /// One pass of `pipe` from `src` into a new texture of `out`'s format and size `(w, h)`.
+    #[allow(clippy::too_many_arguments)]
+    fn step_to(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        enc: &mut wgpu::CommandEncoder,
+        pipe: &wgpu::ComputePipeline,
+        out: Out,
+        src: &wgpu::Texture,
+        p: [u8; 32],
+        (w, h): (u32, u32),
+    ) -> wgpu::Texture {
         let mut usage = wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING;
         if matches!(out, Out::Shadow | Out::Rgba) {
             // The scene's image atlas copies it.
@@ -350,7 +379,7 @@ impl Pipelines {
     }
 
     /// `kind` made from `src` (a layer or backdrop as vello draws it: straight alpha; noise has
-    /// none and is `size`).
+    /// none) into an image of `size`: a blur or shadow made smaller is scaled up `up` times to it.
     pub fn run(
         &self,
         device: &wgpu::Device,
@@ -359,7 +388,9 @@ impl Pipelines {
         kind: &Kind,
         src: Option<&wgpu::Texture>,
         size: (u32, u32),
+        up: u32,
     ) -> Option<wgpu::Texture> {
+        let up = i32::try_from(up.clamp(1, 64)).unwrap_or(1);
         let none = Color::TRANSPARENT;
         match kind {
             Kind::Shadow { sigma, spread, color, inside } => {
@@ -374,12 +405,14 @@ impl Pipelines {
                 }
                 let n = reach_of(*sigma);
                 let cov = self.step(device, queue, enc, &self.alpha_h, Out::R, &cov, params(*sigma, n, false, o, none));
-                Some(self.step(device, queue, enc, &self.alpha_v_tint, Out::Shadow, &cov, params(*sigma, n, false, o, *color)))
+                let cov = self.step(device, queue, enc, &self.alpha_v, Out::R, &cov, params(*sigma, n, false, o, none));
+                Some(self.step_to(device, queue, enc, &self.up_tint, Out::Shadow, &cov, params(0.0, up, false, o, *color), size))
             }
             Kind::Blur { sigma } => {
                 let n = reach_of(*sigma);
                 let wide = self.step(device, queue, enc, &self.rgba_h, Out::Wide, src?, params(*sigma, n, false, false, none));
-                Some(self.step(device, queue, enc, &self.rgba_v, Out::Rgba, &wide, params(*sigma, n, false, false, none)))
+                let wide = self.step(device, queue, enc, &self.rgba_v, Out::Wide, &wide, params(*sigma, n, false, false, none));
+                Some(self.step_to(device, queue, enc, &self.up_rgba, Out::Rgba, &wide, params(0.0, up, false, false, none), size))
             }
             Kind::Noise(g) => Some(self.grains(device, queue, enc, g, size)),
             Kind::Flat => src.cloned(),

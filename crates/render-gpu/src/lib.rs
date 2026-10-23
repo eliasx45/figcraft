@@ -389,7 +389,7 @@ impl Gpu {
                         (None, effects::Source::Content) => (&fx.content, figcraft_color::Color::TRANSPARENT),
                         (None, effects::Source::Backdrop) => (backdrop.ok_or("no backdrop")?, base),
                     };
-                    let (width, height) = (p.image.width, p.image.height);
+                    let (width, height) = p.src;
                     let t = self.device.create_texture(&wgpu::TextureDescriptor {
                         label: Some("figcraft-fx-source"),
                         size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
@@ -414,7 +414,8 @@ impl Gpu {
                 }
             };
             let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("figcraft-fx") });
-            let t = pipes.run(&self.device, &self.queue, &mut enc, &p.kind, src.as_ref(), (p.image.width, p.image.height)).ok_or("no source")?;
+            let size = (p.image.width, p.image.height);
+            let t = pipes.run(&self.device, &self.queue, &mut enc, &p.kind, src.as_ref(), size, p.k / p.out.max(1)).ok_or("no source")?;
             // Submitted before the next source is drawn: the content shows the inner shadows made
             // first (their images are in it).
             self.queue.submit([enc.finish()]);

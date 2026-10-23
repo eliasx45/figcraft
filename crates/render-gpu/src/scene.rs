@@ -228,7 +228,7 @@ fn reach(shadows: &[&Shadow], inners: &[&Shadow], layer_var: f64, back: Option<f
 /// The brush that draws a pass's image over its page area (image pixels → page).
 fn fx_brush(scale: f64, p: &Pass) -> (peniko::Brush, Affine) {
     let sampler = ImageSampler { x_extend: Extend::Pad, y_extend: Extend::Pad, quality: ImageQuality::Medium, alpha: 1.0 };
-    let xf = Affine::translate((p.region.x0, p.region.y0)) * Affine::scale(f64::from(p.k.max(1)) / scale);
+    let xf = Affine::translate((p.region.x0, p.region.y0)) * Affine::scale(f64::from(p.out.max(1)) / scale);
     (peniko::Brush::Image(ImageBrush { image: p.image.clone(), sampler }), xf)
 }
 
@@ -400,9 +400,19 @@ impl Builder<'_> {
                 // Off by up to two of its pixels at an edge, drawn smaller.
                 let r = crop(reach + (2.0 * f64::from(k) + 2.0) / scale);
                 let r = if r.width() > 0.0 && r.height() > 0.0 { r } else { region };
-                if let Some((w, h)) = effects::texture_size(r, scale, k) {
+                if let Some(src) = effects::texture_size(r, scale, k) {
                     let px = scale / f64::from(k);
-                    return Ok(Pass { source, kind: kind_of(px), k, shape, image: placeholder(w, h, premultiplied), region: r });
+                    let kind = kind_of(px);
+                    // A blur or shadow made smaller is scaled up to the scene's pixels (dithered
+                    // there), as far as the atlas allows.
+                    let mut out = if matches!(kind, Kind::Blur { .. } | Kind::Shadow { .. }) { 1 } else { k };
+                    let mut size = effects::texture_size(r, scale, out);
+                    while out < k && size.is_none_or(|(w, h)| u64::from(w) * u64::from(h) > effects::MAX_UP_PX) {
+                        out *= 2;
+                        size = effects::texture_size(r, scale, out);
+                    }
+                    let (w, h) = size.unwrap_or(src);
+                    return Ok(Pass { source, kind, k, out, src, shape, image: placeholder(w, h, premultiplied), region: r });
                 }
                 if k >= 64 {
                     return Err("an effect too large for the GPU");
@@ -554,7 +564,8 @@ impl Builder<'_> {
             };
             let (w, h) = effects::texture_size(nr, scale, 1).ok_or("noise too large for the GPU")?;
             let image = placeholder(w, h, true);
-            noise_passes.push((Pass { source: Source::Content, kind: Kind::Noise(g), k: 1, shape: None, image, region: nr }, nz.blend));
+            noise_passes
+                .push((Pass { source: Source::Content, kind: Kind::Noise(g), k: 1, out: 1, src: (w, h), shape: None, image, region: nr }, nz.blend));
         }
 
         // The content, and what the layer's pixels are (blurred, with a layer blur): hide grains

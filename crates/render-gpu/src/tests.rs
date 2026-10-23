@@ -186,12 +186,52 @@ fn audio_strips_nested_in_frames_draw_their_waveform_on_the_cpu() {
 }
 
 #[test]
-fn soft_effects_are_dithered_before_their_8_bit_stores() {
-    // A large, faint glow is blurred into a texture many times smaller than the screen, in 8 bits:
-    // undithered, each of its few levels is drawn as a ring many pixels wide (banding).
+fn soft_effects_are_dithered_at_the_scenes_pixels() {
+    // A large, faint glow is blurred in a texture many times smaller than the screen. Dithered
+    // there, the image's own sampling smooths the dither away when it is drawn larger, and each
+    // 8-bit level shows as a ring many pixels wide (banding): its last pass scales it up to the
+    // scene's pixels and dithers there.
     let src = include_str!("fx.wgsl");
-    for entry in ["fn alpha_v_tint", "fn rgba_v"] {
+    for entry in ["fn up_tint", "fn up_rgba"] {
         let body = src.split(entry).nth(1).and_then(|b| b.split("\n}\n").next()).unwrap();
-        assert!(body.contains("dither(c)"), "{entry} stores 8-bit texels undithered");
+        assert!(body.contains("bilinear(c)") && body.contains("dither(c)"), "{entry} doesn't scale up and dither");
     }
+    let mut d = Document::new("t");
+    let page = d.first_page().unwrap();
+    let glow =
+        d.create(page, NodeKind::Ellipse { start: 0.0, sweep: std::f64::consts::TAU, inner: 0.0 }, "BG Glow", 0.0, 0.0, 1100.0, 800.0).unwrap();
+    let mut blur = figcraft_doc::Effect::layer_blur();
+    if let figcraft_doc::EffectKind::LayerBlur(b) = &mut blur.kind {
+        b.radius = 260.0;
+    }
+    let n = d.get_mut(glow).unwrap();
+    n.fills = vec![Paint::solid(Color::from_hex("7B2CB0").unwrap())];
+    n.opacity = 0.32;
+    n.effects = vec![blur];
+    let mut images = crate::Images::default();
+    let mut b = crate::Builder {
+        doc: &d,
+        skip: &[],
+        images: &mut images,
+        scale: 1.0,
+        sampled: false,
+        lod: false,
+        top: glow,
+        fx: Vec::new(),
+        drawn: std::collections::HashMap::new(),
+        open: 0,
+        in_fx: 0,
+        under: None,
+        area: None,
+        partial: false,
+    };
+    let mut sc = vello::Scene::new();
+    b.node(&mut sc, glow, figcraft_geom::Affine::IDENTITY, 0).unwrap();
+    let blurs: Vec<_> = b.fx.iter().flat_map(|f| &f.passes).filter(|p| matches!(p.kind, crate::effects::Kind::Blur { .. })).collect();
+    assert_eq!(blurs.len(), 1);
+    let p = blurs[0];
+    // Made at least 8 times smaller, drawn at the scene's pixels.
+    assert!(p.k >= 8 && p.out == 1, "made at 1/{}, drawn at 1/{}", p.k, p.out);
+    assert_eq!((p.image.width, p.image.height), crate::effects::texture_size(p.region, 1.0, 1).unwrap());
+    assert_eq!(p.src, crate::effects::texture_size(p.region, 1.0, p.k).unwrap());
 }
