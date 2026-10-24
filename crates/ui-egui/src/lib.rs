@@ -12,6 +12,7 @@ pub mod bidi;
 pub mod board_bar;
 pub mod branch_ui;
 pub mod canvas;
+mod card_cover;
 pub mod cjk;
 pub mod clipboard;
 pub mod colorpicker;
@@ -112,6 +113,8 @@ mod dev_mode_tests;
 mod devmode_tail_tests;
 #[cfg(test)]
 mod duplicate_paint_tests;
+#[cfg(test)]
+mod card_cover_tests;
 #[cfg(test)]
 mod effectcraft_ui_tests;
 #[cfg(test)]

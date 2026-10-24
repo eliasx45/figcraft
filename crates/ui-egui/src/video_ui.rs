@@ -121,6 +121,8 @@ pub struct Videos {
     last_time: f64,
     /// Whether the video, audio-strip and EffectCraft transports played last frame.
     was: (bool, bool, bool),
+    /// The layers over each card, drawn over its picture ([`crate::card_cover`]).
+    covers: std::cell::RefCell<crate::card_cover::Covers>,
 }
 
 /// The video cards on `page`, in paint order.
@@ -205,7 +207,13 @@ pub fn overlay(app: &FigApp, painter: &egui::Painter) {
     let hover = pointer(painter);
     let tr = &app.session.video;
     let font = egui::FontId::proportional(11.0);
-    for id in cards(doc, ds.page) {
+    let ids = cards(doc, ds.page);
+    let mut covers = app.videos.covers.try_borrow_mut().ok();
+    if let Some(cv) = covers.as_mut() {
+        cv.keep_only(&ids);
+    }
+    let want = ds.view.zoom * f64::from(painter.ctx().pixels_per_point());
+    for id in ids {
         let Some(v) = doc.node(id).and_then(|n| n.video.as_deref()) else { continue };
         let Some(r) = screen_rect(app, doc, id) else { continue };
         if !r.intersects(painter.clip_rect()) {
@@ -218,6 +226,10 @@ pub fn overlay(app: &FigApp, painter: &egui::Painter) {
         if let Some(p) = shown {
             painter.rect_filled(r, CornerRadius::ZERO, Color32::from_rgb(0x0C, 0x0C, 0x0E));
             painter.image(p.tex.id(), pic, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+            // Layers above the card in z-order stay above its picture.
+            if let Some(cv) = covers.as_mut() {
+                cv.draw(painter, &ds.doc, id, want, |x, y| app.to_screen(x, y));
+            }
         } else if let Some(why) = app.videos.failed.get(&id) {
             chip(
                 painter,

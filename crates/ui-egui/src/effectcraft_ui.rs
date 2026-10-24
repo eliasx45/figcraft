@@ -120,6 +120,8 @@ pub struct Link {
     headless: bool,
     file_stamp: Option<u64>,
     bytes: usize,
+    /// The layers over each card, drawn over its frame ([`crate::card_cover`]).
+    covers: std::cell::RefCell<crate::card_cover::Covers>,
 }
 
 impl Link {
@@ -343,7 +345,13 @@ pub fn overlay(app: &FigApp, painter: &egui::Painter) {
     let hover = pointer(painter);
     let ec = &app.session.effectcraft;
     let font = egui::FontId::proportional(11.0);
-    for id in cards(doc, ds.page) {
+    let ids = cards(doc, ds.page);
+    let mut covers = app.effectcraft.covers.try_borrow_mut().ok();
+    if let Some(cv) = covers.as_mut() {
+        cv.keep_only(&ids);
+    }
+    let want = ds.view.zoom * f64::from(painter.ctx().pixels_per_point());
+    for id in ids {
         let Some(c) = doc.node(id).and_then(|n| n.effectcraft.as_deref()) else { continue };
         let Some(r) = screen_rect(app, doc, id) else { continue };
         if !r.intersects(painter.clip_rect()) {
@@ -356,6 +364,10 @@ pub fn overlay(app: &FigApp, painter: &egui::Painter) {
             Some(tex) => {
                 painter.rect_filled(r, CornerRadius::ZERO, Color32::from_rgb(0x0C, 0x0C, 0x0E));
                 painter.image(tex.id(), pic, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                // Layers above the card in z-order stay above its frame.
+                if let Some(cv) = covers.as_mut() {
+                    cv.draw(painter, &ds.doc, id, want, |x, y| app.to_screen(x, y));
+                }
                 true
             }
             None => false,
