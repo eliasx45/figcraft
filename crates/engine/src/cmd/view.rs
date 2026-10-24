@@ -466,14 +466,11 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "tool.set",
             "Choose tool",
-            "{tool: move|scale|hand|frame|section|slice|rectangle|line|arrow|ellipse|polygon|star|pen|pencil|text|comment|shapeBuilder | on boards: sticky|shape|connector|marker|highlighter|eraser|stamp}",
+            "{tool: move|scale|hand|frame|section|slice|rectangle|line|arrow|ellipse|polygon|star|pen|pencil|text|comment|shapeBuilder | board tools (boards and design files): sticky|shape|connector|marker|highlighter|eraser|stamp}",
             false,
             |s, p| {
                 let t = req_string("tool.set", p, "tool")?;
                 let t = ToolId::from_id(&t).ok_or_else(|| bad("tool.set", format!("unknown tool `{t}`")))?;
-                if t.on_boards() {
-                    crate::board::require(s, &format!("tool.{}", t.id()))?;
-                }
                 tool(s, t)
             }
         ),

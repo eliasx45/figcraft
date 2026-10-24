@@ -63,12 +63,17 @@ fn a_board_is_a_kind_of_file_that_saves_and_reopens() {
 }
 
 #[test]
-fn board_commands_refuse_on_design_files_and_prototyping_refuses_on_boards() {
+fn board_commands_work_on_design_files_and_prototyping_refuses_on_boards() {
+    // A fork extra: the board commands and tools work in design files too.
     let mut d = Session::new();
     d.execute("file.new", &json!({})).unwrap();
     for (cmd, p) in [("board.sticky", json!({"x": 0, "y": 0})), ("tool.sticky", json!({})), ("tool.set", json!({"tool": "marker"}))] {
-        assert!(matches!(d.execute(cmd, &p), Err(EngineError::Disabled(..))), "{cmd} on a design file");
+        assert!(d.execute(cmd, &p).is_ok(), "{cmd} on a design file");
     }
+    assert_eq!(d.tool.tool, ToolId::Marker);
+    assert_eq!(d.doc().unwrap().kind, FileKind::Design, "the file stays a design file");
+    // Prototyping and Dev Mode stay open to design files with board objects in them.
+    assert!(d.execute("view.prototype", &json!({})).is_ok());
     let mut s = board();
     for cmd in ["view.devMode", "view.prototype", "proto.present", "proto.flow.add", "dev.focus"] {
         let e = s.execute(cmd, &json!({})).unwrap_err();
@@ -360,4 +365,67 @@ fn a_copy_of_joined_objects_joins_the_copies() {
     });
     let k = k.unwrap();
     assert!(pasted.contains(&k.from.node().unwrap()) && pasted.contains(&k.to.node().unwrap()), "{k:?} {pasted:?}");
+}
+
+/// A new design file (not a board).
+pub(crate) fn design() -> Session {
+    let mut s = Session::new();
+    s.execute("file.new", &json!({})).unwrap();
+    s
+}
+
+#[test]
+fn a_sticky_and_a_connector_in_a_design_file_follow_like_on_a_board() {
+    let mut s = design();
+    let frame = id(&s.execute("node.create", &json!({"type": "frame", "x": 600, "y": 0, "width": 200, "height": 120})).unwrap(), "id");
+    let r = s.execute("board.sticky", &json!({"x": 0, "y": 0, "text": "Hi", "author": false})).unwrap();
+    let (st, note) = (id(&r, "id"), id(&r, "text"));
+    assert!(matches!(node(&s, st).board, Some(BoardItem::Sticky { .. })));
+    // A connector from the sticky to an ordinary frame of the design.
+    let c = id(&s.execute("board.connector", &json!({"from": st, "to": frame, "style": "straight"})).unwrap(), "id");
+    let before = drawn(&s, c);
+    assert_eq!(before, route(s.doc().unwrap(), &connector(&s, c)).unwrap(), "drawn along its route");
+    assert!(before.first().is_some_and(|p| (p.x - 200.0).abs() < 1e-6), "from the sticky's right side: {before:?}");
+    // Moving the sticky re-routes the connector, as on a board.
+    s.execute("node.set", &json!({"id": st, "props": {"y": 300}})).unwrap();
+    let after = drawn(&s, c);
+    assert_ne!(before, after, "the connector follows the moved sticky");
+    assert_eq!(after, route(s.doc().unwrap(), &connector(&s, c)).unwrap());
+    // So does moving the frame at the other end.
+    s.execute("node.set", &json!({"id": frame, "props": {"x": 900}})).unwrap();
+    assert_eq!(drawn(&s, c), route(s.doc().unwrap(), &connector(&s, c)).unwrap());
+    assert_ne!(drawn(&s, c), after);
+    // The sticky's note takes the size its length calls for here too.
+    let long = "word ".repeat(120);
+    s.execute("node.set", &json!({"id": note, "props": {"characters": long}})).unwrap();
+    assert_eq!(node(&s, note).kind.text().unwrap().style.font_size, sticky_font_size(&long));
+    // Undo puts the connector back where it ran.
+    s.execute("edit.undo", &json!({})).unwrap();
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(drawn(&s, c), after);
+}
+
+#[test]
+fn a_design_file_without_board_objects_skips_the_board_passes() {
+    let mut s = design();
+    let r = id(&s.execute("shape.rectangle", &json!({"x": 0, "y": 0, "width": 100, "height": 100})).unwrap(), "id");
+    s.execute("node.set", &json!({"id": r, "props": {"x": 40}})).unwrap();
+    assert_eq!(s.doc().unwrap().board_hint(), Some(false), "no board objects: the passes know after one look");
+    // The first board object turns them on, and they stay on.
+    let st = id(&s.execute("board.sticky", &json!({"x": 0, "y": 300})).unwrap(), "id");
+    assert_eq!(s.doc().unwrap().board_hint(), Some(true));
+    s.execute("edit.delete", &json!({"ids": [st]})).unwrap();
+    assert_eq!(s.doc().unwrap().board_hint(), Some(true), "never back to false on its own");
+    // A file opened with board objects in it is looked through once.
+    let mut d = design();
+    let st = id(&d.execute("board.sticky", &json!({"x": 0, "y": 0})).unwrap(), "id");
+    let frame = id(&d.execute("node.create", &json!({"type": "frame", "x": 600, "y": 0, "width": 100, "height": 100})).unwrap(), "id");
+    let c = id(&d.execute("board.connector", &json!({"from": st, "to": frame})).unwrap(), "id");
+    let json = figcraft_format::to_json(d.doc().unwrap()).unwrap().to_string();
+    let (doc, _) = figcraft_format::from_json(&json).unwrap();
+    assert_eq!(doc.board_hint(), None);
+    let mut o = Session::with_document(doc);
+    o.execute("node.set", &json!({"id": frame, "props": {"y": 400}})).unwrap();
+    assert_eq!(drawn(&o, c), route(o.doc().unwrap(), &connector(&o, c)).unwrap(), "re-routed after the frame moved");
+    assert_eq!(o.doc().unwrap().board_hint(), Some(true));
 }

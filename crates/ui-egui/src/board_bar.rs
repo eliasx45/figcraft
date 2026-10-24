@@ -1,6 +1,6 @@
-//! Boards in the UI: the small bar floating over a board's selection (colour, shape, text size,
-//! connector style; boards hide the Design panel until asked for), and the swatches it and the
-//! board tools' flyouts share.
+//! Boards in the UI: the small bar floating over a selection of board objects (colour, shape, text
+//! size, connector style; on a board or in a design file; boards hide the Design panel until asked
+//! for), and the swatches it and the board tools' flyouts share.
 
 use egui::{Color32, CornerRadius, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use figcraft_doc::{BOARD_COLORS, BoardItem, BoardShape, NodeKind, Routing, Stamp, StrokeCap};
@@ -158,10 +158,12 @@ pub(crate) fn place(sel: Rect, size: egui::Vec2, canvas: Rect) -> Pos2 {
     pos2(cx - w / 2.0, y)
 }
 
-/// The bar above a board's selection, while nothing is being dragged and the file can be edited.
+/// The bar above a selection with board objects in it, while nothing is being dragged and the file
+/// can be edited: on a board, and in a design file too (a fork extra; its board objects come from
+/// the toolbar's Board tools). Only the selection is looked at, so big design files pay nothing.
 pub fn show(app: &mut FigApp, ctx: &egui::Context) {
     let editable = app.session.active_read_only().is_none();
-    if app.session.tool.busy() || !editable || !app.session.doc().is_ok_and(figcraft_engine::board::is_board) {
+    if app.session.tool.busy() || !editable {
         return;
     }
     let Some(h) = has(app) else { return };

@@ -139,7 +139,7 @@ impl ToolId {
         }
     }
 
-    /// The tools of a board's toolbar (a design file's toolbar has the others).
+    /// The board tools: a board's toolbar, and the Board flyout of a design file's toolbar.
     pub fn on_boards(self) -> bool {
         matches!(
             self,

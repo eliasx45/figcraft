@@ -73,7 +73,40 @@ const GROUPS: &[Group] = &[
     ),
     Group::tools("text", tr_noop("Text"), &[(ToolId::Text, Icon::Text)]),
     Group::tools("comment", tr_noop("Comment"), &[(ToolId::Comment, Icon::Comment)]),
+    // A fork extra: the board tools in a design file, in one flyout after the design groups (the
+    // groups before it stay where they were). The flyout also shows the shown tool's colours,
+    // shapes or stamps.
+    Group::tools(
+        "board",
+        tr_noop("Board tools"),
+        &[
+            (ToolId::Sticky, Icon::Board),
+            (ToolId::BoardShape, Icon::Shapes),
+            (ToolId::Connector, Icon::Connector),
+            (ToolId::Marker, Icon::Marker),
+            (ToolId::Highlighter, Icon::Highlighter),
+            (ToolId::Eraser, Icon::Eraser),
+            (ToolId::Stamp, Icon::Stamp),
+        ],
+    ),
 ];
+
+/// The choices a board tool's own flyout offers (sticky colours, shapes, stamps); `Options::None`
+/// for the others.
+pub(crate) fn tool_options(tool: ToolId) -> Options {
+    match tool {
+        ToolId::Sticky => Options::Colors,
+        ToolId::BoardShape => Options::Shapes,
+        ToolId::Stamp => Options::Stamps,
+        _ => Options::None,
+    }
+}
+
+/// `tool`'s key as the toolbar shows it: the board tools' single keys are live on boards only, so
+/// a design file shows none for them.
+fn key_of(tool: ToolId, board: bool) -> &'static str {
+    if tool.on_boards() && !board { "" } else { tool.shortcut() }
+}
 
 /// A board's toolbar: moving around, ink, stickies, shapes, connectors, text, sections, stamps.
 const BOARD_GROUPS: &[Group] = &[
@@ -174,7 +207,8 @@ fn group_cell(app: &mut FigApp, ui: &mut Ui, g: &Group, at: egui::Pos2, top: f32
     let shown = if in_group { current } else { remembered(ui, g.key, g.tools.first().map(|x| x.0).unwrap_or(ToolId::Move)) };
     let icon = g.tools.iter().find(|(tid, _)| *tid == shown).map(|(_, i)| *i).unwrap_or(Icon::Move);
     let r = Rect::from_center_size(pos2(at.x + TOOL_CELL / 2.0, at.y), vec2(TOOL_CELL, TOOL_CELL));
-    let resp = tool_cell(ui, t, r, ("tool", g.key), icon, in_group, &format!("{}  {}", tr(shown.label()), pretty_shortcut(shown.shortcut())));
+    let board = app.session.doc().is_ok_and(figcraft_engine::board::is_board);
+    let resp = tool_cell(ui, t, r, ("tool", g.key), icon, in_group, &format!("{}  {}", tr(shown.label()), pretty_shortcut(key_of(shown, board))));
     if in_group {
         a11y::prefer(&mut app.ui.nav, Region::Toolbar, resp.id);
     }
@@ -197,7 +231,7 @@ fn group_cell(app: &mut FigApp, ui: &mut Ui, g: &Group, at: egui::Pos2, top: f32
     }
     if app.ui.tool_flyout == Some(g.key) {
         if g.options == Options::None {
-            flyout(app, ui, g, Rect::from_min_max(r.min, pos2(x, r.max.y)), top - 8.0);
+            flyout(app, ui, g, shown, Rect::from_min_max(r.min, pos2(x, r.max.y)), top - 8.0);
         } else {
             options_flyout(app, ui, g, pos2(r.min.x, top - 8.0));
         }
@@ -539,22 +573,31 @@ fn options_flyout(app: &mut FigApp, ui: &mut Ui, g: &Group, bottom_left: egui::P
     }
 }
 
-fn flyout(app: &mut FigApp, ui: &mut Ui, g: &Group, anchor: Rect, bottom: f32) {
+/// Group `g`'s flyout of tools (`shown`: the tool its button shows), above `anchor` with its bottom
+/// at `bottom`, kept on screen; a click outside closes it. The design file's Board group adds a row
+/// of the shown tool's colours, shapes or stamps under its tools.
+fn flyout(app: &mut FigApp, ui: &mut Ui, g: &Group, shown: ToolId, anchor: Rect, bottom: f32) {
     let t = Tokens::get(ui.ctx());
     let item_h = 32.0;
     let screen = ui.ctx().content_rect().shrink(8.0);
-    let width = g.tools.iter().fold(220.0_f32, |w, (tid, _)| {
+    let board = app.session.doc().is_ok_and(figcraft_engine::board::is_board);
+    let choices = if g.key == "board" { crate::board_bar::choices(tool_options(shown), &app.session.tool.board) } else { Vec::new() };
+    let (cell, gap) = (28.0_f32, 4.0_f32);
+    let row_w = choices.len() as f32 * (cell + gap) - gap + 16.0;
+    let row_h = if choices.is_empty() { 0.0 } else { cell + 9.0 };
+    let width = g.tools.iter().fold(220.0_f32.max(row_w), |w, (tid, _)| {
         let label = ui.painter().layout_no_wrap(tr(tid.label()).to_string(), regular(12.0), t.menu_text);
-        let key = ui.painter().layout_no_wrap(pretty_shortcut(tid.shortcut()), regular(12.0), t.menu_dim);
+        let key = ui.painter().layout_no_wrap(pretty_shortcut(key_of(*tid, board)), regular(12.0), t.menu_dim);
         w.max(label.size().x + key.size().x + 96.0)
     });
     let w = width.min(screen.width().max(1.0));
-    let h = item_h * g.tools.len() as f32 + 16.0;
+    let h = item_h * g.tools.len() as f32 + 16.0 + row_h;
     let pos = pos2(
         anchor.min.x.clamp(screen.min.x, (screen.max.x - w).max(screen.min.x)),
         (bottom - h).clamp(screen.min.y, (screen.max.y - h).max(screen.min.y)),
     );
     let mut chosen = None;
+    let mut option = None;
     let popup = egui::Area::new(flyout_id(g.key)).fixed_pos(pos).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
         let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
         ui.painter()
@@ -565,7 +608,7 @@ fn flyout(app: &mut FigApp, ui: &mut Ui, g: &Group, anchor: Rect, bottom: f32) {
         for (tid, icon) in g.tools {
             let r = Rect::from_min_size(pos2(rect.min.x + 8.0, y), vec2(w - 16.0, item_h));
             let resp = ui.interact(r, ui.id().with(("fly", tid.id())), Sense::click());
-            a11y::menu_item(&resp, tr(tid.label()), tid.shortcut(), Some(*tid == app.session.tool.tool));
+            a11y::menu_item(&resp, tr(tid.label()), key_of(*tid, board), Some(*tid == app.session.tool.tool));
             // The keyboard's item is highlighted like the hovered one.
             a11y::own_focus(&resp);
             if resp.hovered() || resp.has_focus() {
@@ -575,7 +618,7 @@ fn flyout(app: &mut FigApp, ui: &mut Ui, g: &Group, anchor: Rect, bottom: f32) {
                 icons::paint(ui.painter(), Rect::from_center_size(pos2(r.min.x + 10.0, r.center().y), vec2(12.0, 12.0)), Icon::Check, t.menu_text);
             }
             icons::paint(ui.painter(), Rect::from_center_size(pos2(r.min.x + 32.0, r.center().y), vec2(18.0, 18.0)), *icon, t.menu_text);
-            let key = pretty_shortcut(tid.shortcut());
+            let key = pretty_shortcut(key_of(*tid, board));
             let key_width = ui.painter().layout_no_wrap(key.clone(), regular(12.0), t.menu_dim).size().x;
             let label = crate::widgets::elide_font(ui, tr(tid.label()), (r.width() - key_width - 80.0).max(1.0), regular(12.0));
             ui.painter().text(pos2(r.min.x + 48.0, r.center().y), Align2::LEFT_CENTER, label, regular(12.0), t.menu_text);
@@ -584,6 +627,25 @@ fn flyout(app: &mut FigApp, ui: &mut Ui, g: &Group, anchor: Rect, bottom: f32) {
                 chosen = Some(*tid);
             }
             y += item_h;
+        }
+        // The shown board tool's colours, shapes or stamps: a pick chooses the tool with it.
+        if !choices.is_empty() {
+            ui.painter().line_segment([pos2(rect.min.x + 8.0, y + 4.0), pos2(rect.max.x - 8.0, y + 4.0)], Stroke::new(1.0, t.border));
+            let mut x = rect.min.x + 8.0;
+            for (i, c) in choices.iter().enumerate() {
+                let r = Rect::from_min_size(pos2(x, y + 9.0), vec2(cell, cell));
+                let resp = ui.interact(r, ui.id().with(("fly_opt", g.key, i)), Sense::click()).on_hover_text(tr(c.label));
+                a11y::menu_item(&resp, tr(c.label), "", Some(c.on));
+                a11y::own_focus(&resp);
+                if c.on || resp.hovered() || resp.has_focus() {
+                    ui.painter().rect_filled(r, CornerRadius::same(5), t.menu_hover);
+                }
+                crate::board_bar::paint_choice(ui.painter(), r.shrink(5.0), &c.mark, t.menu_text);
+                if resp.clicked() {
+                    option = Some(c.params.clone());
+                }
+                x += cell + gap;
+            }
         }
     });
     if ui.input(|i| {
@@ -597,6 +659,16 @@ fn flyout(app: &mut FigApp, ui: &mut Ui, g: &Group, anchor: Rect, bottom: f32) {
             ui.data_mut(|d| d.insert_temp(egui::Id::new(("tb_last", g.key)), i as u8));
         }
         choose(app, tid);
+        app.ui.tool_flyout = None;
+    }
+    if let Some(params) = option {
+        if let Some(i) = ToolId::ALL.iter().position(|x| *x == shown) {
+            ui.data_mut(|d| d.insert_temp(egui::Id::new(("tb_last", g.key)), i as u8));
+        }
+        if app.ui.right_tab == crate::RightTab::Inspect {
+            app.ui.right_tab = crate::RightTab::Design;
+        }
+        app.run(&format!("tool.{}", shown.id()), params);
         app.ui.tool_flyout = None;
     }
 }

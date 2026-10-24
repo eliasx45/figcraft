@@ -20,8 +20,6 @@ use crate::params::{boolean, color_of, get, id, id_of, num, num_or, opt_id, req_
 use crate::tools::{Gesture, PointerEvent, ToolId};
 use crate::{EngineError, Result, Session, bad, spec, textedit};
 
-/// Why a board command refuses on a design file.
-pub const NEEDS_BOARD: &str = "this is for boards: make one with File ▸ New board";
 /// Why prototyping and Dev Mode refuse on a board.
 pub const NOT_ON_BOARDS: &str = "boards have no prototypes or Dev Mode: use a design file for those";
 
@@ -175,9 +173,29 @@ pub fn is_board(doc: &Document) -> bool {
     doc.kind == FileKind::Board
 }
 
-/// Refuse `cmd` unless the active file is a board.
-pub(crate) fn require(s: &Session, cmd: &str) -> Result<()> {
-    if s.doc().is_ok_and(is_board) { Ok(()) } else { Err(EngineError::Disabled(cmd.into(), NEEDS_BOARD.into())) }
+/// Board commands and tools need an open file, a board or a design file (in a design file they are
+/// a fork extra: stickies, connectors and ink beside the design).
+pub(crate) fn require(s: &Session, _cmd: &str) -> Result<()> {
+    s.doc().map(|_| ())
+}
+
+/// Whether the normalize pass has board items to look after: always on a board; in a design file
+/// only when it holds some. Cheap for big design files: the whole document is looked through once
+/// (a file just opened), after that only the layers an edit touched (see
+/// [`Document::board_hint`]).
+fn has_items(doc: &mut Document, touched: &BTreeSet<NodeId>) -> bool {
+    if is_board(doc) {
+        return true;
+    }
+    let known = match doc.board_hint() {
+        Some(any) => any,
+        None => doc.nodes().any(|n| n.board.is_some()),
+    };
+    let any = known || touched.iter().any(|id| doc.node(*id).is_some_and(|n| n.board.is_some()));
+    if doc.board_hint() != Some(any) {
+        doc.set_board_hint(any);
+    }
+    any
 }
 
 /// Prototyping and Dev Mode: not on boards.
@@ -882,7 +900,7 @@ pub(crate) fn rejoin(doc: &mut Document, originals: &[(NodeId, BoardItem)], map:
 /// Before text is measured: a sticky's note takes the size its length calls for, and a resized
 /// shape keeps its text inside its outline.
 pub(crate) fn settle_text(doc: &mut Document, before: &Document, touched: &BTreeSet<NodeId>) {
-    if !is_board(doc) {
+    if touched.is_empty() || !has_items(doc, touched) {
         return;
     }
     for &id in touched {
@@ -917,7 +935,7 @@ pub(crate) fn settle_text(doc: &mut Document, before: &Document, touched: &BTree
 /// the connectors and labels an edit can have moved are looked at: touched themselves, or with a
 /// touched (or gone) end, connector or layer around them.
 pub(crate) fn settle_routes(doc: &mut Document, before: &Document, touched: &BTreeSet<NodeId>) {
-    if !is_board(doc) || touched.is_empty() {
+    if touched.is_empty() || !has_items(doc, touched) {
         return;
     }
     let hit = |doc: &Document, id: NodeId| touched.contains(&id) || doc.ancestors(id).iter().any(|a| touched.contains(a));
@@ -1135,11 +1153,6 @@ impl Session {
     /// A press with a board tool: place a sticky, shape or stamp, start a connector or a stroke,
     /// or start erasing.
     pub(crate) fn board_down(&mut self, ev: &PointerEvent) -> Result<()> {
-        // A board tool kept while a design file came to the front: back to Move for this press.
-        if !is_board(self.doc()?) {
-            self.tool.tool = ToolId::Move;
-            return self.pointer(ev);
-        }
         // A sticky still being typed in ends first, so the next object is an undo step of its own.
         if self.ds()?.text_edit.is_some() {
             crate::textedit::end(self)?;

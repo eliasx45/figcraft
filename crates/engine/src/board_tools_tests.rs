@@ -264,14 +264,33 @@ fn a_second_sticky_ends_the_first_ones_typing_and_undoes_alone() {
 }
 
 #[test]
-fn a_board_tool_left_on_presses_as_move_in_a_design_file() {
+fn a_board_tool_left_on_places_its_object_in_a_design_file_too() {
+    // A fork extra: board tools work in design files, so one kept from a board places there.
     let mut s = board();
     s.execute("tool.sticky", &json!({})).unwrap();
     s.execute("file.new", &json!({})).unwrap();
-    let r = id(&s.execute("shape.rectangle", &json!({"x": 0, "y": 0, "width": 100, "height": 100})).unwrap(), "id");
-    s.execute("select.none", &json!({})).unwrap();
+    s.pointer(&PointerEvent::at(PointerKind::Down, 500.0, 500.0, 1.0)).unwrap();
+    s.pointer(&PointerEvent::at(PointerKind::Up, 500.0, 500.0, 1.0)).unwrap();
+    let doc = s.doc().unwrap();
+    assert_eq!(doc.kind, figcraft_doc::FileKind::Design);
+    assert_eq!(doc.nodes().filter(|n| matches!(n.board, Some(BoardItem::Sticky { .. }))).count(), 1, "a sticky in the design file");
+    assert!(s.ds().unwrap().text_edit.is_some(), "typing in it, as on a board");
+}
+
+#[test]
+fn board_tools_draw_connectors_and_ink_in_a_design_file() {
+    let mut s = crate::board_tests::design();
+    let a = id(&s.execute("shape.rectangle", &json!({"x": 0, "y": 0, "width": 100, "height": 100})).unwrap(), "id");
+    let b = id(&s.execute("shape.rectangle", &json!({"x": 400, "y": 0, "width": 100, "height": 100})).unwrap(), "id");
+    s.execute("tool.set", &json!({"tool": "connector"})).unwrap();
     s.pointer(&PointerEvent::at(PointerKind::Down, 50.0, 50.0, 1.0)).unwrap();
-    s.pointer(&PointerEvent::at(PointerKind::Up, 50.0, 50.0, 1.0)).unwrap();
-    assert_eq!(s.tool.tool, ToolId::Move);
-    assert_eq!(s.selection(), vec![r], "the press selected as Move does");
+    s.pointer(&PointerEvent::at(PointerKind::Move, 450.0, 50.0, 1.0)).unwrap();
+    s.pointer(&PointerEvent::at(PointerKind::Up, 450.0, 50.0, 1.0)).unwrap();
+    let c = connector_in(&s, &s.doc().unwrap().nodes().map(|n| n.id).collect::<Vec<_>>()).expect("a connector between the rectangles");
+    assert_eq!((c.from.node(), c.to.node()), (Some(a), Some(b)));
+    s.execute("tool.marker", &json!({})).unwrap();
+    s.pointer(&PointerEvent::at(PointerKind::Down, 0.0, 300.0, 1.0)).unwrap();
+    s.pointer(&PointerEvent::at(PointerKind::Move, 100.0, 320.0, 1.0)).unwrap();
+    s.pointer(&PointerEvent::at(PointerKind::Up, 200.0, 300.0, 1.0)).unwrap();
+    assert!(s.doc().unwrap().nodes().any(|n| n.board == Some(BoardItem::Ink)), "a marker stroke");
 }

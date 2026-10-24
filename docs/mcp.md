@@ -421,9 +421,11 @@ tips; headless, it only sets the preference.
 A board is a file of its own kind for thinking together: `file.newBoard {name?}` opens one (its
 page is light; `inspect_document` says `kind: "board"`). Board objects are ordinary layers with a
 `board` entry `get_node` shows (`{type: sticky|shape|connector|label|stamp|ink, …}`), so the usual
-commands move, resize, recolour, copy, delete and undo them. On a design file the board commands
-refuse; on a board `proto.*`, `dev.*`, `view.prototype` and `view.devMode` refuse. Each of these is
-one undo step and returns the ids it made:
+commands move, resize, recolour, copy, delete and undo them. The board commands and tools also
+work in a design file (a fork extra): stickies, shapes with text, connectors, stamps and ink sit
+beside the design, connectors re-route and sticky notes resize there too, and the app's toolbar has
+a Board menu for them. On a board `proto.*`, `dev.*`, `view.prototype` and `view.devMode` refuse.
+Each of these is one undo step and returns the ids it made:
 
 - `board.sticky {x, y, text?, color?, author?, parent?}` → `{id, text}`: a sticky note (a square
   frame whose height grows with its note; its text size shrinks as the note gets longer). `color`
@@ -450,6 +452,8 @@ one undo step and returns the ids it made:
 - Tools for `pointer`: `tool.sticky {color?}`, `tool.shape {shape?}`, `tool.connector {style?}`
   (drag from one object to another), `tool.marker {color?}`, `tool.highlighter {color?}`,
   `tool.eraser` (drag over strokes), `tool.stamp {stamp?}`; Text and Section are the usual tools.
+  `tool.set {tool: sticky|shape|connector|marker|highlighter|eraser|stamp}` chooses them too, on a
+  board or in a design file.
 
 ```json
 {"command": "file.newBoard", "params": {"name": "Retro"}}
@@ -497,10 +501,11 @@ on; `key` resolves keys the way the canvas does. Commands behind keys:
 - `view.designPrototype` (`Shift+E`), `view.devMode` (`Shift+D`) and `view.leftSidebar`
   (`Shift+Cmd+\`) switch the right panel's tab or hide the left sidebar in the app (no-ops headless).
 - `doc.nextTab` / `doc.previousTab` (`Ctrl+Tab` / `Ctrl+Shift+Tab`): the next or previous open file.
-- Board tools (boards only): `tool.sticky` (`Q`), `tool.shape` (`B`), `tool.connector` (`X`),
+- Board tools: `tool.sticky` (`Q`), `tool.shape` (`B`), `tool.connector` (`X`),
   `tool.marker` (`M`), `tool.highlighter` (`U`), `tool.eraser` (`E`), `tool.stamp` (`W`), and
-  `board.nextSticky` (`Shift+Cmd/Ctrl+Enter`, also while typing in a sticky). Keys no design-file
-  shortcut uses; on a design file they refuse.
+  `board.nextSticky` (`Shift+Cmd/Ctrl+Enter`, also while typing in a sticky). The single keys work
+  on boards only: in a design file they do nothing (`key Q` there is no shortcut), and the board
+  tools come from the toolbar's Board menu or the commands, which work in both kinds of file.
 - `view.pan {dx, dy, big?}`: the arrow keys with nothing selected (`key ArrowRight` does the same)
   pan the view by 20 screen pixels a step, 200 with `big` (Shift).
 - `view.multiplayerCursors {on?}` (`Alt+Cmd+\`): show or hide others' cursors in a live session.

@@ -28,6 +28,7 @@ all end with the same geometry.
 | Board toolbar at the bottom | done | Move/Hand, Marker/Highlighter/Eraser, Sticky (colour flyout), Shapes (flyout), Connector, Text, Section, Stamp (flyout), Comment, Resources, Actions, the Design panel's button |
 | Design panel hidden by default; a contextual bar above the selection | done | colour, shape, text size (S/M/L/XL), connector straight/elbow and its arrow; the Design panel opens with its button or View ▸ Design panel |
 | Prototyping and Dev Mode refuse on boards | done | `proto.*`, `dev.*`, `view.prototype`, `view.devMode` say why |
+| Board tools in design files (a fork extra) | done | the board commands and tools work in design files too: the toolbar's Board flyout (Sticky, Shape, Connector, Marker, Highlighter, Eraser, Stamp, with the shown tool's colours, shapes or stamps), the contextual bar for a selection with board objects, connector routes and sticky text sizes kept in the normalize pass (skipped quickly in design files without board objects); the single-key shortcuts stay board-only. Board files are unchanged |
 | Sticky notes | done | a square frame (200 wide, growing taller through auto layout), 8 soft colours, a soft shadow, the note's text size shrinking as it grows (24 → 11, by characters and lines), the author's name at the bottom; a click places one and starts typing; Enter or a double-click edits; Shift+Cmd/Ctrl+Enter adds the next one beside it |
 | Sticky options: hide the author, change size presets, sticky stacks | partial | `board.sticky {author: false}`; no size presets or stacks |
 | Shapes with text | done | rectangle, rounded rectangle, ellipse, diamond, triangle, speech bubble, chevron; text centred and wrapping inside the outline; shape type and text size from the contextual bar |
@@ -58,4 +59,5 @@ all end with the same geometry.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-24 | minor | Fork extra: board tools and commands in design files (Board toolbar flyout, contextual bar, normalize); single keys board-only |
 | 2026-10-24 | major | Created with board files (M12): sticky notes, shapes with text, connectors, ink and eraser, stamps, the board toolbar and contextual bar, live-session sync |

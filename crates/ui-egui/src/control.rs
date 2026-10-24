@@ -298,7 +298,8 @@ pub fn handle(app: &mut FigApp, ctx: &Context, method: &str, p: &Value) -> Resul
                 let r = crate::comments::step(app, ctx, if matches!(key, "ArrowUp" | "Up") { -1 } else { 1 });
                 return Ok(json!({"comment": r.and_then(|v| v.get("id").cloned())}));
             }
-            if let Some(bd) = lookup(platform, Context::Canvas, key, m) {
+            let board = app.session.doc().is_ok_and(figcraft_engine::board::is_board);
+            if let Some(bd) = figcraft_engine::keymap::lookup_in(platform, Context::Canvas, key, m, board) {
                 crate::shortcuts::run_binding(app, bd.id);
                 return Ok(json!({"command": bd.id}));
             }

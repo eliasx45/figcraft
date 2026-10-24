@@ -2,7 +2,8 @@
 //! shape or a stamp; the Design panel's button), the right panel hidden until asked for, the bar
 //! over the selection (colours, shapes, text sizes, connector style, also with layers that aren't
 //! board objects selected, never on a file you can only view), the home screen's New board card,
-//! and the marks design files and boards get.
+//! the marks design files and boards get, and the fork's board tools in design files (the toolbar's
+//! Board flyout, the bar over a selected sticky, board-only single keys).
 
 use egui::{Event, Modifiers, PointerButton, Pos2, Rect, pos2};
 use figcraft_doc::{BoardItem, BoardShape, FileKind, NodeId, Routing, Stamp, StrokeCap, board_color};
@@ -209,4 +210,105 @@ fn the_next_sticky_from_the_keyboard_goes_on_typing() {
     let te = u.app.session.ds().unwrap().text_edit.clone().expect("typing in the new sticky");
     let owner = figcraft_engine::board::owner_of_text(doc, te.id).unwrap();
     assert_eq!(doc.node(owner).unwrap().transform.translation().x, 224.0);
+}
+
+/// The app on a new design file.
+fn design() -> Ui {
+    let mut s = Session::new();
+    s.execute("file.new", &json!({})).unwrap();
+    let mut u = Ui::new(s);
+    u.frame(vec![]);
+    u
+}
+
+fn press(u: &mut Ui, key: egui::Key) {
+    let modifiers = Modifiers::NONE;
+    u.frame(vec![
+        Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers },
+        Event::Key { key, physical_key: None, pressed: false, repeat: false, modifiers },
+    ]);
+}
+
+#[test]
+fn the_selection_bar_shows_for_a_sticky_in_a_design_file() {
+    let mut u = design();
+    let rect = id(&u.app.session.execute("shape.rectangle", &json!({"x": 0, "y": 400, "width": 100, "height": 100})).unwrap());
+    u.frame(vec![]);
+    u.frame(vec![]);
+    assert!(bar(&u).is_none(), "an ordinary layer selected: no bar");
+    let st = id(&u.app.session.execute("board.sticky", &json!({"x": 0, "y": 0})).unwrap());
+    assert_eq!(u.app.session.selection(), vec![st]);
+    u.frame(vec![]);
+    u.frame(vec![]);
+    let r = bar(&u).expect("the bar shows for the selected sticky in a design file");
+    // Swatch 6 (green): 8 in, 24 apart, 20 wide.
+    click(&mut u, pos2(r.min.x + 8.0 + 6.0 * 24.0 + 10.0, r.center().y));
+    assert_eq!(u.app.session.doc().unwrap().node(st).unwrap().fills[0].solid_color(), board_color("green"));
+    // With the rectangle selected too the bar stays for the sticky.
+    u.app.session.execute("select.set", &json!({"ids": [st, rect]})).unwrap();
+    u.frame(vec![]);
+    u.frame(vec![]);
+    assert!(bar(&u).is_some());
+    assert_eq!(u.app.session.doc().unwrap().kind, FileKind::Design);
+}
+
+#[test]
+fn the_design_toolbars_board_flyout_picks_board_tools_and_sticky_colours() {
+    let mut u = design();
+    // The design toolbar keeps its groups and adds the Board flyout after them.
+    u.app.ui.tool_flyout = Some("board");
+    u.frame(vec![]);
+    u.frame(vec![]);
+    let area = egui::Id::new(("flyout_area", "board"));
+    let menu = u.ctx.memory(|m| m.area_rect(area)).expect("the Board flyout shows");
+    // Its last row: the shown tool's (Sticky's) colours, 28-wide cells 4 apart, 8 in, 8 above
+    // the bottom. Colour 5 is blue.
+    click(&mut u, pos2(menu.min.x + 8.0 + 5.0 * 32.0 + 14.0, menu.max.y - 8.0 - 14.0));
+    assert_eq!(u.app.session.tool.tool, ToolId::Sticky);
+    assert_eq!(Some(u.app.session.tool.board.sticky), board_color("blue"));
+    assert_eq!(u.app.ui.tool_flyout, None);
+    // The tool rows pick tools: the third is the Connector (rows 32 high, 8 from the top).
+    u.app.ui.tool_flyout = Some("board");
+    u.frame(vec![]);
+    u.frame(vec![]);
+    let menu = u.ctx.memory(|m| m.area_rect(area)).unwrap();
+    click(&mut u, pos2(menu.min.x + 60.0, menu.min.y + 8.0 + 2.0 * 32.0 + 16.0));
+    assert_eq!(u.app.session.tool.tool, ToolId::Connector);
+    // A click with the sticky tool on the design file's canvas places a sticky.
+    u.app.run("tool.sticky", json!({}));
+    let at = u.app.canvas.rect.center();
+    click(&mut u, at);
+    let doc = u.app.session.doc().unwrap();
+    assert_eq!(doc.nodes().filter(|n| matches!(n.board, Some(BoardItem::Sticky { .. }))).count(), 1);
+}
+
+#[test]
+fn design_file_shortcuts_are_unchanged_and_board_keys_stay_on_boards() {
+    use egui::Key;
+    let mut u = design();
+    let layers = u.app.session.doc().unwrap().nodes().count();
+    for key in [Key::Q, Key::B, Key::X, Key::M, Key::U, Key::E, Key::W] {
+        press(&mut u, key);
+        assert_eq!(u.app.session.tool.tool, ToolId::Move, "{key:?} chooses no board tool in a design file");
+        assert!(u.app.ui.toast.is_none(), "{key:?} says nothing in a design file");
+    }
+    assert_eq!(u.app.session.doc().unwrap().nodes().count(), layers);
+    // The design file's own keys work as before.
+    for (key, tool) in [(Key::R, ToolId::Rectangle), (Key::O, ToolId::Ellipse), (Key::T, ToolId::Text), (Key::V, ToolId::Move)] {
+        press(&mut u, key);
+        assert_eq!(u.app.session.tool.tool, tool, "{key:?} in a design file");
+    }
+    let platform = crate::shortcuts::platform();
+    let none = figcraft_engine::keymap::Mods::default();
+    use figcraft_engine::keymap::{Context, lookup_in};
+    for key in ["Q", "B", "X", "M", "U", "E", "W"] {
+        assert!(lookup_in(platform, Context::Canvas, key, none, false).is_none(), "{key} is free in a design file");
+        assert!(lookup_in(platform, Context::Canvas, key, none, true).is_some_and(|b| b.id.starts_with("tool.")), "{key} on a board");
+    }
+    // On a board the single keys choose the board tools.
+    let mut b = board();
+    for (key, tool) in [(Key::Q, ToolId::Sticky), (Key::B, ToolId::BoardShape), (Key::X, ToolId::Connector), (Key::M, ToolId::Marker)] {
+        press(&mut b, key);
+        assert_eq!(b.app.session.tool.tool, tool, "{key:?} on a board");
+    }
 }

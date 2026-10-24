@@ -150,7 +150,8 @@ impl Headless {
         if self.session.tool_key(key, m.shift, m.alt, m.cmd).map_err(|e| e.to_string())? {
             return Ok(json!({"ok": true}));
         }
-        if let Some(bd) = lookup(platform, Context::Canvas, key, m) {
+        let board = self.session.doc().is_ok_and(figcraft_engine::board::is_board);
+        if let Some(bd) = figcraft_engine::keymap::lookup_in(platform, Context::Canvas, key, m, board) {
             match bd.id {
                 "select.none" => self.session.escape().map_err(|e| e.to_string())?,
                 // Enter with a shape or frame tool chosen places one in the middle of the view.

@@ -87,10 +87,10 @@ pub type DocResult<T> = Result<T, DocError>;
 
 /// The set of touched node ids, whether any layer is a mask (hit testing skips its mask checks
 /// without one) and the largest background blur radius (renders keep that much overlap between
-/// their bands), both worked out when first asked after a change. Never part of equality or
-/// serialisation.
+/// their bands), both worked out when first asked after a change, and whether the document may
+/// hold board items (see [`Document::board_hint`]). Never part of equality or serialisation.
 #[derive(Clone, Debug, Default)]
-pub struct Dirty(pub std::collections::BTreeSet<NodeId>, std::sync::OnceLock<bool>, std::sync::OnceLock<f64>);
+pub struct Dirty(pub std::collections::BTreeSet<NodeId>, std::sync::OnceLock<bool>, std::sync::OnceLock<f64>, Option<bool>);
 
 impl Dirty {
     /// Record node `id` as touched (edited, added or removed).
@@ -266,6 +266,19 @@ impl Document {
     /// elsewhere were applied).
     pub fn mark_dirty(&mut self, ids: impl IntoIterator<Item = NodeId>) {
         self.dirty.0.extend(ids);
+    }
+
+    /// What the normalize pass last worked out about board items here: `Some(false)` when the
+    /// document had none, `Some(true)` when it may have some (it never turns back to false on its
+    /// own: a design file whose last sticky went keeps looking), `None` when not worked out yet
+    /// (a file just opened). Never part of equality or serialisation; copies (undo states) keep it.
+    pub fn board_hint(&self) -> Option<bool> {
+        self.dirty.3
+    }
+
+    /// Record what [`board_hint`](Self::board_hint) reports.
+    pub fn set_board_hint(&mut self, any: bool) {
+        self.dirty.3 = Some(any);
     }
 
     /// Whether any layer of the document is a mask.

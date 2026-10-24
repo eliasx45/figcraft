@@ -53,12 +53,19 @@ const UNSHIFTED_SYMBOLS: [Key; 11] = [
 /// keyboard: a symbol another layout types with Shift (`/` is Shift+7 on a German keyboard, where
 /// the key's position differs from the symbol) counts without the Shift. Characters egui has no key
 /// for (`ü`, `ж`) already arrive as the key at that position.
+/// Board-only keys count (see [`lookup_in`] for the active file).
 pub fn lookup(context: keymap::Context, key: Key, physical: Option<Key>, m: Modifiers) -> Option<&'static keymap::Binding> {
+    lookup_in(context, key, physical, m, true)
+}
+
+/// [`lookup`] in the active file (`board`: it is a board): the board tools' single keys fire on
+/// boards only, so a design file's keys stay its own.
+pub fn lookup_in(context: keymap::Context, key: Key, physical: Option<Key>, m: Modifiers, board: bool) -> Option<&'static keymap::Binding> {
     let mut held = mods(m);
     if held.shift && physical.is_some_and(|p| p != key) && UNSHIFTED_SYMBOLS.contains(&key) {
         held.shift = false;
     }
-    keymap::lookup(platform(), context, key.name(), held)
+    keymap::lookup_in(platform(), context, key.name(), held, board)
 }
 
 /// The key a menu shows for a command.
@@ -272,7 +279,8 @@ fn key_event(app: &mut FigApp, key: Key, physical: Option<Key>, m: Modifiers, re
             return true;
         }
     }
-    if let Some(b) = lookup(keymap::Context::Canvas, key, physical, m) {
+    let board = app.session.doc().is_ok_and(figcraft_engine::board::is_board);
+    if let Some(b) = lookup_in(keymap::Context::Canvas, key, physical, m, board) {
         // Copy/cut/paste arrive as clipboard events on most platforms.
         if matches!(b.id, "edit.copy" | "edit.cut" | "edit.paste") {
             return true;

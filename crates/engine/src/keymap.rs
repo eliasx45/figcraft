@@ -99,11 +99,14 @@ pub struct Binding {
     /// Windows/Linux keys; empty: the macOS keys with `Cmd` read as Ctrl.
     pub other: &'static [&'static str],
     pub context: Context,
+    /// Live on boards only: the board tools' single keys, which a design file leaves alone (its
+    /// Board tools come from the toolbar's Board menu or the commands).
+    pub boards: bool,
 }
 
 impl Binding {
     const fn new(group: Group, id: &'static str, mac: &'static [&'static str]) -> Self {
-        Self { group, id, label: "", mac, other: &[], context: Context::Canvas }
+        Self { group, id, label: "", mac, other: &[], context: Context::Canvas, boards: false }
     }
     /// Different keys on Windows and Linux.
     const fn win(mut self, keys: &'static [&'static str]) -> Self {
@@ -117,6 +120,11 @@ impl Binding {
     /// Live while editing text too.
     const fn both(mut self) -> Self {
         self.context = Context::Both;
+        self
+    }
+    /// Live on boards only.
+    const fn boards(mut self) -> Self {
+        self.boards = true;
         self
     }
     /// Live only while editing text.
@@ -147,6 +155,11 @@ impl Binding {
 
     fn live_in(&self, context: Context) -> bool {
         self.context == context || self.context == Context::Both
+    }
+
+    /// Whether the binding is live in the active file (`board`: it is a board).
+    pub fn live_in_file(&self, board: bool) -> bool {
+        board || !self.boards
     }
 }
 
@@ -193,14 +206,16 @@ pub static KEYS: &[Binding] = &[
     k(Tools, "tool.text", &["T"]),
     k(Tools, "tool.comment", &["C"]),
     k(Tools, "tool.shapeBuilder", &["Shift+M"]),
-    // Board tools (on boards only), on keys nothing else uses.
-    k(Tools, "tool.sticky", &["Q"]),
-    k(Tools, "tool.shape", &["B"]),
-    k(Tools, "tool.connector", &["X"]),
-    k(Tools, "tool.marker", &["M"]),
-    k(Tools, "tool.highlighter", &["U"]),
-    k(Tools, "tool.eraser", &["E"]),
-    k(Tools, "tool.stamp", &["W"]),
+    // Board tools, on keys nothing else uses. Their single keys are live on boards only: in a
+    // design file the tools come from the toolbar's Board menu or the commands, so its keys stay
+    // its own (and free for the incumbent's design-file keys this fork may add later).
+    k(Tools, "tool.sticky", &["Q"]).boards(),
+    k(Tools, "tool.shape", &["B"]).boards(),
+    k(Tools, "tool.connector", &["X"]).boards(),
+    k(Tools, "tool.marker", &["M"]).boards(),
+    k(Tools, "tool.highlighter", &["U"]).boards(),
+    k(Tools, "tool.eraser", &["E"]).boards(),
+    k(Tools, "tool.stamp", &["W"]).boards(),
     k(Tools, "board.nextSticky", &["Shift+Cmd+Enter"]).label("Board: a new sticky beside the selected one").both(),
     // View
     // The documentation gives both keys for the pixel grid in different places.
@@ -475,9 +490,16 @@ pub fn matches(spec: &str, platform: Platform, key: &str, mods: Mods) -> bool {
     parse(spec).is_some_and(|(want, k)| k.eq_ignore_ascii_case(key) && same_mods(platform, want, mods))
 }
 
-/// The binding `key` with these modifiers fires in `context` on `platform`.
+/// The binding `key` with these modifiers fires in `context` on `platform`, in any kind of file
+/// (board-only keys included; [`lookup_in`] for the active file).
 pub fn lookup(platform: Platform, context: Context, key: &str, mods: Mods) -> Option<&'static Binding> {
     KEYS.iter().filter(|b| b.live_in(context)).find(|b| b.keys(platform).iter().any(|s| matches(s, platform, key, mods)))
+}
+
+/// The binding `key` fires in the active file (`board`: it is a board): the board tools' single
+/// keys only on boards.
+pub fn lookup_in(platform: Platform, context: Context, key: &str, mods: Mods, board: bool) -> Option<&'static Binding> {
+    KEYS.iter().filter(|b| b.live_in(context) && b.live_in_file(board)).find(|b| b.keys(platform).iter().any(|s| matches(s, platform, key, mods)))
 }
 
 /// A command's keys on `platform` (all its bindings, the menu's first).
