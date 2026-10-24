@@ -11,22 +11,34 @@ use super::{CommandSpec, ok};
 use crate::params::*;
 use crate::{DocState, EngineError, Result, Session, bad, spec};
 
+/// A new file of `kind` in a tab of its own.
+fn new_file(s: &mut Session, p: &Value, kind: FileKind) -> Result<Value> {
+    let name = string(p, "name").unwrap_or_else(|| if kind == FileKind::Board { "Untitled board" } else { "Untitled" }.into());
+    let mut doc = Document::new(name);
+    doc.kind = kind;
+    // A property of the page from here on: a later change of theme leaves it alone. Boards are
+    // light whatever the theme.
+    let background = if kind == FileKind::Board { BOARD_PAGE } else { s.new_page_background() };
+    for page in doc.pages.clone() {
+        if let Some(NodeKind::Page { background: b, .. }) = doc.node_mut(page).map(|n| &mut n.kind) {
+            *b = background;
+        }
+    }
+    s.docs.push(DocState::new(doc, None));
+    s.active = s.docs.len() - 1;
+    Ok(json!({"index": s.active, "kind": kind.id()}))
+}
+
 pub fn specs() -> Vec<CommandSpec> {
     vec![
-        spec!("file.new", "New design file", "{name?}", false, |s, p| {
-            let name = string(p, "name").unwrap_or_else(|| "Untitled".into());
-            let mut doc = Document::new(name);
-            // A property of the page from here on: a later change of theme leaves it alone.
-            let background = s.new_page_background();
-            for page in doc.pages.clone() {
-                if let Some(NodeKind::Page { background: b, .. }) = doc.node_mut(page).map(|n| &mut n.kind) {
-                    *b = background;
-                }
-            }
-            s.docs.push(DocState::new(doc, None));
-            s.active = s.docs.len() - 1;
-            Ok(json!({"index": s.active}))
-        }),
+        spec!("file.new", "New design file", "{name?}", false, |s, p| new_file(s, p, FileKind::Design)),
+        spec!(
+            "file.newBoard",
+            "New board",
+            "{name?}  a board: sticky notes, shapes with text, connectors, marker and stamps on a light page",
+            false,
+            |s, p| new_file(s, p, FileKind::Board)
+        ),
         spec!(
             "file.open",
             "Open",
@@ -366,7 +378,7 @@ fn version_index(cmd: &str, ds: &DocState, p: &Value) -> Result<usize> {
     if i < ds.versions.len() { Ok(i) } else { Err(bad(cmd, format!("no version at index {i}"))) }
 }
 
-fn read_version(v: &Version) -> Result<Arc<Document>> {
+pub(crate) fn read_version(v: &Version) -> Result<Arc<Document>> {
     v.document().map_err(|e| EngineError::Other(format!("version “{}” can't be read: {e}", v.name)))
 }
 

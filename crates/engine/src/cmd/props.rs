@@ -533,8 +533,12 @@ pub fn apply(cmd: &str, doc: &mut Document, id: NodeId, props: &Map<String, Valu
                 } else {
                     v.as_str().and_then(|s| DevStatus::ALL.into_iter().find(|d| d.id().eq_ignore_ascii_case(s)))
                 };
+                let st = st.ok_or_else(|| bad(cmd, "devStatus: none|readyForDev|completed"))?;
+                if !st.is_none() && !crate::devinspect::has_status(doc, id) {
+                    return Err(bad(cmd, "devStatus: only sections and frames at the top of a page or section take one"));
+                }
                 let n = doc.get_mut(id)?;
-                n.dev_status = st.ok_or_else(|| bad(cmd, "devStatus: none|readyForDev|completed"))?;
+                n.dev_status = st;
                 // Marking a layer (again) starts from its current contents.
                 n.dev_changed = false;
             }

@@ -120,6 +120,15 @@ static ROWS: &[Row] = &[
     pin(Tools, "tool.slice", &["S"], &[]),
     pin(Tools, "file.placeImage", &["Shift+Cmd+K"], &[]),
     pin(Tools, "tool.shapeBuilder", &["Shift+M"], &[]),
+    // Board tools (boards only), on keys no design-file shortcut uses.
+    pin(Tools, "tool.sticky", &["Q"], &[]),
+    pin(Tools, "tool.shape", &["B"], &[]),
+    pin(Tools, "tool.connector", &["X"], &[]),
+    pin(Tools, "tool.marker", &["M"], &[]),
+    pin(Tools, "tool.highlighter", &["U"], &[]),
+    pin(Tools, "tool.eraser", &["E"], &[]),
+    pin(Tools, "tool.stamp", &["W"], &[]),
+    pin(Tools, "board.nextSticky", &["Shift+Cmd+Enter"], &[]),
     // Vector edit mode
     doc(Selection, "Edit the selected shape's points", &["Enter"], &[], Bound("select.children"), "Enter on a shape edits it; on a frame or group it selects the children"),
     doc(Shape, "Vector edit: move", &["V"], &[], VectorTool(VTool::Move), ""),
@@ -398,7 +407,7 @@ fn counts_match_the_docs() {
     let reserved = documented.iter().filter(|r| !r.reserved.is_empty()).count();
     let pinned = ROWS.len() - documented.len();
     // docs/ui-parity.md quotes these.
-    assert_eq!((documented.len(), bound, moved, missing, reserved, pinned), (129, 128, 1, 0, 2, 49));
+    assert_eq!((documented.len(), bound, moved, missing, reserved, pinned), (129, 128, 1, 0, 2, 57));
 }
 
 #[test]

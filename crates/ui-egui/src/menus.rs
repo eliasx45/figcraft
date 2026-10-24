@@ -37,6 +37,7 @@ pub const UI_COMMANDS: &[&str] = &[
 /// `event_text` is the text the platform handed over with the paste event (the browser has no
 /// other way to read it). `at`: the page point to paste at (Paste here); `None` pastes in the
 /// middle of the view.
+/// In Dev Mode only a comment's link pastes (it opens the thread); everything else would edit.
 pub fn paste(app: &mut FigApp, event_text: Option<&str>, at: Option<(f64, f64)>) {
     // Native Figma copies (with images fetched in the background) take the shared importer first.
     if crate::clipboard::paste(app, at.map_or(json!({}), |(x, y)| json!({"x": x, "y": y}))) {
@@ -44,6 +45,9 @@ pub fn paste(app: &mut FigApp, event_text: Option<&str>, at: Option<(f64, f64)>)
     }
     // Only HTML that holds readable design data takes this path; other HTML pastes as before.
     if let Some(html) = app.services.clipboard_get_html().filter(|h| figcraft_engine::cmd::edit::design_clipboard_buffer(h).is_some()) {
+        if dev_mode_refuses(app, "edit.paste") {
+            return;
+        }
         let mut params = json!({"html": html});
         if let Some((x, y)) = at {
             params["x"] = json!(x);
@@ -64,6 +68,9 @@ pub fn paste(app: &mut FigApp, event_text: Option<&str>, at: Option<(f64, f64)>)
     let (cx, cy) = at.or_else(|| app.session.ds().ok().map(|d| (d.view.cx, d.view.cy))).unwrap_or((0.0, 0.0));
     if !ours {
         if let Some((png, w, h)) = clipboard_png(app) {
+            if dev_mode_refuses(app, "edit.paste") {
+                return;
+            }
             use base64::Engine as _;
             let b64 = base64::engine::general_purpose::STANDARD.encode(png);
             // Centred in the view; Paste here puts its top-left at the point, as it does layers.
@@ -73,20 +80,28 @@ pub fn paste(app: &mut FigApp, event_text: Option<&str>, at: Option<(f64, f64)>)
         }
         // Text from elsewhere when it's newer than our copy, or when we have nothing to paste.
         if let Some(text) = sys_text.filter(|_| app.ui.last_copy.is_some() || app.session.clipboard.nodes.is_empty()) {
-            // A comment's link opens its thread.
-            if text.trim().starts_with("figcraft://comment/") {
-                app.run("comment.open", json!({"link": text.trim()}));
-            } else if figcraft_engine::looks_like_svg(&text) {
-                use base64::Engine as _;
-                let b64 = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
-                app.run_user("file.import", json!({"data": b64, "name": "Pasted SVG.svg", "x": cx, "y": cy, "center": at.is_none()}));
-            } else {
-                app.run("text.create", json!({"text": text, "x": cx, "y": cy}));
-            }
-            return;
+            return paste_text(app, &text, (cx, cy), at.is_none());
         }
     }
-    app.run("edit.paste", at.map_or(json!({}), |(x, y)| json!({"x": x, "y": y})));
+    if !dev_mode_refuses(app, "edit.paste") {
+        app.run("edit.paste", at.map_or(json!({}), |(x, y)| json!({"x": x, "y": y})));
+    }
+}
+
+/// Paste text from another app at `(cx, cy)` (`center`: centred there): a comment's link opens its
+/// thread, SVG imports, anything else becomes a text layer.
+fn paste_text(app: &mut FigApp, text: &str, (cx, cy): (f64, f64), center: bool) {
+    if text.trim().starts_with("figcraft://comment/") {
+        app.run("comment.open", json!({"link": text.trim()}));
+    } else if dev_mode_refuses(app, "edit.paste") {
+        // Dev Mode: the note says why nothing was pasted.
+    } else if figcraft_engine::looks_like_svg(text) {
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+        app.run_user("file.import", json!({"data": b64, "name": "Pasted SVG.svg", "x": cx, "y": cy, "center": center}));
+    } else {
+        app.run("text.create", json!({"text": text, "x": cx, "y": cy}));
+    }
 }
 
 /// The system clipboard's image as PNG bytes, with its size.
@@ -96,6 +111,18 @@ fn clipboard_png(app: &mut FigApp) -> Option<(Vec<u8>, u32, u32)> {
     let mut out = std::io::Cursor::new(Vec::new());
     img.write_to(&mut out, image::ImageFormat::Png).ok()?;
     Some((out.into_inner(), w, h))
+}
+
+/// Dev Mode (the Inspect tab) refuses command `id` from the menus, shortcuts and clipboard: it
+/// edits the design ([`figcraft_engine::devinspect::dev_mode_allows`]). Says so when it does.
+/// shortcut: the layers panel (rename, reorder, hide, lock) and files dropped on the canvas still
+/// edit in Dev Mode; route them through here if people trip over it.
+pub fn dev_mode_refuses(app: &mut FigApp, id: &str) -> bool {
+    let refused = app.ui.right_tab == crate::RightTab::Inspect && !figcraft_engine::devinspect::dev_mode_allows(id);
+    if refused {
+        app.toast(tr("Dev Mode only inspects: switch to Design (Shift+D) to edit"));
+    }
+    refused
 }
 
 /// The Actions palette's tab.
@@ -121,6 +148,9 @@ pub fn record_recent(app: &mut FigApp, key: &str) {
 /// Run a menu, shortcut or palette action by id: actions that need the UI (dialogs, panels, the
 /// clipboard) are handled here, the rest go to the engine.
 pub fn invoke(app: &mut FigApp, id: &str) {
+    if dev_mode_refuses(app, id) {
+        return;
+    }
     match id {
         // Edit ▸ Delete (and the Delete binding) with an interaction open in the Prototype tab
         // removes that interaction, not the layer (#767).
@@ -139,6 +169,10 @@ pub fn invoke(app: &mut FigApp, id: &str) {
             app.run(id, json!({}));
         }
         "file.open" => app.open_dialog(),
+        // From the keyboard or a menu, typing goes on in the new sticky.
+        "board.nextSticky" => {
+            app.run(id, json!({"edit": true}));
+        }
         "plugin.import" => crate::plugins_ui::import_dialog(app),
         "file.import" => app.import_dialog(false),
         "file.placeImage" => app.import_dialog(true),
@@ -1076,7 +1110,7 @@ fn palette(app: &mut FigApp, ctx: &egui::Context) {
     let t = Tokens::get(ctx);
     // Same centre and width as the toolbar pill (it centres on the canvas, not the window),
     // floating 8 px above it. Fixed size: switching tabs never resizes the panel.
-    let bar_w = crate::toolbar::main_width();
+    let bar_w = crate::toolbar::bar_width(app);
     let bar = crate::toolbar::pill_rect(app.canvas.rect, bar_w);
     let area = Rect::from_min_max(pos2(bar.min.x, bar.min.y - 8.0 - (PALETTE_H + 16.0)), pos2(bar.max.x, bar.min.y - 8.0));
     let mut run: Option<String> = None;

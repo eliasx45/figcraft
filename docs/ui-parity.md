@@ -130,7 +130,7 @@ in the table. `crates/ui-egui/src/shortcut_keys_tests.rs` drives the keys a look
 | Bound on other keys (documented conflict) | 1 | Run last plugin: the documentation also gives Ctrl+Alt+P to pixel preview on Windows; the plugin takes Ctrl+Alt+Shift+P there |
 | Missing | 0 | moving the rotation origin (Alt+R, `transform.rotationOrigin`) and placing an object with Enter after choosing its tool (`tool.place`) were the last two |
 | Documented keys a platform keeps | 2 | Ctrl+Space (Windows/Linux keyboard box selection) switches some CJK input methods; F6 goes to a browser's address bar in the web build |
-| Undocumented bindings pinned | 49 | of which Cmd/Ctrl+W, Cmd/Ctrl+N and Ctrl+Tab are taken by browsers (web build) and Ctrl+Alt+T / Ctrl+Alt+L by some Linux desktops |
+| Undocumented bindings pinned | 57 | of which Cmd/Ctrl+W, Cmd/Ctrl+N and Ctrl+Tab are taken by browsers (web build) and Ctrl+Alt+T / Ctrl+Alt+L by some Linux desktops |
 
 - **Newly bound:** A for the Frame tool, Shift+' for the pixel grid (Cmd+' kept: the articles
   disagree), Alt+Cmd+\ / Ctrl+Alt+\ for others' cursors (`view.multiplayerCursors`, new), Ctrl+F6
@@ -173,6 +173,7 @@ in the table. `crates/ui-egui/src/shortcut_keys_tests.rs` drives the keys a look
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-24 | minor | Boards (M12): eight board bindings pinned (tool keys Q sticky, B shapes, X connector, M marker, U highlighter, E eraser, W stamp, and Shift+Cmd/Ctrl+Enter for the next sticky; boards only, on keys no design-file shortcut uses): 49 → 57 pinned |
 | 2026-10-20 | minor | Readable disabled and selected text (#890): the dim text colour (disabled buttons, placeholders, hints) is at least 3:1 against panels, fields and selected rows in both themes (it was 2.1:1 in the light theme), a disabled button is grey with that text instead of fading to 40%, and selected text (renaming a page or layer, any text box) takes the theme's readable green on the highlight (1.4:1 in the dark theme before, now 4.2:1 or more); checked with the colour contrast helper (`theme::tests`). Numbers unchanged |
 | 2026-10-20 | minor | Measuring while nudging (#894): with Alt held over another layer, the arrows nudge the selection (Shift: the big step) and the distances follow every nudge (Alt+arrows used to do nothing); while measuring, the selection's handles and size label hide and both layers keep their outlines (`measure_nudge_tests`). Numbers unchanged |
 | 2026-10-18 | minor | A rename (layers double-click, F2, File ▸ Rename, a page) selects the whole name in the frame its field first draws, so the first key replaces the name instead of being appended. Checked in the app on Windows over the control channel |

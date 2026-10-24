@@ -25,7 +25,7 @@ fn focused(h: &Harness, id: &str) -> bool {
 }
 
 /// Joined through a server's link with `access`: the welcome and the document (a new tab).
-fn joined(h: &mut Harness, access: Access) {
+pub(crate) fn joined(h: &mut Harness, access: Access) {
     h.app.session.execute("collab.join", &json!({"link": "figcraft://join?host=127.0.0.1:47900&file=f&token=AbCdEfGhIjKlMnOpQrStUv"})).unwrap();
     let mut server = Server::new(h.app.session.doc().unwrap().clone(), "", Limits::default());
     let ClientMsg::Hello(me) = Client::hello("f", "", "Ada", "") else { panic!("no hello") };

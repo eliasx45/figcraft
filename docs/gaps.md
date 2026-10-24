@@ -29,7 +29,7 @@ No alpha blockers: the alpha gate in [`roadmap.md`](roadmap.md#alpha-gate) passe
 | 13 | Vector tail: none left (boolean hit testing on the result landed 2026-10-11) | Feature | — | [target-app-parity](target-app-parity.md) |
 | 14 | Variables: extended collections checked on real libraries (the tail landed 2026-10-12) | Feature | 0–1 | [components-parity](components-parity.md) |
 | 15 | Prototyping: media triggers and actions; controllers on macOS, Linux and FreeBSD (controller buttons on key/gamepad triggers, widgets in prototypes landed) | Feature | 2–5 | [prototyping-parity](prototyping-parity.md) |
-| 16 | Dev Mode: import lines inside generated layer trees; the editor extension is left to the MCP server (code connect, Dev Mode plugins and dev resources landed) | Feature | 0–1 | [dev-mode-parity](dev-mode-parity.md) |
+| 16 | Dev Mode: measurements kept on the canvas, a read-only layers panel, publishing mappings from the code repository; the editor extension is left to the MCP server (import lines, compare with versions and an inspect-only canvas landed 2026-10-15) | Feature | 2–4 | [dev-mode-parity](dev-mode-parity.md) |
 | 17 | Branching: branches in live sessions, lists other than fills, strokes and effects merged whole (a branch's own version history and per-item list merges landed 2026-10-12) | Feature | 1–2 | [collaboration-parity](collaboration-parity.md) |
 | 18 | Display P3 on screen: blocked upstream (egui-wgpu picks an 8-bit sRGB surface); gamut warning and soft-proof sRGB landed, as did several windows | Hardware | 4–8 | [hardware-parity](hardware-parity.md) |
 | 19 | AI features | AI | 30–60 | [target-app-parity](target-app-parity.md) |
@@ -37,6 +37,7 @@ No alpha blockers: the alpha gate in [`roadmap.md`](roadmap.md#alpha-gate) passe
 | 21 | Menu items without a command: none left (landed 2026-10-11) | Feature | — | [parity-checklist](parity-checklist.md) |
 | 22 | Screen readers never run; browser has no accessibility tree | UI/UX | 4–8 | [ui-parity](ui-parity.md) |
 | 23 | CMYK output intent for print PDFs | File format | 2–4 | [file-format-parity](file-format-parity.md) |
+| 24 | Boards: the whiteboard tail (timer, voting, widgets, templates, tables, mind maps…) | Feature | 30–60 | [boards-parity](boards-parity.md) |
 
 ## Entries
 
@@ -486,11 +487,22 @@ No alpha blockers: the alpha gate in [`roadmap.md`](roadmap.md#alpha-gate) passe
   host, no spaces, capped) and never fetched: a link added without a name is named after its URL,
   and a link opens only when clicked. The Inspect tab lists, adds, edits and removes them;
   `get_node` / `inspect_document` return them as `devResources`.
-- **Missing:** import lines for connected instances inside a
-  generated layer tree (only the selected layer's own import is shown); publishing mappings from
-  the code repository with a CLI. An editor extension is out of scope: the MCP server already
-  serves design data, code and the connected snippets to agents and editors.
-- **Estimate:** 0–1 h.
+- **Landed (2026-10-15):** generated layer trees (React, Leptos, SwiftUI, Compose) start with the
+  import lines of the connected components they call, once each, also those in a component's
+  definition, in the slots an instance fills and placed by a connected template's instance swaps.
+  Compare changes takes any saved version as the before (`dev.compare {version}`; the view's
+  Compare with menu), for any top-level frame or section. A Dev Mode behaviour suite: the canvas
+  only inspects (presses select, pan and comment; no moving, resizing, drawing, text or vector
+  editing), the menus, shortcuts, nudges, opacity keys and paste refuse design edits with a note
+  while Dev Mode's own edits still run, drawing tools from the toolbar return to the design; the
+  ready list filters and badges Changed items (`inspect.readyForDev {status: changed}`); statuses
+  are refused on layers inside frames. Read-only plugins run from the Inspect tab show their
+  panels.
+- **Missing:** measurements kept on the canvas for others (only hover redlines); the layers panel
+  and files dropped on the canvas still edit in Dev Mode; publishing mappings from the code
+  repository with a CLI. An editor extension is out of scope: the MCP server already serves design
+  data, code and the connected snippets to agents and editors.
+- **Estimate:** 2–4 h.
 
 ### 17. Branching and merging
 - **Landed (2026-10-11):** branches of a file (`branch.*`): File ▸ Create branch… (or the Branches
@@ -555,10 +567,23 @@ No alpha blockers: the alpha gate in [`roadmap.md`](roadmap.md#alpha-gate) passe
   repository (licensing).
 - **Estimate:** 2–4 h once an openly licensed profile is found.
 
+### 24. Boards: the whiteboard tail
+- **Landed (2026-10-24, M12):** board files (`file.newBoard`) with sticky notes, shapes with text,
+  connectors that re-route when what they join moves, marker, highlighter and eraser, stamps, text
+  and sections; a board toolbar and a contextual bar; live sessions sync it all.
+- **Missing:** timer and music, voting sessions, board widgets, templates, tables, mind maps, washi
+  tape, code blocks, audio and huddles, quick-create handles, curved connectors and waypoints,
+  stamps sticking to the objects they land on, a dot grid, `.jam` files
+  ([`boards-parity.md`](boards-parity.md)).
+- **User impact:** boards cover a brainstorm or a flow sketch; facilitated workshops need the
+  timer, voting and templates.
+- **Estimate:** 30–60 h.
+
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-24 | minor | Boards (M12): a file kind of its own (`file.newBoard`, saved in `.figcraft`, carried to live-session joiners) with sticky notes, shapes with text, connectors that re-route when what they join moves (an engine recompute, the same for local edits, undo and others' edits), marker, highlighter and eraser, stamps with the placer's name, a board toolbar and a contextual bar; prototyping and Dev Mode refuse on boards; design files and boards have their own marks on tabs and file rows. New gap 24 (the board tail, 30–60 h); the ranking above it is unchanged |
 | 2026-10-20 | patch | Gap 7: nested effects on large layers stay on the GPU canvas: effect textures cover only what the scene needs (each as far as it reaches), layers holding layers with effects are drawn into one texture, and blocks whose textures don't fit are built again for themselves. The owner's page at 51 %: 28 tiles 20.6 s on the CPU → 0.26 s. Ranks and hours unchanged |
 | 2026-10-20 | patch | Gap 7: images no longer go missing (white or black frames) on the GPU canvas zoomed out: renders leave out the images they don't show, effect textures are drawn in pieces, and a copy of vello's atlas bookkeeping sends what can't fit to the CPU. Ranks and hours unchanged |
 | 2026-10-19 | patch | Gap 7: drop shadows, inner shadows, layer and background blurs, noise and masks drawn on the GPU (compute passes over a smaller copy, kept per tile level); the GPU scene built only where shown, on every core, far images left out, CPU-only layers found without building; images no longer vanish after a render without any (a vello atlas bug). The owner's page: the sharp image after a zoom 0.9–1.8 s → 0.1–0.5 s, zoom steps within a level 4–8 ms. Ranks and hours unchanged |
@@ -574,6 +599,7 @@ No alpha blockers: the alpha gate in [`roadmap.md`](roadmap.md#alpha-gate) passe
 | 2026-10-18 | minor | Gap 1: a real Figma paste of a page of photos came across mostly as grey boxes. Images now download six at a time (two minutes, 512 MB), missing ones keep their hash behind a hatched placeholder, the import report covers pastes with how many images didn't load and why, and File ▸ Relink missing images… fills them in from a `.fig` copy or a folder. Tested on synthetic clipboard HTML only; ranking and hours unchanged |
 | 2026-10-17 | minor | The 2026-10-17 landings. Gap 1: a new Landed entry (community batches #727 and #728, then #745: instance identity and cached library components, overrides by key, text style precedence, grid track sizes, slot content, labels of connectors saved with their path, skip ink, paragraph options, list start numbers, vertical trim, per-point stroke joins, text on a path, image adjustments, images in the message, instance layers' size and resizing overrides, Hug where nothing is recorded; budgets from the file's size; the import report; a `.fig` copy from Save as; paste from another design app), its Missing list cut to what is still left, and the wrong "whether other apps open its files is unknown" replaced by what was checked; all on synthetic files, so the beta blocker and hours stand. Gap 2: server limits, log recovery and web join links in the evidence. Gap 4: menus, the Actions palette and the editor fixes (#733, #735, #736, #729), then Selection colors and smart-selection spacing (#753) landed, none compared side by side. Gap 5: catalog counts re-measured (2,272 entries; drafts at 95–99%; Indonesian, Czech, Turkish and Swedish listed). Gap 8: the Linux and BSD clipboard changes and Wayland window controls, not run there by the maintainers. Ranking and hours unchanged |
 | 2026-10-15 | minor | Gap 7: bounded canvas overscan for smoother panning. Estimates and ranking unchanged. |
+| 2026-10-15 | minor | Gap 16: import lines inside generated layer trees, compare with any saved version, an inspect-only Dev Mode canvas (menus and shortcuts refuse design edits), Changed in the ready list, statuses only on sections and top-level frames, read-only plugins' panels from the Inspect tab. Left: measurements kept on the canvas, a read-only layers panel, publishing mappings with a CLI; 0–1 h → 2–4 h |
 | 2026-10-14 | minor | Russian catalog (M9), reviewed and approved by VanTan: all 2,165 current entries, Русский in Preferences and regional ru tags. Russian integer plurals use one/few/many; contributor display name VanTan added. Existing estimates unchanged. |
 | 2026-10-15 | minor | M0.9: canvas drags use size-aware destinations and Command for nested/oversized insertion; Space preserves parenting, Control (macOS) / S (other platforms) places freely in auto layout; plain-frame parenting previews live, release outside the canvas completes the gesture, and home-edge tolerance uses screen pixels. Focused engine/UI regressions; estimates unchanged. |
 | 2026-10-13 | minor | Gap 1: the experimental `.fig` export writes instance sizes (resized, filling an auto layout, scaled), variables with modes and bindings, shared styles and variable-width strokes, and the import reads them back. Checked by opening written files in other software: resized and scaled instances keep their size and lay their layers out for it, variables with their modes and colour bindings resolve there (a frame set to another mode shows that mode's colours, also inside instances), colour, text, effect and grid styles are listed, and variable-width strokes that are the same on both sides of the path draw with their width; number, string and boolean bindings and bindings on effects, layout guides and gradient stops come across as the values they give but did not show as bound there (their entries now also name the layer field they set, not yet checked there), and strokes wider on one side of the path are written as filled outlines, no longer editable strokes there (the stroke itself is kept as plugin data and our own import puts it back; not yet checked there). Hours and the ranking unchanged |

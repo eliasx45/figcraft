@@ -416,6 +416,53 @@ tips; headless, it only sets the preference.
 {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"export","arguments":{"format":"png","path":"dashboard.png"}}}
 ```
 
+### Boards
+
+A board is a file of its own kind for thinking together: `file.newBoard {name?}` opens one (its
+page is light; `inspect_document` says `kind: "board"`). Board objects are ordinary layers with a
+`board` entry `get_node` shows (`{type: sticky|shape|connector|label|stamp|ink, …}`), so the usual
+commands move, resize, recolour, copy, delete and undo them. On a design file the board commands
+refuse; on a board `proto.*`, `dev.*`, `view.prototype` and `view.devMode` refuse. Each of these is
+one undo step and returns the ids it made:
+
+- `board.sticky {x, y, text?, color?, author?, parent?}` → `{id, text}`: a sticky note (a square
+  frame whose height grows with its note; its text size shrinks as the note gets longer). `color`
+  is a board colour (`yellow orange red pink violet blue green gray`) or a hex colour; `author`
+  defaults to your name (`pref.userName`, or the one a live session gave you; `false` for none).
+- `board.nextSticky {id?, side?: right|below|left|above, edit?}` → `{id, text}`: a sticky of the
+  same colour beside the selected (or edited) one; with `edit: true` the app goes on typing in it
+  (`Shift+Cmd/Ctrl+Enter` in the app does both).
+- `board.shape {shape, x, y, width?, height?, text?, color?, parent?}` → `{id, text}`: a shape with centred,
+  wrapping text: `rectangle roundedRectangle ellipse diamond triangle speechBubble chevron`.
+- `board.connector {from, to, fromSide?, toSide?, style?: straight|elbow, startCap?, endCap?, label?}`
+  → `{id, label?}`: `from`/`to` are layer ids or `{x, y}` page points; sides are `auto` (the side
+  facing the other end) or `top right bottom left`; caps are stroke caps (default an arrow at the
+  end). The connector re-routes itself whenever what it joins moves or resizes, also when someone
+  else in a live session moves it; a deleted end stays where it was as a point. `board.label {id,
+  text}` sets its label (empty removes it).
+- `board.stamp {x, y, stamp: thumbsUp|heart|plusOne|star|question|check}` → `{id}`: a round badge
+  centred there, with your name on it for hover.
+- `board.ink {path | points, highlighter?, color?, select? (default true)}` → `{id}`: a marker (or
+  wide, see-through highlighter) stroke.
+- `board.setColor {ids?, color}`: stickies and shapes take it as their fill, connectors and ink as
+  their line. `board.setStyle {ids?, shape?, fontSize?, style?, startCap?, endCap?}`: a shape's
+  outline and text size, a connector's routing and arrowheads.
+- Tools for `pointer`: `tool.sticky {color?}`, `tool.shape {shape?}`, `tool.connector {style?}`
+  (drag from one object to another), `tool.marker {color?}`, `tool.highlighter {color?}`,
+  `tool.eraser` (drag over strokes), `tool.stamp {stamp?}`; Text and Section are the usual tools.
+
+```json
+{"command": "file.newBoard", "params": {"name": "Retro"}}
+{"command": "board.sticky", "params": {"x": 0, "y": 0, "text": "Went well", "color": "green"}}
+{"command": "board.sticky", "params": {"x": 240, "y": 0, "text": "To improve", "color": "pink"}}
+{"command": "board.connector", "params": {"from": 2, "to": 4, "style": "elbow", "label": "leads to"}}
+{"command": "board.stamp", "params": {"x": 200, "y": 0, "stamp": "plusOne"}}
+```
+
+`from` and `to` are the `id`s the two `board.sticky` calls returned (here `{"id": 2, "text": 3}` and
+`{"id": 4, "text": 5}` in a new board without an author name; a sticky with its author's name takes
+one more id). In a `batch`, step references (`{"from": {"$step": 1}, "to": {"$step": 2}}`, the `id`s steps 1 and 2 returned) avoid counting.
+
 ### Sections, handoff and arrow keys
 
 `run_command` with `object.wrapInSection {ids?, name?}` (Wrap in new section: layers on the page or
@@ -450,6 +497,10 @@ on; `key` resolves keys the way the canvas does. Commands behind keys:
 - `view.designPrototype` (`Shift+E`), `view.devMode` (`Shift+D`) and `view.leftSidebar`
   (`Shift+Cmd+\`) switch the right panel's tab or hide the left sidebar in the app (no-ops headless).
 - `doc.nextTab` / `doc.previousTab` (`Ctrl+Tab` / `Ctrl+Shift+Tab`): the next or previous open file.
+- Board tools (boards only): `tool.sticky` (`Q`), `tool.shape` (`B`), `tool.connector` (`X`),
+  `tool.marker` (`M`), `tool.highlighter` (`U`), `tool.eraser` (`E`), `tool.stamp` (`W`), and
+  `board.nextSticky` (`Shift+Cmd/Ctrl+Enter`, also while typing in a sticky). Keys no design-file
+  shortcut uses; on a design file they refuse.
 - `view.pan {dx, dy, big?}`: the arrow keys with nothing selected (`key ArrowRight` does the same)
   pan the view by 20 screen pixels a step, 200 with `big` (Shift).
 - `view.multiplayerCursors {on?}` (`Alt+Cmd+\`): show or hide others' cursors in a live session.
@@ -1388,7 +1439,9 @@ permissions: without it nothing is downloaded); `plugin.directory.publish {path 
   strings, any other `{…}` stays as written (`unknown` lists placeholder names that aren't
   properties). Then `inspect.code` on an instance or the component returns the import line and the
   snippet instead of generated code (`connected: true`), connected instances inside a generated
-  layer tree are their snippet, and `inspect.componentCode` returns `connected: {importPath, name,
+  layer tree (also in a component's definition, in the content an instance puts in its slots, and
+  the components a connected template's instance swaps place) are their snippet with their import
+  lines once each at the top of the code, per language, and `inspect.componentCode` returns `connected: {importPath, name,
   template, import, code}` with the snippet as `usage`. Example: template `<Button
   variant="primary" icon="{Has icon ? "cart" : "none"}">{label}</Button>` with import path
   `@acme/ui` gives `import { Button } from "@acme/ui";` then `<Button variant="primary" icon="none">{"Buy
@@ -1401,7 +1454,8 @@ permissions: without it nothing is downloaded); `plugin.directory.publish {path 
   warning). `get_node` lists a component's links as `codeLinks`. In the app, the Inspect tab's
   Connect to code section edits them in the Code section's language, with a live preview and a
   Connected badge. An editor extension isn't needed: agents and editors read the same snippets
-  through this server. Plugins whose manifest asks only for `read` also run from the Inspect tab.
+  through this server. Plugins whose manifest asks only for `read` also run from the Inspect tab,
+  with their panels (`plugin.ui`); their callbacks can only read.
 - **Dev resources:** links for developers (docs, code, tickets) on any layer, each a URL and a
   name. `devResource.add {id?, url, name?}` → `{id, index}` (no name: the URL without its scheme,
   `www.` and a trailing slash; no page title is looked up), `devResource.edit {id?, index, url?,
@@ -1440,17 +1494,23 @@ permissions: without it nothing is downloaded); `plugin.directory.publish {path 
   tab filters the callouts by category and edits the categories (colour, name, delete, add); each
   note has a category menu.
 - **Ready for dev:** frames at the top of a page or section, and sections, carry a handoff status
-  (`node.set {devStatus: none|readyForDev|completed}`). `inspect.readyForDev {status?:
-  readyForDev|completed|any, page?}` lists them across pages (or on one page) in page and layer
-  order: `{items: [{id, name, page, status}]}`. The Inspect tab sets the status of the selected
-  frames and, with nothing selected, lists them with a status filter (click one to go to it, or its
-  focus button to open it in the focus view).
+  (`node.set {devStatus: none|readyForDev|completed}`; other layers are refused a status).
+  `inspect.readyForDev {status?: readyForDev|changed|completed|any, page?}` lists them across pages
+  (or on one page) in page and layer order: `{items: [{id, name, page, status, changed}]}`
+  (`changed`: ready for dev and edited since). The Inspect tab sets the status of the selected
+  frames and, with nothing selected, lists them with a status filter (Ready for dev, Changed,
+  Completed, Any status; changed ones carry a Changed badge; click one to go to it, or its focus
+  button to open it in the focus view). In the app's Dev Mode the canvas only inspects: presses
+  select (and pan, and comment), never move, resize, draw or edit text and vectors, and the menus
+  and shortcuts refuse commands that edit the design (Dev Mode's own annotations, statuses, dev
+  resources, code connections and comments still work); choosing a drawing tool in the toolbar
+  goes back to the design. Commands sent over MCP or the control channel aren't affected.
 - **Compare changes:** when a layer marked Ready for dev first changes (it turns "Changed"), the
   file keeps a copy of it and everything in it as it was just before that edit (saved in the
   `.figcraft` file only while there is a change; resolving the change, marking it again, another
   status or deleting it drops the copy, so the next change compares with that state).
-  `dev.compare {id?, show?}` → `{id, name, changed, snapshot, added, removed, modified, truncated,
-  changes: [{id, name, type, change: added|removed|changed, depth, layers, properties?: [{section,
+  `dev.compare {id?, version?, show?}` → `{id, name, changed, snapshot, added, removed, modified,
+  truncated, version: {id, name, time} | null, changes: [{id, name, type, change: added|removed|changed, depth, layers, properties?: [{section,
   property, before, after, text}]}]}`: layers matched by id, added and removed ones listed as a
   whole (`layers` counts what's inside), changed ones with their properties formatted like Inspect
   (`width 120 → 136`, `fill #FF0000 → #E03030`, `text “Welcome” → “Hello”`, `parent Badge → Screen`,
@@ -1458,7 +1518,11 @@ permissions: without it nothing is downloaded); `plugin.directory.publish {path 
   opacity, visibility, name), nested layers and instance contents included. `snapshot: false` means
   the frame changed before copies were kept (an older file). `show: true` opens the compare view in
   the app: before and now side by side (or overlaid with a slider), changed layers outlined (added
-  green, changed orange, removed red), the list of changes and Resolve change.
+  green, changed orange, removed red), the list of changes and Resolve change. With `version` (an id
+  from `version.list`) any top-level frame or section, ready for dev or not, is compared with that
+  saved version instead (a layer the version doesn't have was added as a whole); the compare view
+  picks it at the bottom (Compare with: When marked ready, or a version; a frame that isn't ready
+  for dev compares with the newest version), and `ui.set {devCompareVersion}` sets it.
 - **Focus view:** `dev.focus {id? | direction: next|previous}` → `{id, name, page, index, count}`
   shows one top-level frame or section alone on the canvas (fitted, selected, other layers neither
   drawn nor hit), switching page when needed; `direction` steps through the ready-for-dev frames

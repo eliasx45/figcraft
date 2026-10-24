@@ -1,0 +1,61 @@
+# Boards parity
+
+> **Last reviewed:** 2026-10-24 · **Last updated:** 2026-10-24 · **Change:** major (created: board files, the first slice of the whiteboard workflow) · **Target:** the incumbent's whiteboard product (behaviour from its public help centre)
+
+**Breadth ~35%, ready ~20% (estimated, erring low).** A board is a FigCraft file of its own kind
+(`file.newBoard`) with sticky notes, shapes with text, connectors that follow what they join,
+marker, highlighter and eraser, stamps, text and sections, edited together in the existing live
+sessions. The facilitation tools (timer, voting, widgets), templates, tables, mind maps and the
+rest of the tail are missing. Remaining: ~30–60 h. Tracked as area 22 of
+[`target-app-parity.md`](target-app-parity.md) (not in its weighted sum: the target there is the
+design product). The work item is gap 24 in [`gaps.md`](gaps.md).
+
+## How boards are built
+
+Board objects are ordinary layers with a small `board` field on the node (`figcraft_doc::BoardItem`),
+so rendering, hit testing, undo, saving, SVG/PNG/PDF export, copy and paste and live sessions work
+on them unchanged. The file kind (`Document.kind`) is saved in `.figcraft` and reaches people who
+join a live session in their snapshot. What follows from the metadata (a sticky's text size, a
+shape's text room, connector routes and their labels) is recomputed in the engine's normalize pass,
+deterministically from the document, so local edits, undo and edits from others in a live session
+all end with the same geometry.
+
+## Features
+
+| Feature | Status | Notes |
+|---|---|---|
+| Board files: File ▸ New board, the home screen's New board card, a light page | done | `file.newBoard`; the kind shows in `inspect_document`, tabs and file rows (a note mark; design files a pen nib) |
+| Board toolbar at the bottom | done | Move/Hand, Marker/Highlighter/Eraser, Sticky (colour flyout), Shapes (flyout), Connector, Text, Section, Stamp (flyout), Comment, Resources, Actions, the Design panel's button |
+| Design panel hidden by default; a contextual bar above the selection | done | colour, shape, text size (S/M/L/XL), connector straight/elbow and its arrow; the Design panel opens with its button or View ▸ Design panel |
+| Prototyping and Dev Mode refuse on boards | done | `proto.*`, `dev.*`, `view.prototype`, `view.devMode` say why |
+| Sticky notes | done | a square frame (200 wide, growing taller through auto layout), 8 soft colours, a soft shadow, the note's text size shrinking as it grows (24 → 11, by characters and lines), the author's name at the bottom; a click places one and starts typing; Enter or a double-click edits; Shift+Cmd/Ctrl+Enter adds the next one beside it |
+| Sticky options: hide the author, change size presets, sticky stacks | partial | `board.sticky {author: false}`; no size presets or stacks |
+| Shapes with text | done | rectangle, rounded rectangle, ellipse, diamond, triangle, speech bubble, chevron; text centred and wrapping inside the outline; shape type and text size from the contextual bar |
+| Shape auto-fit to its text, more shapes (cylinder, cross, star…), shape libraries | missing | |
+| Connectors | done | from a layer's side (the facing one, or one named) to another layer or a free point, straight or elbow, arrowheads (the stroke's caps), a label in the middle (double-click to add); re-routed when either end moves or resizes; a deleted end stays where it was |
+| Curved connectors, connector waypoints, dragging an end to re-attach | missing | ends are attached when drawn or through `board.connector` |
+| Quick-create handles (drag out a connected copy) | missing | |
+| Marker and highlighter | done | the Pencil's stroke fitting with board presets: marker opaque, highlighter wide, see-through and multiplying |
+| Eraser | done | drag over marker and highlighter strokes to remove them, one undo step |
+| Pen colours and widths in the toolbar | partial | `tool.marker {color}`, `tool.highlighter {color}`; colour changes on a selected stroke from the contextual bar |
+| Stamps | done | thumbs up, heart, plus one, star, question, check: round badges drawn as vectors, the placer's name on hover |
+| Stamps sticking to the object they land on, the stamp wheel, emotes, stickers | missing | |
+| Text and sections | done | the existing Text tool and sections |
+| Live sessions: cursors, selections, cursor chat, spotlight | done | the existing sessions; board objects, connectors following moved objects, colours and stamps sync both ways (checked with two app instances) |
+| Timer and music | missing | |
+| Voting sessions | missing | |
+| Board widgets | missing | design-file widgets exist (`crates/engine/src/widgets.rs`), not wired to boards |
+| Templates (retrospective, brainstorm, flow chart…) | missing | |
+| Tables | missing | |
+| Mind maps | missing | |
+| Washi tape, code blocks, image cropping on boards | missing | images can be placed as in design files |
+| Audio and huddles | missing | |
+| AI features (summaries, sorting stickies, generating boards) | missing | |
+| Dot grid on the page | missing | the canvas grid is drawn over the render; a dot grid needs a render pass under the layers |
+| `.jam` import and export | missing | see [`file-format-parity.md`](file-format-parity.md) |
+
+## Revision history
+
+| Date | Change | Summary |
+|---|---|---|
+| 2026-10-24 | major | Created with board files (M12): sticky notes, shapes with text, connectors, ink and eraser, stamps, the board toolbar and contextual bar, live-session sync |

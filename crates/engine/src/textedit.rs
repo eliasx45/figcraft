@@ -32,7 +32,9 @@ pub fn begin(s: &mut Session, id: NodeId, caret: Option<usize>, created: bool) -
 pub fn end(s: &mut Session) -> Result<()> {
     let Some(te) = s.ds()?.text_edit.clone() else { return Ok(()) };
     s.ds_mut()?.text_edit = None;
-    let empty = text_of(s, te.id).map(|t| t.characters.trim().is_empty()).unwrap_or(false);
+    // A board object's text (a sticky's note) stays when emptied; the object is selected again.
+    let owner = s.doc().ok().and_then(|d| crate::board::owner_of_text(d, te.id));
+    let empty = owner.is_none() && text_of(s, te.id).map(|t| t.characters.trim().is_empty()).unwrap_or(false);
     if empty {
         let doc = s.doc_mut()?;
         let _ = doc.remove(te.id);
@@ -50,6 +52,9 @@ pub fn end(s: &mut Session) -> Result<()> {
     }
     s.commit_interaction()?;
     let ds = s.ds_mut()?;
+    if let Some(o) = owner {
+        ds.selection = vec![o];
+    }
     ds.revision += 1;
     Ok(())
 }
