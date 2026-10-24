@@ -981,6 +981,8 @@ impl Session {
         {
             ds.end_preview();
         }
+        // Not inside a text editing session that already ended: this edit gets its own step.
+        self.settle_text_interaction();
         let before = self.ds().ok().map(|d| (d.doc.clone(), d.selection.clone(), d.page, d.uid));
         let result = guard::run(id, || (spec.run)(self, params))
             .and_then(|v| self.check_instance_structure(id, &before).map(|()| v))
@@ -1128,9 +1130,21 @@ impl Session {
         }
     }
 
+    /// A text editing session's gesture left open after its editing ended without
+    /// [`textedit::end`] (a tool change, a page switch, a cleared selection…) becomes its undo
+    /// step now. Left open, it would swallow every later edit (none gets an undo step) and the next
+    /// gesture would start from its stale snapshot, wiping everything made since.
+    pub(crate) fn settle_text_interaction(&mut self) {
+        let orphaned = self.ds().is_ok_and(|ds| ds.text_edit.is_none() && ds.interaction.as_ref().is_some_and(|it| it.label == textedit::LABEL));
+        if orphaned {
+            let _ = self.commit_interaction();
+        }
+    }
+
     /// Start a gesture: later [`preview`](Self::preview) calls re-apply edits to this snapshot.
     pub fn begin_interaction(&mut self, label: &str) -> Result<()> {
         textpreview::end(self);
+        self.settle_text_interaction();
         if let Some(why) = self.active_read_only() {
             return Err(EngineError::Disabled(label.to_string(), why.into()));
         }
@@ -1196,6 +1210,7 @@ impl Session {
 
     pub fn undo(&mut self) -> Result<bool> {
         textpreview::end(self);
+        self.settle_text_interaction();
         let live = self.ds().is_ok_and(|d| self.live_doc(d.uid));
         let ds = self.ds_mut()?;
         if ds.preview.is_some() {
@@ -1233,6 +1248,7 @@ impl Session {
 
     pub fn redo(&mut self) -> Result<bool> {
         textpreview::end(self);
+        self.settle_text_interaction();
         let live = self.ds().is_ok_and(|d| self.live_doc(d.uid));
         let ds = self.ds_mut()?;
         if ds.preview.is_some() {

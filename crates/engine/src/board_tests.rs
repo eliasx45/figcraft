@@ -429,3 +429,108 @@ fn a_design_file_without_board_objects_skips_the_board_passes() {
     assert_eq!(drawn(&o, c), route(o.doc().unwrap(), &connector(&o, c)).unwrap(), "re-routed after the frame moved");
     assert_eq!(o.doc().unwrap().board_hint(), Some(true));
 }
+
+/// The ids of the board objects of kind `f` in the document.
+fn board_items(s: &Session, f: impl Fn(&BoardItem) -> bool) -> Vec<NodeId> {
+    s.doc().unwrap().nodes().filter(|n| n.board.as_ref().is_some_and(&f)).map(|n| n.id).collect()
+}
+
+#[test]
+fn a_tool_change_while_typing_in_a_new_sticky_keeps_later_objects_and_their_undo_steps() {
+    // Regression: choosing another tool while typing in a sticky dropped the text edit but left
+    // its gesture open, so later objects got no undo step and the next drag rolled the document
+    // back to the gesture's snapshot, wiping them ("no such node").
+    for mut s in [design(), board()] {
+        s.execute("tool.sticky", &json!({})).unwrap();
+        s.pointer(&PointerEvent::at(PointerKind::Down, 100.0, 100.0, 1.0)).unwrap();
+        s.pointer(&PointerEvent::at(PointerKind::Up, 100.0, 100.0, 1.0)).unwrap();
+        assert!(s.ds().unwrap().text_edit.is_some(), "typing in the new sticky");
+        crate::textedit::insert(&mut s, "Note").unwrap();
+        // Another tool, then a shape placed with it.
+        s.execute("tool.shape", &json!({})).unwrap();
+        assert!(s.ds().unwrap().text_edit.is_none());
+        assert!(s.ds().unwrap().interaction.is_none(), "the text edit's gesture ended with it");
+        s.pointer(&PointerEvent::at(PointerKind::Down, 600.0, 100.0, 1.0)).unwrap();
+        s.pointer(&PointerEvent::at(PointerKind::Up, 600.0, 100.0, 1.0)).unwrap();
+        let shapes = board_items(&s, |b| matches!(b, BoardItem::Shape { .. }));
+        let [shape] = shapes[..] else { panic!("one shape: {shapes:?}") };
+        assert_eq!(s.undo_labels(3), ["Shape with text", "Edit text", "Sticky note"]);
+        // Drag the new shape (by its fill, away from its centred text and its handles).
+        let x0 = node(&s, shape).transform.translation().x;
+        s.pointer(&PointerEvent::at(PointerKind::Down, 560.0, 60.0, 1.0)).unwrap();
+        s.pointer(&PointerEvent::at(PointerKind::Move, 600.0, 60.0, 1.0)).unwrap();
+        s.pointer(&PointerEvent::at(PointerKind::Move, 660.0, 60.0, 1.0)).unwrap();
+        s.pointer(&PointerEvent::at(PointerKind::Up, 660.0, 60.0, 1.0)).unwrap();
+        assert!(s.doc().unwrap().contains(shape), "the shape survives the drag");
+        assert_eq!(node(&s, shape).transform.translation().x, x0 + 100.0);
+        assert_eq!(board_items(&s, |b| matches!(b, BoardItem::Sticky { .. })).len(), 1, "the sticky survives too");
+        assert_eq!(s.undo_labels(2), ["Move", "Shape with text"]);
+        // Undo takes back only the drag, then only the shape.
+        s.undo().unwrap();
+        assert_eq!(node(&s, shape).transform.translation().x, x0);
+        s.undo().unwrap();
+        assert!(!s.doc().unwrap().contains(shape));
+        assert_eq!(board_items(&s, |b| matches!(b, BoardItem::Sticky { .. })).len(), 1);
+    }
+}
+
+#[test]
+fn a_text_edit_gesture_left_open_never_swallows_later_commands() {
+    // However text editing ends, a command run afterwards is an undo step of its own and a later
+    // gesture starts from the current document, not the text edit's stale snapshot.
+    let mut s = design();
+    let r = s.execute("board.sticky", &json!({"x": 0, "y": 0})).unwrap();
+    assert!(crate::board::edit_text(&mut s, id(&r, "text")).unwrap());
+    crate::textedit::insert(&mut s, "Hi").unwrap();
+    // Editing dropped behind the engine's back (as old paths did).
+    s.ds_mut().unwrap().text_edit = None;
+    let rect = id(&s.execute("shape.rectangle", &json!({"x": 600, "y": 0, "width": 100, "height": 100})).unwrap(), "id");
+    assert!(s.ds().unwrap().interaction.is_none());
+    assert_eq!(s.undo_labels(2)[1], "Edit text");
+    s.begin_interaction("Move").unwrap();
+    s.preview(|_, _| Ok(())).unwrap();
+    s.commit_interaction().unwrap();
+    assert!(s.doc().unwrap().contains(rect), "a later gesture keeps the rectangle");
+    s.undo().unwrap();
+    assert!(!s.doc().unwrap().contains(rect), "undo takes back the rectangle alone");
+    assert!(s.doc().unwrap().contains(id(&r, "id")));
+}
+
+#[test]
+fn ink_and_connectors_default_to_light_on_a_dark_page_and_keep_a_chosen_colour() {
+    let stroke = |s: &Session, id: NodeId| node(s, id).strokes.first().and_then(|p| p.solid_color()).unwrap();
+    let ink = |s: &mut Session| id(&s.execute("board.ink", &json!({"points": [[0, 0], [100, 40]]})).unwrap(), "id");
+    // A board's light page: dark defaults.
+    let mut b = board();
+    let i = ink(&mut b);
+    assert!(stroke(&b, i).luminance() < 0.05);
+    // A design file's dark page: light defaults that read on it.
+    let mut s = design();
+    s.execute("page.setBackground", &json!({"color": "#1E1E1E"})).unwrap();
+    let page_bg = figcraft_color::Color::from_rgb8_const(0x1E, 0x1E, 0x1E);
+    let i = ink(&mut s);
+    assert!(stroke(&s, i).contrast(page_bg) > 4.5, "marker visible on the dark page");
+    let c = id(&s.execute("board.connector", &json!({"from": {"x": 0, "y": 200}, "to": {"x": 300, "y": 200}})).unwrap(), "id");
+    assert!(stroke(&s, c).contrast(page_bg) > 4.5, "connector visible on the dark page");
+    // A colour the user chose stays, whatever the page.
+    s.execute("tool.marker", &json!({"color": "#336699"})).unwrap();
+    let i = ink(&mut s);
+    assert_eq!(stroke(&s, i).to_hex(), "336699");
+}
+
+#[test]
+fn a_marker_press_with_a_stale_position_draws_no_straight_line_from_it() {
+    // A press reported where the pointer last was (on the toolbar that chose the tool), then the
+    // pen's real position: the stroke starts at the first move, not with a line from the toolbar.
+    let mut s = design();
+    s.execute("tool.marker", &json!({})).unwrap();
+    s.pointer(&PointerEvent::at(PointerKind::Down, 0.0, 900.0, 1.0)).unwrap();
+    for x in [400.0, 420.0, 440.0] {
+        s.pointer(&PointerEvent::at(PointerKind::Move, x, 300.0, 1.0)).unwrap();
+    }
+    s.pointer(&PointerEvent::at(PointerKind::Up, 460.0, 300.0, 1.0)).unwrap();
+    let doc = s.doc().unwrap();
+    let ink = doc.nodes().find(|n| n.board == Some(BoardItem::Ink)).map(|n| n.id).expect("a stroke");
+    let b = doc.world_bounds(ink).unwrap();
+    assert!(b.x0 > 390.0 && b.y1 < 310.0, "only the real stroke: {b:?}");
+}

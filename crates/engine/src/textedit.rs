@@ -11,11 +11,14 @@ fn text_of(s: &Session, id: NodeId) -> Result<TextData> {
     }
 }
 
+/// The label of the gesture a text editing session holds open (one undo step per session).
+pub(crate) const LABEL: &str = "Edit text";
+
 /// Start editing text node `id` with the caret at `caret` (None = select all).
 pub fn begin(s: &mut Session, id: NodeId, caret: Option<usize>, created: bool) -> Result<()> {
     let t = text_of(s, id)?;
     let n = t.char_count();
-    s.begin_interaction("Edit text")?;
+    s.begin_interaction(LABEL)?;
     let ds = s.ds_mut()?;
     let (caret, anchor) = match caret {
         Some(c) => (c.min(n), c.min(n)),

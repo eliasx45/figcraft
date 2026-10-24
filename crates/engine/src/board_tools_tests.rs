@@ -201,7 +201,7 @@ fn the_shape_stamp_highlighter_and_connector_tools_and_double_clicks() {
     s.execute("tool.highlighter", &json!({"color": "pink"})).unwrap();
     assert_eq!(Some(s.tool.board.highlighter), board_color("pink"));
     s.execute("tool.marker", &json!({"color": "#336699"})).unwrap();
-    assert_eq!(s.tool.board.marker.to_hex(), "336699");
+    assert_eq!(s.tool.board.marker.map(|c| c.to_hex()).as_deref(), Some("336699"));
     // A connector drag that is only a click, or from an object to itself, makes nothing.
     s.execute("tool.connector", &json!({"style": "straight"})).unwrap();
     click(&mut s, 100.0, 100.0);

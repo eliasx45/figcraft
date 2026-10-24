@@ -634,6 +634,10 @@ pub(crate) fn readable_text_fills(doc: &Document, parent: NodeId) -> Option<Vec<
     dark.unwrap_or(false).then(|| vec![figcraft_color::Paint::solid(figcraft_color::Color::WHITE)])
 }
 
+/// How far (screen pixels) a freehand stroke's first move may be from its press before the press is
+/// taken as stale and the stroke starts at the move instead.
+const STALE_PRESS_PX: f64 = 160.0;
+
 const ANCHORS: [&str; 9] = ["tl", "t", "tr", "l", "c", "r", "bl", "b", "br"];
 
 impl ToolState {
@@ -1000,10 +1004,11 @@ impl Session {
             let sel = self.selection();
             let _ = crate::shapebuilder::arrangement(self, &sel);
         }
+        // Another tool ends text editing the proper way: the session becomes its undo step.
+        if t != ToolId::Text && t != ToolId::Move && self.ds().is_ok_and(|d| d.text_edit.is_some()) {
+            let _ = crate::textedit::end(self);
+        }
         if let Ok(ds) = self.ds_mut() {
-            if t != ToolId::Text && t != ToolId::Move {
-                ds.text_edit = None;
-            }
             ds.revision += 1;
         }
     }
@@ -1549,6 +1554,16 @@ impl Session {
             }
             Gesture::Pencil { points, pressure } => {
                 let (mut pts, mut pressure) = (points.clone(), pressure.clone());
+                // A press can arrive with a stale position (the last one the window saw, e.g. on
+                // the toolbar item that chose the tool, when a pen or touch reports its move after
+                // the press): a first move that far from it starts the stroke where the pointer
+                // really is, instead of drawing a straight line from there.
+                if let [only] = pts[..]
+                    && (only - ev.p()).hypot() * ev.zoom.max(1e-6) > STALE_PRESS_PX
+                {
+                    pts = vec![ev.p()];
+                    pressure = vec![ev.pressure];
+                }
                 if pts.last().is_none_or(|l| (*l - ev.p()).hypot() > 0.5 / ev.zoom.max(1e-6)) {
                     pts.push(ev.p());
                     pressure.push(ev.pressure);

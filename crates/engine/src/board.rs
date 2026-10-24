@@ -35,6 +35,10 @@ const INK: Color = Color::from_rgb8_const(0x1E, 0x1E, 0x1E);
 const AUTHOR_INK: Color = Color::from_rgb8_const(0x5C, 0x5A, 0x55);
 /// Connectors' default colour and weight.
 const LINE: Color = Color::from_rgb8_const(0x3A, 0x39, 0x36);
+/// The marker's and connectors' defaults on a dark page (a design file's), where the dark ones
+/// above can't be seen.
+const INK_ON_DARK: Color = Color::from_rgb8_const(0xEE, 0xEE, 0xEE);
+const LINE_ON_DARK: Color = Color::from_rgb8_const(0xB8, 0xB6, 0xB0);
 const LINE_WEIGHT: f64 = 2.0;
 /// Marker and highlighter strokes: (weight, opacity).
 const MARKER: (f64, f32) = (4.0, 1.0);
@@ -52,7 +56,8 @@ pub struct BoardTool {
     pub shape: BoardShape,
     pub stamp: Stamp,
     pub routing: Routing,
-    pub marker: Color,
+    /// The marker colour chosen (None: the default, dark ink, or light ink on a dark page).
+    pub marker: Option<Color>,
     pub highlighter: Color,
 }
 
@@ -64,7 +69,7 @@ impl Default for BoardTool {
             shape: BoardShape::Rectangle,
             stamp: Stamp::ThumbsUp,
             routing: Routing::Elbow,
-            marker: INK,
+            marker: None,
             highlighter: Color::from_rgb8_const(0xFF, 0xD2, 0x1F),
         }
     }
@@ -149,7 +154,7 @@ pub fn specs() -> Vec<CommandSpec> {
         }),
         spec!("tool.marker", "Marker", "{color?}", false, |s, p| {
             if let Some(c) = color_param("tool.marker", p)? {
-                s.tool.board.marker = c;
+                s.tool.board.marker = Some(c);
             }
             board_tool(s, ToolId::Marker)
         }),
@@ -538,12 +543,14 @@ fn ink_cmd(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "board.ink";
     require(s, cmd)?;
     let high = boolean(p, "highlighter").unwrap_or(false);
-    let color = color_param(cmd, p)?.unwrap_or(if high { s.tool.board.highlighter } else { s.tool.board.marker });
+    let page = s.page()?;
+    let dark = dark_page(s.doc()?, page);
+    let marker = s.tool.board.marker.unwrap_or(if dark { INK_ON_DARK } else { INK });
+    let color = color_param(cmd, p)?.unwrap_or(if high { s.tool.board.highlighter } else { marker });
     let (weight, opacity) = if high { HIGHLIGHTER } else { MARKER };
     if get(p, "path").is_none() && get(p, "points").is_none() {
         return Err(bad(cmd, "`path` or `points` is required"));
     }
-    let page = s.page()?;
     let select = boolean(p, "select").unwrap_or(true);
     let mut q = json!({"type": "vector", "parent": page, "closed": false, "select": select, "name": if high { "Highlight" } else { "Ink" }, "props": {
         "fills": [], "strokes": [color.to_css_hex()], "strokeWeight": weight, "strokeCap": "round", "strokeJoin": "round", "strokeAlign": "center",
@@ -594,6 +601,11 @@ fn end_param(cmd: &str, s: &Session, p: &Value, key: &str, side_key: &str) -> Re
     }
 }
 
+/// Whether `page` has a dark background (a design file's usually does; a board's never).
+fn dark_page(doc: &Document, page: NodeId) -> bool {
+    matches!(doc.node(page).map(|n| &n.kind), Some(NodeKind::Page { background, .. }) if background.is_dark())
+}
+
 fn connector_cmd(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "board.connector";
     require(s, cmd)?;
@@ -611,13 +623,14 @@ fn connector_cmd(s: &mut Session, p: &Value) -> Result<Value> {
     let c = Connector { from, to, routing };
     let page = s.page()?;
     let doc = s.doc_mut()?;
+    let line = if dark_page(doc, page) { LINE_ON_DARK } else { LINE };
     let pts = route(doc, &c).ok_or_else(|| bad(cmd, "the ends can't be placed"))?;
     if pts.windows(2).all(|w| w.first() == w.get(1)) {
         return Err(bad(cmd, "the ends are in the same place"));
     }
     let id = add(doc, page, NodeKind::Vector { network: VectorNetwork::default() }, "Connector", (0.0, 0.0), (0.0, 0.0), |n| {
         n.fills.clear();
-        n.strokes = vec![Paint::solid(LINE)];
+        n.strokes = vec![Paint::solid(line)];
         n.stroke.weight = LINE_WEIGHT;
         n.stroke.join = StrokeJoin::Round;
         n.stroke.cap_start = start;

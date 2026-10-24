@@ -105,9 +105,9 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
         spec!("select.all", "Select all", "{}", false, select_all),
         spec!("select.none", "Select none", "{}", false, |s, _| {
+            crate::textedit::end(s)?;
             s.set_selection(vec![]);
             if let Ok(ds) = s.ds_mut() {
-                ds.text_edit = None;
                 ds.vector_edit = None;
             }
             ok()
