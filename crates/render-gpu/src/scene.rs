@@ -112,9 +112,6 @@ pub fn cpu_only(doc: &Document, top: NodeId) -> Option<Fallback> {
         if n.fills.iter().chain(&n.strokes).any(|p| p.visible && matches!(p.kind, PaintKind::Pattern(_))) {
             return Some("pattern fills");
         }
-        if n.audio.is_some() {
-            return Some("audio waveforms");
-        }
         if n.effects.iter().any(|e| e.visible && matches!(e.kind, EffectKind::Texture(_) | EffectKind::Glass(_))) {
             return Some("effects (texture, glass)");
         }
@@ -757,8 +754,6 @@ impl Builder<'_> {
                 over.iter().for_each(|o| o.draw(sc));
                 Ok(())
             }
-            // Waveforms, rulers and markers are drawn by the CPU renderer.
-            _ if n.audio.is_some() => Err("audio waveforms"),
             _ => {
                 let closed = figcraft_doc::geometry::is_closed(n) || matches!(n.kind, NodeKind::BooleanOp { .. });
                 let clips = n.clip && n.kind.is_frame_like() && !n.children.is_empty();
@@ -767,6 +762,9 @@ impl Builder<'_> {
                     self.fills(sc, path, *rule, &n.fills, w, h, xf)?;
                 }
                 over.iter().for_each(|o| o.draw(sc));
+                if let Some(a) = &n.audio {
+                    self.audio(sc, n, a, xf);
+                }
                 if !matches!(n.kind, NodeKind::BooleanOp { .. }) && !n.children.is_empty() && !n.hides_contents() {
                     if clips {
                         // The CPU draws clipped children into a layer of their own: an isolated group.
@@ -787,6 +785,19 @@ impl Builder<'_> {
                     self.fills(sc, &area, rule, &n.strokes, w, h, xf)?;
                 }
                 Ok(())
+            }
+        }
+    }
+
+    /// An audio clip's waveform, ruler and markers (over the fills, under the children), the
+    /// CPU renderer's pieces filled as they are. One bar per device pixel column: the scene
+    /// belongs to its scale.
+    fn audio(&mut self, sc: &mut Scene, n: &Node, a: &figcraft_doc::AudioClip, xf: Affine) {
+        self.sampled = true;
+        for p in figcraft_render::audio::pieces(n, a, self.scale) {
+            let c = p.color.with_alpha(p.color.a * p.alpha.clamp(0.0, 1.0));
+            if c.a > 0.0 {
+                sc.fill(Fill::NonZero, xf * p.at, pc(c), None, &p.path);
             }
         }
     }

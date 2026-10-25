@@ -171,18 +171,95 @@ fn a_render_after_two_without_images_has_the_whole_atlas() {
     assert!(m2.resolve(&[quarter(5), quarter(6), quarter(7), quarter(8)]));
 }
 
-#[test]
-fn audio_strips_nested_in_frames_draw_their_waveform_on_the_cpu() {
-    // The GPU scene has no waveforms: a board holding an audio strip (selected or not) must fall back,
-    // or the strip shows as its bare fill.
+/// A board holding a card holding a 480 × 70 strip of a 4 s clip (quiet, then loud) with a ruler
+/// and a labelled marker at 1 s.
+fn audio_board() -> (Document, figcraft_doc::NodeId) {
+    use figcraft_doc::{AudioClip, AudioMarker, Peaks};
     let mut d = Document::new("t");
     let page = d.first_page().unwrap();
     let board = d.create(page, NodeKind::Frame, "Board", 0.0, 0.0, 600.0, 200.0).unwrap();
     let card = d.create(board, NodeKind::Frame, "Card", 10.0, 10.0, 500.0, 100.0).unwrap();
     let strip = d.create(card, NodeKind::Frame, "Audio · S1", 10.0, 10.0, 480.0, 70.0).unwrap();
+    let mut a = AudioClip::new("h", "x.wav", 4.0, 48_000, 1);
+    a.peak_rate = 10;
+    a.peaks = Peaks(std::sync::Arc::new((0..40).map(|i| if i < 20 { (i * 6) as u8 } else { 255 }).collect()));
+    a.color = Color::from_rgb8_const(0, 255, 0);
+    a.ruler = true;
+    a.markers.push(AudioMarker { time: 1.0, label: "Cut".into(), color: Some(Color::from_rgb8_const(255, 0, 0)) });
+    let n = d.get_mut(strip).unwrap();
+    n.fills = vec![Paint::solid(Color::from_hex("202020").unwrap())];
+    n.audio = Some(Box::new(a));
+    (d, board)
+}
+
+#[test]
+fn audio_strips_nested_in_frames_draw_on_the_gpu() {
+    // Waveform, ruler and markers are vello fills: a board holding an audio strip stays on the GPU,
+    // and its scene belongs to the scale it was built at (one bar per device pixel column).
+    let (d, board) = audio_board();
     assert_eq!(crate::scene::cpu_only(&d, board), None);
-    d.get_mut(strip).unwrap().audio = Some(Box::new(figcraft_doc::AudioClip::new("h", "x.wav", 1.0, 48_000, 1)));
-    assert_eq!(crate::scene::cpu_only(&d, board), Some("audio waveforms"));
+    let mut images = crate::Images::default();
+    let mut b = crate::Builder {
+        doc: &d,
+        skip: &[],
+        images: &mut images,
+        scale: 2.0,
+        sampled: false,
+        lod: false,
+        top: board,
+        fx: Vec::new(),
+        drawn: std::collections::HashMap::new(),
+        open: 0,
+        in_fx: 0,
+        under: None,
+        area: None,
+        partial: false,
+    };
+    let mut sc = vello::Scene::new();
+    assert_eq!(b.node(&mut sc, board, figcraft_geom::Affine::IDENTITY, 0), Ok(()));
+    assert!(b.sampled);
+    assert!(sc.encoding().n_paths > 10, "{} paths", sc.encoding().n_paths);
+}
+
+#[test]
+#[ignore = "needs a GPU"]
+fn audio_strips_on_the_gpu_match_the_cpu() {
+    use figcraft_render::tiles::{CpuTilePainter, Painted, TilePainter, tiles_in};
+    let (d, board) = audio_board();
+    let page = d.first_page().unwrap();
+    let Ok(gpu) = crate::Gpu::new() else { return };
+    let mut g = crate::GpuTilePainter::new(gpu);
+    g.keep_on_gpu(false);
+    let doc = std::sync::Arc::new(d);
+    let _ = board;
+    let tiles = tiles_in(figcraft_geom::Rect::new(0.0, 0.0, 600.0, 200.0), 1, 64).unwrap();
+    let opts = figcraft_render::Options::default();
+    let pixels = |out: Vec<(figcraft_render::tiles::TileKey, Option<Painted>)>| {
+        out.into_iter()
+            .filter_map(|(k, p)| match p {
+                Some(Painted::Pixels(px)) => Some((k, px)),
+                _ => None,
+            })
+            .collect::<std::collections::HashMap<_, _>>()
+    };
+    let gp = pixels(g.paint(&doc, page, &tiles, &opts, &|| false));
+    let report = g.report();
+    assert!(!report.contains("audio"), "{report}");
+    let cp = pixels(CpuTilePainter.paint(&doc, page, &tiles, &opts, &|| false));
+    assert!(!cp.is_empty());
+    let (mut n, mut off, mut worst) = (0usize, 0usize, 0u8);
+    for (k, c) in &cp {
+        let gpx = gp.get(k).unwrap();
+        for (a, b) in c.data().chunks(4).zip(gpx.data().chunks(4)) {
+            let d = a.iter().zip(b).map(|(x, y)| x.abs_diff(*y)).max().unwrap_or(0);
+            n += 1;
+            worst = worst.max(d);
+            off += usize::from(d > 24);
+        }
+    }
+    eprintln!("{report}: {off} of {n} pixels differ by more than 24 (worst {worst})");
+    // Anti-aliasing differs at edges; the strip itself matches.
+    assert!(off * 1000 < n && worst < 64, "{off} of {n} pixels differ by more than 24 (worst {worst})");
 }
 
 #[test]
