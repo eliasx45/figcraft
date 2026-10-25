@@ -35,8 +35,8 @@ pub const UI_COMMANDS: &[&str] = &[
 /// Paste: the system clipboard wins when it holds something newer than our own copy (layers copied
 /// from another design app, an image, SVG or text from another app); otherwise our copied layers.
 /// `event_text` is the text the platform handed over with the paste event (the browser has no
-/// other way to read it). `at`: the page point to paste at (Paste here); `None` pastes in the
-/// middle of the view.
+/// other way to read it). `at`: the page point to paste at (Paste here); `None` pastes another
+/// app's image, SVG or text at the pointer when it's on the canvas, else in the middle of the view.
 /// In Dev Mode only a comment's link pastes (it opens the thread); everything else would edit.
 pub fn paste(app: &mut FigApp, event_text: Option<&str>, at: Option<(f64, f64)>) {
     // Native Figma copies (with images fetched in the background) take the shared importer first.
@@ -65,7 +65,10 @@ pub fn paste(app: &mut FigApp, event_text: Option<&str>, at: Option<(f64, f64)>)
     }
     let sys_text = app.services.clipboard_get_text().or_else(|| event_text.map(str::to_string)).filter(|t| !t.is_empty());
     let ours = sys_text.is_some() && sys_text == app.ui.last_copy;
-    let (cx, cy) = at.or_else(|| app.session.ds().ok().map(|d| (d.view.cx, d.view.cy))).unwrap_or((0.0, 0.0));
+    // ⌘V with the pointer on the canvas: what comes from another app lands centred on the pointer
+    // (fork: Elias's choice), not in the middle of the view.
+    let pointer = app.canvas.hovering.then_some(app.canvas.last_pointer).flatten().map(|p| (p.x, p.y));
+    let (cx, cy) = at.or(pointer).or_else(|| app.session.ds().ok().map(|d| (d.view.cx, d.view.cy))).unwrap_or((0.0, 0.0));
     if !ours {
         if let Some((png, w, h)) = clipboard_png(app) {
             if dev_mode_refuses(app, "edit.paste") {
@@ -73,7 +76,8 @@ pub fn paste(app: &mut FigApp, event_text: Option<&str>, at: Option<(f64, f64)>)
             }
             use base64::Engine as _;
             let b64 = base64::engine::general_purpose::STANDARD.encode(png);
-            // Centred in the view; Paste here puts its top-left at the point, as it does layers.
+            // Centred on the pointer (or the view); Paste here puts its top-left at the point, as it
+            // does layers.
             let (x, y) = if at.is_some() { (cx, cy) } else { ((cx - f64::from(w) / 2.0).round(), (cy - f64::from(h) / 2.0).round()) };
             app.run("file.import", json!({"data": b64, "name": "Pasted image.png", "x": x, "y": y}));
             return;

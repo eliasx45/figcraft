@@ -181,6 +181,21 @@ fn cmd_v_pastes_an_image_copied_elsewhere() {
 }
 
 #[test]
+fn cmd_v_centres_an_image_from_elsewhere_on_the_pointer() {
+    let mut w = Win::new();
+    w.copy_image_elsewhere();
+    let at = Pos2::new(900.0, 600.0);
+    w.frame(vec![Event::PointerMoved(at)]);
+    w.cmd_v(CMD);
+    let p = w.app.to_page(at);
+    let doc = w.app.session.doc().unwrap();
+    let img = doc.nodes().find(|n| n.name == "Pasted image").unwrap();
+    let b = doc.world_bounds(img.id).unwrap();
+    let c = ((b.x0 + b.x1) / 2.0, (b.y0 + b.y1) / 2.0);
+    assert!((c.0 - p.x).abs() <= 1.0 && (c.1 - p.y).abs() <= 1.0, "centred on the pointer: {b:?} vs {p:?}");
+}
+
+#[test]
 fn cmd_released_before_v_still_pastes_the_image() {
     let mut w = Win::new();
     w.copy_image_elsewhere();
