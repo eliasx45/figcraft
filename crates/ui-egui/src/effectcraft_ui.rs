@@ -218,6 +218,9 @@ pub struct Link {
     /// EffectCraft's Timeline docked at the bottom (fork-only; its fonts: `theme::install_fonts`).
     #[cfg(feature = "effectcraft-inproc")]
     pub(crate) panel: Option<crate::effectcraft_panel::Panel>,
+    /// A docked panel's colour eyedropper is armed: canvas clicks take a colour.
+    #[cfg(feature = "effectcraft-inproc")]
+    pub(crate) picking: bool,
 }
 
 impl Link {
@@ -584,6 +587,11 @@ pub fn input(app: &mut FigApp, ctx: &egui::Context, pos: Pos2, hovered: bool, do
     if !hovered {
         return false;
     }
+    // The docked EffectCraft panel's eyedropper takes this click ([`FigApp::effectcraft_panel_ui`]).
+    #[cfg(feature = "effectcraft-inproc")]
+    if app.effectcraft.picking {
+        return true;
+    }
     let pressed = ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary));
     if !pressed && !double {
         return false;
@@ -882,13 +890,83 @@ impl FigApp {
                     self.effectcraft_send(io::Job::Override { path: old.path(), snapshot: None });
                 }
                 let height = 280.0;
-                self.effectcraft.panel = Some(crate::effectcraft_panel::Panel { host, card: id, open: true, focused: true, height });
+                self.effectcraft.panel = Some(crate::effectcraft_panel::Panel { host, card: id, open: true, focused: true, height, synced: None });
                 true
             }
             Err(e) => {
                 log::warn!("EffectCraft Timeline: {e}");
                 false
             }
+        }
+    }
+
+    /// What the canvas shows under the pointer, for an armed eyedropper: over a card of the
+    /// panel's project, its comp frame there as the panel's session renders it; elsewhere the
+    /// document's pixel. Sampled only on the click that takes it (the colour is unused before).
+    fn effectcraft_canvas_color(&self, ctx: &egui::Context, p: &crate::effectcraft_panel::Panel, panel: Rect) -> Option<effectcraft_ui_egui::panels::timeline::PointerColor> {
+        use effectcraft_ui_egui::panels::timeline::PointerColor;
+        let pos = ctx.input(|i| i.pointer.hover_pos())?;
+        if !self.canvas.rect.contains(pos) || panel.contains(pos) {
+            return None;
+        }
+        let clicked = ctx.input(|i| i.pointer.button_clicked(egui::PointerButton::Primary));
+        if !clicked {
+            return Some(PointerColor { rgb: [0.0; 3], clicked: false });
+        }
+        let ds = self.session.ds().ok()?;
+        let (doc, page) = (ds.doc.clone(), ds.page);
+        if let Some((id, pic)) = card_at(self, &doc, page, pos)
+            && let Some(c) = doc.node(id).and_then(|n| n.effectcraft.as_deref())
+            && pic.contains(pos)
+            && figcraft_ec_inproc::key(std::path::Path::new(&c.project)).as_path() == p.host.path()
+        {
+            let (u, v) = (f64::from((pos.x - pic.min.x) / pic.width().max(1.0)), f64::from((pos.y - pic.min.y) / pic.height().max(1.0)));
+            let comp = if c.comp_id > 0 { json!(c.comp_id) } else { json!(c.comp) };
+            let f = frame_at(c, card_time(self, &doc, id, c, Some(pos)));
+            let rgb = p.host.comp_color(&comp, f, u * f64::from(c.width), v * f64::from(c.height))?;
+            return Some(PointerColor { rgb, clicked: true });
+        }
+        let at = self.to_page(pos);
+        let ids = doc.node(page).map(|n| n.children.clone()).unwrap_or_default();
+        let pm = figcraft_render::render_area(&doc, &ids, figcraft_geom::Rect::new(at.x, at.y, at.x + 1.0, at.y + 1.0), 1.0)?;
+        let px = pm.pixel(0, 0)?.demultiply();
+        // Nothing drawn there: the canvas colour.
+        let rgb = if px.alpha() == 0 {
+            let c = crate::theme::Tokens::get(ctx).canvas;
+            [f32::from(c.r()) / 255.0, f32::from(c.g()) / 255.0, f32::from(c.b()) / 255.0]
+        } else {
+            [f32::from(px.red()) / 255.0, f32::from(px.green()) / 255.0, f32::from(px.blue()) / 255.0]
+        };
+        Some(PointerColor { rgb, clicked: true })
+    }
+
+    /// One playhead for the card and the docked Timeline: whichever moved since they were last
+    /// made the same drags the other (the Timeline wins a tie: it was scrubbed by hand).
+    fn effectcraft_sync_playhead(&mut self, p: &mut crate::effectcraft_panel::Panel) {
+        let Some(c) = self.session.doc().ok().and_then(|d| d.node(p.card)?.effectcraft.as_deref().cloned()) else { return };
+        let t = &self.session.effectcraft;
+        let card_t = if t.node == Some(p.card) { t.time() } else { self.effectcraft.shown.get(&p.card).copied().unwrap_or(c.start) };
+        let ec_t = p.host.time();
+        let half = 0.5 / c.fps.max(1.0);
+        let (card_t, ec_t) = match p.synced {
+            Some((_, last_ec)) if (ec_t - last_ec).abs() > half => {
+                // Scrubbed in the Timeline: the card follows.
+                self.run("effectcraft.seek", json!({"id": p.card, "time": ec_t}));
+                self.effectcraft.shown.insert(p.card, ec_t);
+                (ec_t, ec_t)
+            }
+            Some((last_card, _)) if (card_t - last_card).abs() <= half => return,
+            // The card moved (played, scrubbed on the canvas) or first sync: the Timeline follows.
+            _ => {
+                p.host.set_time(card_t);
+                (card_t, p.host.time())
+            }
+        };
+        p.synced = Some((card_t, ec_t));
+        if self.session.effectcraft.playing()
+            && let Some(ctx) = self.ui_context.clone()
+        {
+            ctx.request_repaint();
         }
     }
 
@@ -952,12 +1030,17 @@ impl FigApp {
                 Err(e) => self.toast(e),
             }
         }
-        // Edits re-render the card from this session.
+        // Edits re-render the card from this session (pictures, sound and precomps).
         let rev = effectcraft_ui_egui::panels::timeline::TimelineHost::session(&p.host).revision;
         if p.host.read_only().is_none() && rev != p.host.shown_revision {
             p.host.shown_revision = rev;
             self.effectcraft_send(io::Job::Override { path: p.path(), snapshot: Some(Box::new(p.host.snapshot())) });
+            self.effectcraft.sounds.retain(|_, s| matches!(s, SoundState::Loading));
         }
+        self.effectcraft_sync_playhead(&mut p);
+        // The colour eyedropper samples FigCraft's canvas under the pointer.
+        let pointer = if p.host.picking() { self.effectcraft_canvas_color(ctx, &p, shown.response.rect) } else { None };
+        self.effectcraft.picking = p.host.pick(ctx, pointer);
         if close {
             p.open = false;
             if !p.host.is_dirty() {
@@ -1613,6 +1696,12 @@ mod io {
             // a lost connection.
             #[cfg(feature = "effectcraft-inproc")]
             if let Some(path) = self.via.clone() {
+                // A hosted panel's unsaved edits: their sound and precomps, not the file's.
+                if let Some(snap) = self.overrides.get(&path)
+                    && matches!(method, "figcraft.tree" | "figcraft.audio")
+                {
+                    return Ok(snap.call(method, &params));
+                }
                 let r = self.inproc.get(&path).and_then(|ec| ec.call(method, &params));
                 return Ok(r);
             }

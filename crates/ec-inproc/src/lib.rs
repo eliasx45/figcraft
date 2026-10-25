@@ -235,34 +235,48 @@ impl InProc {
 
     /// `figcraft.tree {comp, start, end, depth?}` (comp seconds) → the app's tree.
     fn tree(&self, p: &Value) -> Result<Value, String> {
-        let cid = self.comp(p)?;
-        let (start, end) = span(p)?;
-        let depth = p.get("depth").and_then(Value::as_u64).unwrap_or(3).min(8) as u32;
-        effectcraft_engine::commands::figcraft_link::tree(&self.session.project, cid, Tick::from_seconds_f64(start), Tick::from_seconds_f64(end), depth)
-            .ok_or_else(|| "no such composition".into())
+        tree_in(&self.session.project, self.comp(p)?, p)
     }
 
     /// `figcraft.audio {comp, start, end, rate?}` → `{wav}` (16-bit stereo) or `{silent: true}`.
     fn audio(&self, p: &Value) -> Result<Value, String> {
-        let cid = self.comp(p)?;
-        let (start, end) = span(p)?;
-        let rate = p.get("rate").and_then(Value::as_u64).unwrap_or(48_000);
-        if !RATES.contains(&rate) {
-            return Err(format!("`rate` must be {} to {} Hz", RATES.start(), RATES.end()));
-        }
-        let rate = rate as u32;
         let s = &self.session;
-        if !effectcraft_engine::render::audio::comp_has_audio(&s.project, cid) {
-            return Ok(json!({"silent": true}));
-        }
-        let frames = ((end - start).min(MAX_SOUND) * f64::from(rate)).round().max(0.0) as usize;
-        let mix = effectcraft_engine::render::audio::mix_comp(&s.project, s.footage.as_ref(), s.expr.as_deref(), cid, Tick::from_seconds_f64(start), frames, rate);
-        if mix.iter().all(|x| x.abs() < 1e-6) {
-            return Ok(json!({"silent": true}));
-        }
-        use base64::Engine as _;
-        Ok(json!({"wav": base64::engine::general_purpose::STANDARD.encode(wav16(&mix, rate)), "rate": rate}))
+        audio_in(&s.project, s.footage.as_ref(), s.expr.as_deref(), self.comp(p)?, p)
     }
+}
+
+/// `figcraft.tree` of comp `cid` of `project`.
+fn tree_in(project: &effectcraft_engine::project::Project, cid: ItemId, p: &Value) -> Result<Value, String> {
+    let (start, end) = span(p)?;
+    let depth = p.get("depth").and_then(Value::as_u64).unwrap_or(3).min(8) as u32;
+    effectcraft_engine::commands::figcraft_link::tree(project, cid, Tick::from_seconds_f64(start), Tick::from_seconds_f64(end), depth)
+        .ok_or_else(|| "no such composition".into())
+}
+
+/// `figcraft.audio` of comp `cid` of `project`.
+fn audio_in(
+    project: &effectcraft_engine::project::Project,
+    footage: &dyn effectcraft_engine::render::FootageSource,
+    expr: Option<&dyn effectcraft_engine::render::ExprHost>,
+    cid: ItemId,
+    p: &Value,
+) -> Result<Value, String> {
+    let (start, end) = span(p)?;
+    let rate = p.get("rate").and_then(Value::as_u64).unwrap_or(48_000);
+    if !RATES.contains(&rate) {
+        return Err(format!("`rate` must be {} to {} Hz", RATES.start(), RATES.end()));
+    }
+    let rate = rate as u32;
+    if !effectcraft_engine::render::audio::comp_has_audio(project, cid) {
+        return Ok(json!({"silent": true}));
+    }
+    let frames = ((end - start).min(MAX_SOUND) * f64::from(rate)).round().max(0.0) as usize;
+    let mix = effectcraft_engine::render::audio::mix_comp(project, footage, expr, cid, Tick::from_seconds_f64(start), frames, rate);
+    if mix.iter().all(|x| x.abs() < 1e-6) {
+        return Ok(json!({"silent": true}));
+    }
+    use base64::Engine as _;
+    Ok(json!({"wav": base64::engine::general_purpose::STANDARD.encode(wav16(&mix, rate)), "rate": rate}))
 }
 
 /// `start` and `end` (seconds, finite, start ≤ end).

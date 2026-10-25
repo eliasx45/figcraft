@@ -136,3 +136,23 @@ fn wav_header_is_16_bit_stereo_pcm() {
     assert_eq!(i16::from_le_bytes([w[48], w[49]]), -32767);
     assert_eq!(i16::from_le_bytes([w[50], w[51]]), 0);
 }
+
+#[test]
+fn a_snapshot_answers_tree_and_sound_like_the_file() {
+    let dir = temp("snapcall");
+    let (path, cid) = project(&dir);
+    let mut ec = InProc::open(&path).unwrap();
+    let snap = ec.snapshot();
+    let p = json!({"comp": cid, "start": 0.0, "end": 1.0});
+    assert_eq!(snap.call("figcraft.tree", &p).unwrap(), ec.call("figcraft.tree", &p).unwrap());
+    assert_eq!(snap.call("figcraft.audio", &p).unwrap()["silent"], json!(true));
+    // An edit in the session shows in a new snapshot, not the file.
+    ec.session_mut().execute("comp.new", json!({"name": "E", "width": 16, "height": 16, "duration": 1})).unwrap();
+    assert!(ec.snapshot().call("figcraft.tree", &json!({"comp": "E", "start": 0, "end": 1})).is_ok());
+    assert!(snap.call("figcraft.tree", &json!({"comp": "E", "start": 0, "end": 1})).is_err());
+    for bad in [json!({}), json!({"comp": 999_999, "start": 0, "end": 1}), json!({"comp": cid}), Value::Null] {
+        assert!(snap.call("figcraft.tree", &bad).is_err(), "{bad}");
+        assert!(snap.call("figcraft.audio", &bad).is_err(), "{bad}");
+    }
+    assert!(snap.call("figcraft.frames", &p).is_err());
+}

@@ -14,6 +14,10 @@
 //!   own shortcut dispatch (`panels::timeline::keys::forward_shortcuts`); Space plays the card and
 //!   ⌘S saves. They are taken before FigCraft's shortcuts, so P, R, T… work on the canvas again
 //!   as soon as it is clicked.
+//! - **One playhead.** The card's playhead and the Timeline's current time follow each other:
+//!   scrubbing either moves both, and Space plays the card with the Timeline following.
+//! - **Undo.** ⌘Z / ⇧⌘Z (⌘Y) undo and redo EffectCraft's edits while the panel has focus and
+//!   FigCraft's otherwise; neither reaches the other's history.
 //! - Effect Controls (the selected layer's effects) dock left of the Timeline when there is room.
 //! - What the Timeline still needs EffectCraft's whole app for (Graph Editor, markers, dialogs…,
 //!   `docs/embedding-panels.md` in EffectCraft) is left out by the panel itself.
@@ -22,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 use effectcraft_ui_egui::automation::Registry;
 use effectcraft_ui_egui::dock::PanelKind;
-use effectcraft_ui_egui::panels::timeline::{TimelineHost, TimelineParts};
+use effectcraft_ui_egui::panels::timeline::{PointerColor, TimelineHost, TimelineParts};
 use effectcraft_ui_egui::state::UiState;
 use effectcraft_ui_egui::theme::{ThemeKind, Tokens};
 use figcraft_doc::{EcComp, NodeId};
@@ -51,6 +55,8 @@ pub struct EcHost {
     pub(crate) shown_revision: u64,
     /// The docked panel with the keyboard (Timeline or Effect Controls).
     focus: PanelKind,
+    /// What FigCraft's canvas shows under the pointer this frame, for an armed eyedropper.
+    pub(crate) pointer: Option<PointerColor>,
 }
 
 impl EcHost {
@@ -72,6 +78,7 @@ impl EcHost {
             comp: id,
             shown_revision,
             focus: PanelKind::Timeline,
+            pointer: None,
         })
     }
 
@@ -169,12 +176,68 @@ impl EcHost {
             if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) {
                 out.push(PanelAction::Save);
             }
+            // Undo is EffectCraft's here, whatever its keymap says: ⌘Z never reaches FigCraft's
+            // undo while the panel has focus (and FigCraft's never reaches this session).
+            let redo_shift = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
+            for (m, k, id) in [(redo_shift, egui::Key::Z, "edit.redo"), (egui::Modifiers::COMMAND, egui::Key::Y, "edit.redo"), (egui::Modifiers::COMMAND, egui::Key::Z, "edit.undo")] {
+                if ctx.input_mut(|i| i.consume_key(m, k)) {
+                    if let Err(e) = self.guarded_run(id, json!({})) {
+                        self.ui.status = e;
+                    }
+                    out.push(PanelAction::Ran(id.to_string()));
+                }
+            }
         }
         let focus = self.focus;
         let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| effectcraft_ui_egui::panels::timeline::keys::forward_shortcuts(self, ctx, focus)))
         .unwrap_or_default();
         out.extend(ran.into_iter().map(PanelAction::Ran));
         out
+    }
+
+    /// The Timeline's current time (comp seconds).
+    pub fn time(&self) -> f64 {
+        self.ec.session().time().seconds()
+    }
+
+    /// Move the Timeline's current time to comp second `t` (snapped to a frame, kept in the comp).
+    pub fn set_time(&mut self, t: f64) {
+        if t.is_finite() {
+            self.ec.session_mut().set_time(figcraft_ec_inproc::effectcraft_engine::time::Tick::from_seconds_f64(t));
+        }
+    }
+
+    /// A colour eyedropper (Effect Controls or text colour) is armed: the next canvas click takes
+    /// a colour instead of acting on the canvas.
+    pub fn picking(&self) -> bool {
+        self.ui.fx_pick.as_ref().is_some_and(|p| p.kind == "color") || self.ui.text_color_pick.is_some()
+    }
+
+    /// Run the armed eyedropper with `pointer` (the canvas colour under the pointer; `clicked`
+    /// takes it). Returns whether one is still armed.
+    pub fn pick(&mut self, ctx: &egui::Context, pointer: Option<PointerColor>) -> bool {
+        self.pointer = pointer;
+        let before = self.ec.session().revision;
+        let armed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| effectcraft_ui_egui::panels::effect_controls::hosted_pick(self, ctx))).unwrap_or(false);
+        self.pointer = None;
+        self.keep_read_only(before);
+        armed
+    }
+
+    /// The colour of comp frame `frame` at comp pixel (`x`, `y`) of comp `comp` (id or name) as
+    /// this session renders it (the card shows the same frame), 0–1 per channel.
+    pub fn comp_color(&self, comp: &Value, frame: i64, x: f64, y: f64) -> Option<[f32; 3]> {
+        let snap = self.ec.snapshot();
+        let id = snap.comp_id(comp).ok()?;
+        let c = self.ec.session().project.comp(ItemId(id))?;
+        let (w, h) = (c.width.max(1), c.height.max(1));
+        let side = w.max(h).min(4096);
+        let figcraft_ec_inproc::Picture::Png(png) = snap.frame(id, frame, side, figcraft_ec_inproc::Compositor::Cpu).ok()? else { return None };
+        let img = image::load_from_memory(&png).ok()?.to_rgb8();
+        let px = ((x / f64::from(w)) * f64::from(img.width())).floor().clamp(0.0, f64::from(img.width().saturating_sub(1))) as u32;
+        let py = ((y / f64::from(h)) * f64::from(img.height())).floor().clamp(0.0, f64::from(img.height().saturating_sub(1))) as u32;
+        let p = img.get_pixel_checked(px, py)?;
+        Some([f32::from(p[0]) / 255.0, f32::from(p[1]) / 255.0, f32::from(p[2]) / 255.0])
     }
 
     /// Which of the docked panels has the keyboard.
@@ -224,6 +287,11 @@ impl TimelineHost for EcHost {
     fn invoke(&mut self, _ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
         self.guarded_run(id, params)
     }
+    /// The colour FigCraft's canvas shows under the pointer ([`EcHost::pointer`], set by the app
+    /// each frame while a colour eyedropper is armed).
+    fn pointer_color(&mut self, _ctx: &egui::Context) -> Option<PointerColor> {
+        self.pointer
+    }
     fn run_engine(&mut self, _ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
         let r = self.guarded_run(id, params);
         if let Err(e) = &r {
@@ -241,6 +309,8 @@ pub struct Panel {
     pub open: bool,
     pub focused: bool,
     pub height: f32,
+    /// The card's and the Timeline's times as last made the same (comp seconds).
+    pub synced: Option<(f64, f64)>,
 }
 
 impl Panel {

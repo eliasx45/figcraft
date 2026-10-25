@@ -105,6 +105,19 @@ impl Snapshot {
         }
     }
 
+    /// `figcraft.tree` and `figcraft.audio` from this snapshot (a hosted panel's unsaved
+    /// edits), the same answers [`InProc::call`] gives from the saved file.
+    pub fn call(&self, method: &str, params: &Value) -> Result<Value, String> {
+        guarded(method, || {
+            let cid = ItemId(self.comp_id(params.get("comp").unwrap_or(&Value::Null))?);
+            match method {
+                "figcraft.tree" => crate::tree_in(&self.project, cid, params),
+                "figcraft.audio" => crate::audio_in(&self.project, self.footage.as_ref(), self.expr.as_deref(), cid, params),
+                other => Err(format!("unknown method {other} (EffectCraft snapshot)")),
+            }
+        })
+    }
+
     /// A session over this snapshot (`cache`: share the layer cache; a CPU retry after a failed
     /// GPU attempt doesn't, as EffectCraft's viewer does).
     fn session(&self, cache: bool) -> Session {

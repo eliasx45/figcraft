@@ -118,3 +118,54 @@ fn junk_never_panics() {
     let _ = ctx.run_ui(keys, |_| actions = h.keys(&ctx));
     assert_eq!(actions.get(..2), Some(&[PanelAction::Play, PanelAction::Save][..]));
 }
+
+fn key(k: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+    egui::Event::Key { key: k, physical_key: None, pressed: true, repeat: false, modifiers }
+}
+
+/// ⌘Z with the panel focused undoes EffectCraft's edit and is taken (FigCraft's undo never sees
+/// it); ⇧⌘Z redoes it.
+#[test]
+fn undo_stays_in_effectcraft_while_the_panel_has_focus() {
+    let (p, c) = sample("undo");
+    let mut h = EcHost::open(&p, &c, false).unwrap();
+    let ctx = egui::Context::default();
+    let n = layers(&h);
+    h.invoke(&ctx, "layer.newSolid", json!({"color": "#00ff00", "width": 8, "height": 8})).unwrap();
+    assert_eq!(layers(&h), n + 1);
+    let mut undo = input();
+    undo.events = vec![key(egui::Key::Z, egui::Modifiers::COMMAND)];
+    let mut left = 1;
+    let _ = ctx.run_ui(undo, |_| {
+        let _ = h.keys(&ctx);
+        left = ctx.input(|i| i.events.iter().filter(|e| matches!(e, egui::Event::Key { key: egui::Key::Z, .. })).count());
+    });
+    assert_eq!(layers(&h), n, "EffectCraft's undo ran");
+    assert_eq!(left, 0, "the key was taken from FigCraft");
+    let mut redo = input();
+    redo.events = vec![key(egui::Key::Z, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT)];
+    let _ = ctx.run_ui(redo, |_| {
+        let _ = h.keys(&ctx);
+    });
+    assert_eq!(layers(&h), n + 1, "and its redo");
+}
+
+/// The Timeline's time is the card's: set and read back in comp seconds, snapped to frames and
+/// kept inside the comp; junk times are ignored.
+#[test]
+fn the_timeline_time_follows_the_card() {
+    let (p, c) = sample("time");
+    let mut h = EcHost::open(&p, &c, false).unwrap();
+    h.set_time(1.0);
+    assert!((h.time() - 1.0).abs() < 1e-6);
+    h.set_time(1.013);
+    assert!((h.time() - 1.0).abs() < 1e-6, "snapped to 25 fps: {}", h.time());
+    h.set_time(99.0);
+    assert!(h.time() < 2.0, "kept in the 2 s comp");
+    let before = h.time();
+    h.set_time(f64::NAN);
+    assert_eq!(h.time(), before);
+    let rev = h.session().revision;
+    h.set_time(0.5);
+    assert_eq!(h.session().revision, rev, "moving the time is no edit (no re-render)");
+}
