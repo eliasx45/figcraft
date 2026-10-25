@@ -28,11 +28,18 @@ egui_extras = { workspace = true }
 web-time = "1.1.0"
 figcraft-audio = { workspace = true }
 figcraft-video = { workspace = true }
+# Fork-only, desktop-only: EffectCraft cards render in-process from their saved .ecproj when the
+# EffectCraft app isn't running (or has another project open). Never on for the browser build.
+figcraft-ec-inproc = { workspace = true, optional = true }
 
 # Sound output for audio layers: macOS and Windows for now (Linux and FreeBSD need ALSA in their
 # packages first; the browser build has none yet).
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 cpal = { workspace = true }
+
+[features]
+default = []
+effectcraft-inproc = ["dep:figcraft-ec-inproc"]
 
 [build-dependencies]
 serde_json = { workspace = true }

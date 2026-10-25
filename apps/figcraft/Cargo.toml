@@ -10,6 +10,12 @@ default-run = "figcraft"
 [lints]
 workspace = true
 
+[features]
+default = []
+# Fork-only (scripts/fork/app.sh turns it on): EffectCraft's engine in-process for EffectCraft
+# cards, so they render without the EffectCraft app. Needs ../effectcraft checked out.
+effectcraft-inproc = ["figcraft-ui-egui/effectcraft-inproc"]
+
 [dependencies]
 figcraft-engine = { workspace = true }
 figcraft-ui-egui = { workspace = true }

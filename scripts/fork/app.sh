@@ -77,7 +77,7 @@ build() {
     echo "building FigCraft (local profile) $(date)" >"$log"
     # Job control puts the build in its own process group, so stopping it stops every rustc too.
     set -m
-    CARGO_TARGET_DIR="$target" nice -n 10 cargo build --profile local -p figcraft --manifest-path "$root/Cargo.toml" >>"$log" 2>&1 &
+    CARGO_TARGET_DIR="$target" nice -n 10 cargo build --profile local -p figcraft --features effectcraft-inproc --manifest-path "$root/Cargo.toml" >>"$log" 2>&1 &
     build_pid=$!
     set +m
     wait "$build_pid"

@@ -25,6 +25,8 @@ const TABLE: &[(&str, u8)] = &[
     // GPU canvas tiles (vello on wgpu): above the CPU renderer they fall back to.
     ("render-gpu", 4),
     ("engine", 5),
+    // Fork-only: EffectCraft's engine in-process for EffectCraft cards (no FigCraft crates, no UI).
+    ("ec-inproc", 5),
     ("ui-egui", 6),
     ("mcp", 6),
     // Live sessions over the network (WebSockets): above the engine, beside the UI.

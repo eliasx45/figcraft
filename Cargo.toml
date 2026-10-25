@@ -35,6 +35,8 @@ figcraft-plugin = { path = "crates/plugin" }
 figcraft-script = { path = "crates/script" }
 figcraft-audio = { path = "crates/audio" }
 figcraft-video = { path = "crates/video" }
+# Fork-only: EffectCraft's engine in-process (needs ../effectcraft; figcraft-ui-egui feature `effectcraft-inproc`).
+figcraft-ec-inproc = { path = "crates/ec-inproc" }
 
 # Audio decoding: FilmCraft's pure-Rust codecs (the same pin as EffectCraft's).
 filmcraft-codecs = { git = "https://github.com/storytold/filmcraft", rev = "2c5ba7a72619935f0481f99d59409e0d1844b234" }
@@ -138,3 +140,6 @@ panic = "abort"
 [patch.crates-io]
 vello_encoding = { path = "third_party/vello_encoding" }
 vello_shaders = { path = "third_party/vello_shaders" }
+# Fork: EffectCraft's craft-pdf (pulled in by figcraft-ec-inproc) needs craft-libs' hayro-syntax
+# 0.7.2 (decode limits), as EffectCraft patches it.
+hayro-syntax = { git = "https://github.com/storytold/craft-libs", rev = "ca50d63b773c99f96e75c77ce5a1d21e7c9cda0d", version = "=0.7.2" }

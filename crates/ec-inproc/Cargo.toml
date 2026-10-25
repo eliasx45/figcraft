@@ -1,0 +1,21 @@
+[package]
+name = "figcraft-ec-inproc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Fork-only, desktop-only: EffectCraft's engine linked into FigCraft, so EffectCraft cards render from their saved .ecproj without the EffectCraft app (the same figcraft.* methods its control channel answers)"
+
+[lints]
+workspace = true
+
+# EffectCraft's crates come from the checkout next to this repo (../effectcraft). Only the
+# `effectcraft-inproc` feature of figcraft-ui-egui (and the app) pulls this crate in; the browser
+# build never does.
+[dependencies]
+effectcraft-engine = { path = "../../../effectcraft/crates/engine" }
+effectcraft-media = { path = "../../../effectcraft/crates/media" }
+effectcraft-expr = { path = "../../../effectcraft/crates/expr" }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+log = { workspace = true }

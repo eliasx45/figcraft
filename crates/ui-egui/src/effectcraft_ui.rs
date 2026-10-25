@@ -10,6 +10,12 @@
 //! when EffectCraft isn't running. A card plays in a loop with the comp's own sound; cards and
 //! audio strips covering the same edit time share one playhead. An EffectCraft without the
 //! `figcraft.*` methods still works, slower, through `render.frame`.
+//!
+//! Fork-only, with the `effectcraft-inproc` feature (desktop): a card whose saved `.ecproj` is on
+//! disk renders through EffectCraft's engine linked into FigCraft (`figcraft-ec-inproc`, the same
+//! `figcraft.*` methods answered in-process, CPU frames as PNG) whenever the EffectCraft app is
+//! closed or has another project open; when the app has that project open its live edits win and
+//! the card asks the app as before (`io::choose`). A save of the file refreshes those frames.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -76,6 +82,9 @@ struct Store {
     failed: HashSet<i64>,
     /// The frame the store was last wanted around (eviction keeps what is near it).
     focus: i64,
+    /// Its frames were rendered in-process from the saved project, at this file revision (they
+    /// stay fresh whatever the app's revision; a later save replaces them).
+    file: Option<u64>,
 }
 
 /// Comp, comp id, start and end (milliseconds).
@@ -766,7 +775,7 @@ impl FigApp {
         let replies: Vec<io::Reply> = io.rx.try_iter().collect();
         for r in replies {
             match r {
-                io::Reply::Frames { store, revision, got, pending, failed, poster, headless } => {
+                io::Reply::Frames { store, revision, got, pending, failed, poster, headless, file } => {
                     self.effectcraft.in_flight = self.effectcraft.in_flight.saturating_sub(1);
                     match headless {
                         // Rendered from the saved file: a newer save makes the earlier ones stale.
@@ -789,6 +798,13 @@ impl FigApp {
                         }
                     }
                     let s = self.effectcraft.stores.entry(store).or_default();
+                    // In-process frames of an older save of the file go.
+                    if file.is_some() && s.file.is_some() && s.file != file {
+                        let dropped: usize = s.frames.values().map(|x| x.bytes).sum();
+                        s.frames.clear();
+                        self.effectcraft.bytes = self.effectcraft.bytes.saturating_sub(dropped);
+                    }
+                    s.file = file;
                     for (f, tex) in got {
                         let [w, h] = tex.size();
                         let bytes = w * h * 4;
@@ -915,7 +931,8 @@ impl FigApp {
             s.focus = *at;
             let mut frames = Vec::new();
             for f in order(c, *at) {
-                let fresh = |x: &Slot| x.rev >= rev || (headless && x.rev == 0);
+                let file = s.file.is_some();
+                let fresh = |x: &Slot| x.rev >= rev || ((headless || file) && x.rev == 0);
                 if s.failed.contains(&f) || s.frames.get(&f).is_some_and(fresh) || s.pending.get(&f).is_some_and(|t| now - t < REPOLL) {
                     continue;
                 }
@@ -1042,6 +1059,9 @@ mod io {
             failed: Vec<i64>,
             poster: Option<(NodeId, Vec<u8>)>,
             headless: Option<u64>,
+            /// Rendered in-process from the card's saved project (`effectcraft-inproc`): that
+            /// file's revision (a later save replaces this store's frames).
+            file: Option<u64>,
         },
         FramesFailed {
             store: StoreKey,
@@ -1070,6 +1090,80 @@ mod io {
         pub rx: Receiver<Reply>,
     }
 
+    #[cfg_attr(not(feature = "effectcraft-inproc"), allow(dead_code))]
+    impl Job {
+        /// The card's comp, for the jobs that render or read it (not a reveal: that opens the
+        /// comp in the EffectCraft app).
+        fn comp(&self) -> Option<&EcComp> {
+            match self {
+                Job::Frames { comp, .. } | Job::Sound { comp, .. } | Job::Tree { comp, .. } => Some(comp),
+                Job::Revision | Job::Reveal { .. } => None,
+            }
+        }
+    }
+
+    /// Where a card's requests go.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Route {
+        /// The running EffectCraft app's control channel (or, when it's closed, `effectcraft-cli`).
+        Tcp,
+        /// EffectCraft's engine inside FigCraft, on the card's saved project.
+        InProc,
+    }
+
+    /// What the EffectCraft app has to do with a card's project.
+    #[cfg_attr(not(feature = "effectcraft-inproc"), allow(dead_code))]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum AppState {
+        /// Not running (nothing answers on its port).
+        Closed,
+        /// Running with the card's project open: it has the live, unsaved edits.
+        Owns,
+        /// Running with another project (or an untitled one) open.
+        Other,
+        /// Running, but it didn't say which project it has open (an older EffectCraft).
+        Unknown,
+    }
+
+    /// What the app said it has open, as last asked.
+    #[cfg_attr(not(feature = "effectcraft-inproc"), allow(dead_code))]
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub(crate) enum Seen {
+        Closed,
+        /// The open project (canonical path; `None` when untitled).
+        Open(Option<PathBuf>),
+        Unknown,
+    }
+
+    /// The app's relation to `project` (a canonical path) given what it said it has open.
+    #[cfg_attr(not(feature = "effectcraft-inproc"), allow(dead_code))]
+    pub(crate) fn state_of(seen: &Seen, project: &Path) -> AppState {
+        match seen {
+            Seen::Closed => AppState::Closed,
+            Seen::Unknown => AppState::Unknown,
+            Seen::Open(Some(p)) if p == project => AppState::Owns,
+            Seen::Open(_) => AppState::Other,
+        }
+    }
+
+    /// Where a card's requests go: in-process when that's built in and the card's saved project
+    /// is there, unless the EffectCraft app has that project open (its live edits win) or can't
+    /// say what it has open; otherwise the app, as before.
+    #[cfg_attr(not(feature = "effectcraft-inproc"), allow(dead_code))]
+    pub(crate) fn choose(in_process: bool, project_is_file: bool, app: AppState) -> Route {
+        if !in_process || !project_is_file {
+            return Route::Tcp;
+        }
+        match app {
+            AppState::Closed | AppState::Other => Route::InProc,
+            AppState::Owns | AppState::Unknown => Route::Tcp,
+        }
+    }
+
+    /// Seconds between asks of which project the app has open.
+    #[cfg(feature = "effectcraft-inproc")]
+    const PROBE_EVERY: Duration = Duration::from_secs(2);
+
     impl Io {
         pub fn start(ctx: egui::Context) -> Option<Io> {
             let (jtx, jrx) = channel::<Job>();
@@ -1077,7 +1171,7 @@ mod io {
             std::thread::Builder::new()
                 .name("effectcraft-link".into())
                 .spawn(move || {
-                    let mut link = Thread { conn: None, legacy: false, ctx };
+                    let mut link = Thread::new(ctx, port());
                     while let Ok(job) = jrx.recv() {
                         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| link.run(job)));
                         let reply = r.unwrap_or_else(|_| Reply::Error("EffectCraft link: an internal error".into()));
@@ -1108,8 +1202,8 @@ mod io {
     }
 
     impl Conn {
-        fn open() -> Result<Conn, String> {
-            let addr = SocketAddr::from(([127, 0, 0, 1], port()));
+        fn open(port: u16) -> Result<Conn, String> {
+            let addr = SocketAddr::from(([127, 0, 0, 1], port));
             let s = TcpStream::connect_timeout(&addr, Duration::from_millis(400)).map_err(|e| match e.kind() {
                 std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::TimedOut => "EffectCraft isn't open".to_string(),
                 _ => format!("EffectCraft: {e}"),
@@ -1170,25 +1264,60 @@ mod io {
         base64::engine::general_purpose::STANDARD.decode(v?.as_str()?.trim()).ok()
     }
 
-    struct Thread {
+    pub(crate) struct Thread {
         conn: Option<Conn>,
         /// EffectCraft has no `figcraft.*` methods: frames come from `render.frame`.
         legacy: bool,
         ctx: egui::Context,
+        /// The app's control port.
+        port: u16,
+        /// EffectCraft sessions inside FigCraft, one per card project.
+        #[cfg(feature = "effectcraft-inproc")]
+        inproc: figcraft_ec_inproc::Pool,
+        /// The project this job's calls go to in-process (`None`: over TCP).
+        #[cfg(feature = "effectcraft-inproc")]
+        via: Option<PathBuf>,
+        /// What the app last said it has open, and when.
+        #[cfg(feature = "effectcraft-inproc")]
+        seen: Option<(Instant, Seen)>,
     }
 
     impl Thread {
-        fn run(&mut self, job: Job) -> Reply {
+        pub(crate) fn new(ctx: egui::Context, port: u16) -> Thread {
+            Thread {
+                conn: None,
+                legacy: false,
+                ctx,
+                port,
+                #[cfg(feature = "effectcraft-inproc")]
+                inproc: figcraft_ec_inproc::Pool::default(),
+                #[cfg(feature = "effectcraft-inproc")]
+                via: None,
+                #[cfg(feature = "effectcraft-inproc")]
+                seen: None,
+            }
+        }
+
+        pub(crate) fn run(&mut self, job: Job) -> Reply {
             let kind = match &job {
                 Job::Frames { .. } => Kind::Frames,
                 Job::Revision => Kind::Revision,
                 Job::Sound { key, .. } => Kind::Sound(key.clone()),
                 _ => Kind::Other,
             };
+            #[cfg(feature = "effectcraft-inproc")]
+            if let Some(path) = self.in_process_route(&job) {
+                return self.in_process(job, path);
+            }
             if self.conn.is_none() {
-                match Conn::open() {
+                match Conn::open(self.port) {
                     Ok(c) => self.conn = Some(c),
                     Err(error) => {
+                        // Cards render in-process meanwhile: the app being closed isn't an outage.
+                        #[cfg(feature = "effectcraft-inproc")]
+                        if matches!(job, Job::Revision) {
+                            return Reply::Revision(0);
+                        }
                         // Closed: frames still come, rendered from the saved project.
                         if let Job::Frames { store, comp, frames, side, poster } = job
                             && let Some(r) = headless(&self.ctx, store, &comp, frames, side, poster)
@@ -1209,6 +1338,13 @@ mod io {
         }
 
         fn call(&mut self, method: &str, params: Value) -> Result<Result<Value, String>, String> {
+            // In-process: errors are the request's (a project that won't open, a bad comp), never
+            // a lost connection.
+            #[cfg(feature = "effectcraft-inproc")]
+            if let Some(path) = self.via.clone() {
+                let r = self.inproc.get(&path).and_then(|ec| ec.call(method, &params));
+                return Ok(r);
+            }
             let Some(c) = self.conn.as_mut() else { return Err("EffectCraft isn't open".into()) };
             match c.call(method, params) {
                 Ok(v) => Ok(Ok(v)),
@@ -1266,7 +1402,7 @@ mod io {
                             let Some(f) = e.get("frame").and_then(Value::as_i64) else { continue };
                             if e.get("pending").and_then(Value::as_bool) == Some(true) {
                                 pending.push(f);
-                            } else if let Some(bytes) = b64(e.get("jpeg")) {
+                            } else if let Some(bytes) = b64(e.get("jpeg").or_else(|| e.get("png"))) {
                                 match decode(&self.ctx, name(f), &bytes) {
                                     Some(tex) => got.push((f, tex)),
                                     None => failed.push(f),
@@ -1278,7 +1414,7 @@ mod io {
                                 failed.push(f);
                             }
                         }
-                        return Ok(Reply::Frames { store, revision, got, pending, failed, poster: poster_bytes, headless: None });
+                        return Ok(Reply::Frames { store, revision, got, pending, failed, poster: poster_bytes, headless: None, file: None });
                     }
                     Err(e) if unknown(&e) => self.legacy = true,
                     Err(error) => return Ok(Reply::FramesFailed { store, frames, error }),
@@ -1312,9 +1448,72 @@ mod io {
                     Err(_) => failed.push(f),
                 }
             }
-            Ok(Reply::Frames { store, revision, got, pending, failed, poster: poster_bytes, headless: None })
+            Ok(Reply::Frames { store, revision, got, pending, failed, poster: poster_bytes, headless: None, file: None })
         }
     }
+
+    #[cfg(feature = "effectcraft-inproc")]
+    impl Thread {
+        /// What the app has open, asked at most every [`PROBE_EVERY`].
+        fn seen(&mut self) -> Seen {
+            if let Some((at, seen)) = &self.seen
+                && at.elapsed() < PROBE_EVERY
+            {
+                return seen.clone();
+            }
+            let seen = self.ask_app();
+            self.seen = Some((Instant::now(), seen.clone()));
+            seen
+        }
+
+        fn ask_app(&mut self) -> Seen {
+            if self.conn.is_none() {
+                match Conn::open(self.port) {
+                    Ok(c) => self.conn = Some(c),
+                    Err(_) => return Seen::Closed,
+                }
+            }
+            match self.call("project.summary", json!({})) {
+                Ok(Ok(v)) => Seen::Open(v.get("path").and_then(Value::as_str).filter(|p| !p.is_empty()).map(|p| figcraft_ec_inproc::key(Path::new(p)))),
+                Ok(Err(_)) => Seen::Unknown,
+                Err(_) => {
+                    self.conn = None;
+                    Seen::Closed
+                }
+            }
+        }
+
+        /// The card project `job` runs on in-process when [`choose`] says so (`None`: the app).
+        pub(crate) fn in_process_route(&mut self, job: &Job) -> Option<PathBuf> {
+            let project = job.comp().map(|c| c.project.as_str()).filter(|p| !p.is_empty())?;
+            let path = figcraft_ec_inproc::key(Path::new(project));
+            let is_file = path.is_file();
+            // The app is asked only for cards that could render here.
+            let app = if is_file { state_of(&self.seen(), &path) } else { AppState::Closed };
+            (choose(true, is_file, app) == Route::InProc).then_some(path)
+        }
+
+        /// Run `job` on the in-process session of the project at `path`.
+        fn in_process(&mut self, job: Job, path: PathBuf) -> Reply {
+            self.via = Some(path.clone());
+            let r = self.job(job);
+            self.via = None;
+            let file = self.inproc.get(&path).ok().map(|ec| ec.revision());
+            match r {
+                // Frames from the file: as new as the file (`file`), never behind the app's revision.
+                Ok(Reply::Frames { store, got, pending, failed, poster, .. }) => {
+                    Reply::Frames { store, revision: 0, got, pending, failed, poster, headless: None, file: file.or(Some(1)) }
+                }
+                Ok(other) => other,
+                // (in-process calls don't lose connections; kept for safety)
+                Err(error) => Reply::Error(format!("EffectCraft (in FigCraft): {error}")),
+            }
+        }
+    }
+
+    // (src/effectcraft_ui/io/tests.rs)
+    #[cfg(test)]
+    mod tests;
 
     /// Frames rendered at once from the saved project, and how long one run may take (seconds).
     const HEADLESS_BATCH: usize = 12;
@@ -1392,6 +1591,6 @@ mod io {
         if !finished && got.is_empty() {
             return Some(Reply::FramesFailed { store, frames: failed, error: "effectcraft-cli couldn't render the saved project".into() });
         }
-        Some(Reply::Frames { store, revision: 0, got, pending, failed, poster: poster_bytes, headless: Some(stamp) })
+        Some(Reply::Frames { store, revision: 0, got, pending, failed, poster: poster_bytes, headless: Some(stamp), file: None })
     }
 }

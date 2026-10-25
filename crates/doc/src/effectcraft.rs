@@ -18,8 +18,9 @@ pub struct EcComp {
     /// The comp's item id in the project it came from (0: unknown).
     #[serde(default)]
     pub comp_id: u64,
-    /// The `.ecproj` it came from (empty: unknown). Informational: the card plays from whatever
-    /// project EffectCraft has open.
+    /// The `.ecproj` it came from (empty: unknown). The card plays from whatever project the
+    /// EffectCraft app has open; a desktop build with EffectCraft's engine in-process (fork-only
+    /// `effectcraft-inproc`) renders it from this file when the app doesn't have it open.
     #[serde(default)]
     pub project: String,
     /// The stretch shown, in comp seconds.
