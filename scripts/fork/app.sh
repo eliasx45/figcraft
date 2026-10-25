@@ -1,0 +1,118 @@
+#!/bin/sh
+# Opens the FigCraft desktop app, building it first only when the sources changed since the last
+# build (fork-only; mirrors EffectCraft's scripts/fork/app.sh). Agents never build the app after
+# merging: merges pile up and the next launch builds once.
+#
+# The build uses the `local` profile (release without LTO, parallel codegen) in target/local, so a
+# rebuild only recompiles what changed. Only one build runs at a time (a lock); a second launch
+# waits for it. A running app is never quit or replaced.
+#
+# Usage: scripts/fork/app.sh [--status | --build-only] [app args]
+#   --status      print `running`, `stale` or `ready` and exit
+#   --build-only  build if needed, don't launch
+# Exit status 130 when the build was stopped (SIGTERM / SIGINT / SIGHUP), 1 when it failed.
+set -u
+# Started from the Dock, PATH lacks cargo.
+PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+export PATH
+# Remote control always on (docs/control-protocol.md); 9877 is EffectCraft's.
+FIGCRAFT_CONTROL_PORT="${FIGCRAFT_CONTROL_PORT:-7979}"
+export FIGCRAFT_CONTROL_PORT
+# The `local` profile (release without LTO, parallel codegen, incremental) is defined here so the
+# fork leaves Cargo.toml as upstream has it.
+CARGO_PROFILE_LOCAL_INHERITS=release CARGO_PROFILE_LOCAL_LTO=false CARGO_PROFILE_LOCAL_CODEGEN_UNITS=16 CARGO_PROFILE_LOCAL_INCREMENTAL=true
+export CARGO_PROFILE_LOCAL_INHERITS CARGO_PROFILE_LOCAL_LTO CARGO_PROFILE_LOCAL_CODEGEN_UNITS CARGO_PROFILE_LOCAL_INCREMENTAL
+
+root=$(cd "$(dirname "$0")/../.." && pwd)
+target="$root/target/local"
+bin="$target/local/figcraft"
+stamp="$target/built.stamp"
+lock="$target/build.lock"
+log="$target/build.log"
+mkdir -p "$target"
+
+running() { pgrep -f "^$bin( |$)" >/dev/null 2>&1; }
+
+# Sources newer than the last successful build (any file: a change that doesn't affect the app
+# costs one no-op cargo run, then the stamp moves on).
+stale() {
+    [ -x "$bin" ] && [ -f "$stamp" ] || return 0
+    [ -n "$(find "$root/apps" "$root/crates" "$root/assets" "$root/third_party" "$root/Cargo.toml" "$root/Cargo.lock" -newer "$stamp" -type f -print 2>/dev/null | head -n 1)" ]
+}
+
+case "${1:-}" in
+--status)
+    if running; then echo running; elif stale; then echo stale; else echo ready; fi
+    exit 0
+    ;;
+esac
+
+build_pid=""
+stop() {
+    # Stop the whole build (cargo and every rustc it started), then free the lock.
+    if [ -n "$build_pid" ]; then
+        kill -TERM -"$build_pid" 2>/dev/null || kill -TERM "$build_pid" 2>/dev/null
+        wait "$build_pid" 2>/dev/null
+        [ -f "$lock/pid" ] && [ "$(cat "$lock/pid" 2>/dev/null)" = "$$" ] && rm -rf "$lock"
+    fi
+    echo "build stopped" >>"$log"
+    exit 130
+}
+trap stop TERM INT HUP
+
+build() {
+    # One build at a time: mkdir is atomic. A lock left by a process that's gone is cleared.
+    while ! mkdir "$lock" 2>/dev/null; do
+        owner=$(cat "$lock/pid" 2>/dev/null || echo "")
+        if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
+            sleep 2
+        else
+            rm -rf "$lock"
+        fi
+    done
+    echo "$$" >"$lock/pid"
+    # The stamp is taken before the build, so changes merged while it runs make the next launch
+    # build again.
+    : >"$stamp.new"
+    echo "building FigCraft (local profile) $(date)" >"$log"
+    # Job control puts the build in its own process group, so stopping it stops every rustc too.
+    set -m
+    CARGO_TARGET_DIR="$target" nice -n 10 cargo build --profile local -p figcraft --manifest-path "$root/Cargo.toml" >>"$log" 2>&1 &
+    build_pid=$!
+    set +m
+    wait "$build_pid"
+    status=$?
+    build_pid=""
+    if [ "$status" -eq 0 ]; then
+        mv -f "$stamp.new" "$stamp"
+    else
+        rm -f "$stamp.new"
+    fi
+    rm -rf "$lock"
+    return "$status"
+}
+
+# The Dock launcher (scripts/fork/launcher.swift) starts FigCraft itself after the build, so it
+# keeps the launcher's privacy permissions: started by it, only build. (Launchers installed before
+# it passed --build-only ran this without it and got a second copy of the app.)
+case "$(ps -o comm= -p "$PPID" 2>/dev/null)" in
+*.app/Contents/MacOS/FigCraft) set -- --build-only "$@" ;;
+esac
+
+if [ "${1:-}" = "--build-only" ]; then
+    shift
+    if stale; then build || exit 1; fi
+    exit 0
+fi
+
+if running; then
+    # Never quit or replace a running app (it may hold unsaved work): bring it forward instead.
+    echo "FigCraft is already running" >&2
+    exit 0
+fi
+if stale; then
+    build || { echo "build failed, see $log" >&2; exit 1; }
+fi
+cd "$root" || exit 1
+nohup "$bin" "$@" >"$target/app.log" 2>&1 &
+exit 0

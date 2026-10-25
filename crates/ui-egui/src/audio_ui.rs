@@ -30,6 +30,8 @@ pub struct Player {
     sounds: HashMap<String, Arc<figcraft_audio::Sound>>,
     /// The layer whose ruler is being dragged.
     scrub: Option<NodeId>,
+    /// The strip under the pointer when Space went down: it plays or pauses when Space is let go.
+    pub(crate) space: Option<NodeId>,
     /// Why the last play made no sound (shown once).
     failed: Option<String>,
 }
@@ -249,6 +251,34 @@ pub fn input(app: &mut FigApp, ctx: &egui::Context, pos: Pos2, hovered: bool) ->
         }
     }
     false
+}
+
+/// Space tapped (pressed and let go with no click in between) with the pointer over an audio strip
+/// plays or pauses it, no click needed; held while dragging, it still pans the canvas. `hover`: the
+/// pointer on the canvas (screen); `free`: no text is being typed.
+pub fn space(app: &mut FigApp, ctx: &egui::Context, hover: Option<Pos2>, free: bool) {
+    let (down, up, click) = ctx.input(|i| {
+        let (mut down, mut up) = (false, false);
+        for e in &i.events {
+            if let egui::Event::Key { key: egui::Key::Space, pressed, repeat, modifiers, .. } = e {
+                down |= *pressed && !*repeat && modifiers.is_none();
+                up |= !*pressed;
+            }
+        }
+        (down, up, i.pointer.any_pressed())
+    });
+    if down && free {
+        app.audio.space = hover.and_then(|h| {
+            let ds = app.session.ds().ok()?;
+            audio_at(&ds.doc, ds.page, app.to_page(h))
+        });
+    }
+    if click {
+        app.audio.space = None;
+    }
+    if up && let Some(id) = app.audio.space.take() {
+        app.run("audio.togglePlay", json!({"id": id}));
+    }
 }
 
 fn ruler(a: &AudioClip, h: f64) -> f64 {
