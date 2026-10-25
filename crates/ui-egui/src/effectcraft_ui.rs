@@ -410,6 +410,12 @@ fn hover_time(app: &FigApp, doc: &Document, id: NodeId, c: &EcComp, h: Option<Po
 /// The comp time card `id` shows now.
 fn card_time(app: &FigApp, doc: &Document, id: NodeId, c: &EcComp, hover: Option<Pos2>) -> f64 {
     let ec = &app.session.effectcraft;
+    // The card the docked EffectCraft panel edits shows the one playhead they share (no skimming
+    // under the pointer, no audio strip's time).
+    #[cfg(feature = "effectcraft-inproc")]
+    if let Some(p) = app.effectcraft.panel.as_ref().filter(|p| p.open && p.card == id) {
+        return if ec.node == Some(id) { ec.time() } else { p.host.time() };
+    }
     if ec.playing() && ec.node == Some(id) {
         return ec.time();
     }
@@ -879,6 +885,40 @@ impl FigApp {
     }
 }
 
+/// The docked EffectCraft panel's least height, and the canvas height it always leaves.
+#[cfg(feature = "effectcraft-inproc")]
+const PANEL_MIN: f32 = 260.0;
+#[cfg(feature = "effectcraft-inproc")]
+const PANEL_CANVAS_MIN: f32 = 160.0;
+
+/// The docked panel's top edge (`panel`: its rectangle, `height` now): dragging it sizes the panel
+/// (the edge stays under the pointer), a double-click puts back the default (40 % of the window).
+/// Returns the height asked for when it changed; infinite for the default.
+#[cfg(feature = "effectcraft-inproc")]
+fn panel_top_edge(ui: &mut egui::Ui, panel: Rect, height: f32) -> Option<f32> {
+    let grab = ui.style().interaction.resize_grab_radius_side.max(4.0);
+    let y = panel.min.y;
+    let rect = Rect::from_x_y_ranges(panel.x_range(), (y - grab)..=(y + grab));
+    let id = egui::Id::new("effectcraft_panel_edge");
+    let resp = ui.interact(rect, id, egui::Sense::click_and_drag());
+    if resp.hovered() || resp.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+        ui.painter().hline(panel.x_range(), y, egui::Stroke::new(2.0, crate::theme::ACCENT));
+    }
+    if resp.double_clicked() {
+        // The default: forget the dragged height.
+        return Some(f32::INFINITY);
+    }
+    let at = resp.interact_pointer_pos().filter(|_| resp.dragged())?;
+    if resp.drag_started() {
+        let pressed = ui.input(|i| i.pointer.press_origin()).unwrap_or(at);
+        ui.data_mut(|d| d.insert_temp(id, pressed.y - y));
+    }
+    let grabbed: f32 = ui.data(|d| d.get_temp(id)).unwrap_or(0.0);
+    let h = height - (at.y - grabbed - y);
+    (h != height).then_some(h)
+}
+
 /// Fork-only: EffectCraft's Timeline docked at the bottom ([`crate::effectcraft_panel`]).
 #[cfg(feature = "effectcraft-inproc")]
 impl FigApp {
@@ -1006,10 +1046,15 @@ impl FigApp {
         let t = crate::theme::Tokens::get(ctx);
         let mut close = false;
         let mut save = false;
+        // Its height: as dragged at its top edge (kept in the preferences), else 40 % of the window
+        // below the tabs; never less than PANEL_MIN, always leaving the canvas PANEL_CANVAS_MIN.
+        let room = ui.available_rect_before_wrap();
+        let max = (room.height() - PANEL_CANVAS_MIN).max(PANEL_MIN);
+        let asked = self.session.prefs.effectcraft_panel_height.filter(|h| h.is_finite()).unwrap_or(room.height() * 0.4);
+        p.height = asked.clamp(PANEL_MIN, max);
         let shown = egui::Panel::bottom("effectcraft_timeline")
-            .resizable(true)
-            .default_size(p.height)
-            .size_range(120.0..=900.0)
+            .resizable(false)
+            .exact_size(p.height)
             .frame(egui::Frame::NONE.fill(t.panel).stroke(egui::Stroke::new(1.0, t.border)))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -1026,9 +1071,18 @@ impl FigApp {
                     });
                 });
                 let rect = ui.available_rect_before_wrap();
-                p.host.show(ui, rect)
+                let fx = p.host.show(ui, rect);
+                // (the panels paint into the rect: claim it, so the panel keeps its height)
+                ui.allocate_rect(rect, egui::Sense::hover());
+                fx
             });
-        p.height = shown.response.rect.height();
+        // The top edge sizes it.
+        if let Some(h) = panel_top_edge(ui, shown.response.rect, p.height) {
+            let (h, kept) = if h.is_infinite() { (room.height() * 0.4, None) } else { (h, Some(h.clamp(PANEL_MIN, max))) };
+            p.height = h.clamp(PANEL_MIN, max);
+            self.session.prefs.effectcraft_panel_height = kept;
+            self.panels_unsaved = true;
+        }
         // The panel has the keyboard from a click in it until a click elsewhere.
         if let Some(press) = ctx.input(|i| if i.pointer.any_pressed() { i.pointer.interact_pos() } else { None }) {
             p.focused = shown.response.rect.contains(press);

@@ -646,6 +646,9 @@ pub struct Prefs {
     /// The height asked for the main window's pages list, dragged at its lower edge (`None`: a
     /// share of the panel; the interface keeps it within its limits).
     pub pages_height: Option<f32>,
+    /// Fork: the height of the docked EffectCraft panel (`None`: a share of the window).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effectcraft_panel_height: Option<f32>,
     /// The interface language: a language code ("en", "es", "pt-BR") or "system" (the OS or browser
     /// language). Languages without a catalog show English.
     pub language: String,
@@ -729,6 +732,7 @@ impl Default for Prefs {
             theme: "system".into(),
             panel_widths: (240.0, 240.0),
             pages_height: None,
+            effectcraft_panel_height: None,
             language: "system".into(),
             user_name: cmd::comment::DEFAULT_AUTHOR.into(),
             reduce_motion: false,
