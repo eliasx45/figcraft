@@ -42,6 +42,8 @@ const IN_FLIGHT: usize = 2;
 const REPOLL: f64 = 0.2;
 /// Seconds between checks of EffectCraft's project revision (edits there refresh the cards).
 const REVISION_EVERY: f64 = 0.5;
+/// Seconds before a frame that failed is asked for again.
+pub(crate) const FAILED_RETRY: f64 = 10.0;
 /// Seconds between attempts to reach an EffectCraft that wasn't running.
 const RETRY_DOWN: f64 = 2.0;
 /// Frames either side of the playhead kept for long cards.
@@ -58,15 +60,17 @@ const SIDES: [u32; 3] = [240, 480, 960];
 pub(crate) struct StoreKey {
     comp: String,
     comp_id: u64,
+    /// The card's project: setting another one is another store (its frames are asked afresh).
+    project: String,
     side: u32,
 }
 
 impl StoreKey {
-    fn of(c: &EcComp, side: u32) -> StoreKey {
-        StoreKey { comp: c.comp.clone(), comp_id: c.comp_id, side }
+    pub(crate) fn of(c: &EcComp, side: u32) -> StoreKey {
+        StoreKey { comp: c.comp.clone(), comp_id: c.comp_id, project: c.project.clone(), side }
     }
-    fn same_comp(&self, c: &EcComp) -> bool {
-        self.comp == c.comp && self.comp_id == c.comp_id
+    pub(crate) fn same_comp(&self, c: &EcComp) -> bool {
+        self.comp == c.comp && self.comp_id == c.comp_id && self.project == c.project
     }
 }
 
@@ -159,11 +163,13 @@ struct Slot {
 }
 
 #[derive(Default)]
-struct Store {
+pub(crate) struct Store {
     frames: BTreeMap<i64, Slot>,
     /// Frames asked for (or still rendering in EffectCraft) and when.
     pending: HashMap<i64, f64>,
-    failed: HashSet<i64>,
+    /// Frames that failed and when: asked for again after [`FAILED_RETRY`] (the app may have
+    /// opened the project, the file may be there now).
+    failed: HashMap<i64, f64>,
     /// The frame the store was last wanted around (eviction keeps what is near it).
     focus: i64,
     /// Its frames were rendered in-process from the saved project, at this file revision (they
@@ -196,6 +202,8 @@ pub struct Link {
     sounds: HashMap<SoundKey, SoundState>,
     /// Cards whose poster was asked for this session.
     posters: HashSet<NodeId>,
+    /// Cards without a project, and when the app was last asked for its project.
+    project_asked: HashMap<NodeId, f64>,
     /// The comp time each card showed last (it stays there when nothing moves it; explode takes
     /// the comps showing there).
     shown: HashMap<NodeId, f64>,
@@ -221,6 +229,23 @@ pub struct Link {
     /// A docked panel's colour eyedropper is armed: canvas clicks take a colour.
     #[cfg(feature = "effectcraft-inproc")]
     pub(crate) picking: bool,
+}
+
+impl Store {
+    /// Frame `f` failed at `now`.
+    pub(crate) fn fail(&mut self, f: i64, now: f64) {
+        self.pending.remove(&f);
+        self.failed.insert(f, now);
+    }
+}
+
+/// Whether frame `f` of store `s` is to be asked for at `now`: not held fresh (`rev`: the app's
+/// revision; `headless`: frames come from the saved file), not asked for in the last [`REPOLL`],
+/// and not failed in the last [`FAILED_RETRY`].
+pub(crate) fn wants(s: &Store, f: i64, now: f64, rev: u64, headless: bool) -> bool {
+    let file = s.file.is_some();
+    let fresh = |x: &Slot| x.rev >= rev || ((headless || file) && x.rev == 0);
+    !(s.failed.get(&f).is_some_and(|t| now - t < FAILED_RETRY) || s.frames.get(&f).is_some_and(fresh) || s.pending.get(&f).is_some_and(|t| now - t < REPOLL))
 }
 
 impl Link {
@@ -1119,8 +1144,7 @@ impl FigApp {
                         s.pending.insert(f, now);
                     }
                     for f in failed {
-                        s.pending.remove(&f);
-                        s.failed.insert(f);
+                        s.fail(f, now);
                     }
                     if let Some((id, bytes)) = poster
                         && self.session.doc().is_ok_and(|d| d.node(id).is_some_and(|n| n.effectcraft.is_some()))
@@ -1134,8 +1158,7 @@ impl FigApp {
                     self.effectcraft.in_flight = self.effectcraft.in_flight.saturating_sub(1);
                     let s = self.effectcraft.stores.entry(store).or_default();
                     for f in frames {
-                        s.pending.remove(&f);
-                        s.failed.insert(f);
+                        s.fail(f, now);
                     }
                     log::warn!("EffectCraft frames: {error}");
                 }
@@ -1158,6 +1181,14 @@ impl FigApp {
                 }
                 io::Reply::Tree { card, tree } => self.effectcraft_explode(card, &tree),
                 io::Reply::Revealed(comp) => self.toast(format!("{comp} is open in EffectCraft")),
+                io::Reply::AppProject { card, path } => {
+                    // Only a card still without a project (the user may have set one meanwhile).
+                    let empty = self.session.doc().ok().and_then(|d| d.node(card)?.effectcraft.as_deref().map(|c| c.project.is_empty())).unwrap_or(false);
+                    if let Some(path) = path.filter(|_| empty) {
+                        log::info!("EffectCraft card {card:?}: project {path} (open in EffectCraft)");
+                        let _ = self.session.execute("effectcraft.set", &json!({"ids": [card], "project": path}));
+                    }
+                }
                 io::Reply::Error(e) => self.toast(e),
                 io::Reply::Down { error, kind } => {
                     match kind {
@@ -1167,6 +1198,8 @@ impl FigApp {
                             self.effectcraft.sounds.remove(&key);
                         }
                         io::Kind::Other => self.toast(error.clone()),
+                        // (an ask the user never made: no outage)
+                        io::Kind::Quiet => continue,
                     }
                     for s in self.effectcraft.stores.values_mut() {
                         s.pending.clear();
@@ -1220,6 +1253,11 @@ impl FigApp {
                     }
                 }
             }
+            // A card without a project takes the app's, when the app has its comp open.
+            if c.project.is_empty() && self.effectcraft.project_asked.get(id).is_none_or(|t| now - t > FAILED_RETRY) {
+                self.effectcraft.project_asked.insert(*id, now);
+                self.effectcraft_send(io::Job::AppProject { card: *id, comp: c.clone() });
+            }
             if self.effectcraft.in_flight >= IN_FLIGHT {
                 continue;
             }
@@ -1231,9 +1269,7 @@ impl FigApp {
             s.focus = *at;
             let mut frames = Vec::new();
             for f in order(c, *at) {
-                let file = s.file.is_some();
-                let fresh = |x: &Slot| x.rev >= rev || ((headless || file) && x.rev == 0);
-                if s.failed.contains(&f) || s.frames.get(&f).is_some_and(fresh) || s.pending.get(&f).is_some_and(|t| now - t < REPOLL) {
+                if !wants(s, f, now, rev, headless) {
                     continue;
                 }
                 frames.push(f);
@@ -1338,6 +1374,9 @@ mod io {
         Revision,
         Tree { card: NodeId, comp: EcComp, at: f64 },
         Reveal { comp: EcComp, time: f64 },
+        /// The EffectCraft app's open project, when it has card `card`'s comp (a card placed
+        /// without a project gets it).
+        AppProject { card: NodeId, comp: EcComp },
         /// Frames of the project at `path` render from this snapshot (a hosted EffectCraft panel's
         /// unsaved edits) instead of the saved file; `None` goes back to the file.
         #[cfg(feature = "effectcraft-inproc")]
@@ -1349,6 +1388,8 @@ mod io {
         Frames,
         Revision,
         Sound(SoundKey),
+        /// Asked quietly (nothing to tell the user when the app can't be reached).
+        Quiet,
         Other,
     }
 
@@ -1382,6 +1423,8 @@ mod io {
             tree: Value,
         },
         Revealed(String),
+        /// `path`: the app's open project, which has the card's comp.
+        AppProject { card: NodeId, path: Option<String> },
         Error(String),
         Down {
             error: String,
@@ -1401,7 +1444,7 @@ mod io {
         fn comp(&self) -> Option<&EcComp> {
             match self {
                 Job::Frames { comp, .. } | Job::Sound { comp, .. } | Job::Tree { comp, .. } => Some(comp),
-                Job::Revision | Job::Reveal { .. } => None,
+                Job::Revision | Job::Reveal { .. } | Job::AppProject { .. } => None,
                 #[cfg(feature = "effectcraft-inproc")]
                 Job::Override { .. } => None,
             }
@@ -1610,6 +1653,9 @@ mod io {
         /// Projects whose frames render from a hosted panel's session instead of the file.
         #[cfg(feature = "effectcraft-inproc")]
         overrides: std::collections::HashMap<PathBuf, figcraft_ec_inproc::Snapshot>,
+        /// The route each card project took last (logged when it changes).
+        #[cfg(feature = "effectcraft-inproc")]
+        routes: std::collections::HashMap<PathBuf, Route>,
     }
 
     impl Thread {
@@ -1630,6 +1676,8 @@ mod io {
                 worker: None,
                 #[cfg(feature = "effectcraft-inproc")]
                 overrides: Default::default(),
+                #[cfg(feature = "effectcraft-inproc")]
+                routes: Default::default(),
             }
         }
 
@@ -1661,12 +1709,16 @@ mod io {
                 Job::Frames { .. } => Kind::Frames,
                 Job::Revision => Kind::Revision,
                 Job::Sound { key, .. } => Kind::Sound(key.clone()),
+                Job::AppProject { .. } => Kind::Quiet,
                 _ => Kind::Other,
             };
             if self.conn.is_none() {
                 match Conn::open(self.port) {
                     Ok(c) => self.conn = Some(c),
                     Err(error) => {
+                        if let Job::AppProject { card, .. } = job {
+                            return Reply::AppProject { card, path: None };
+                        }
                         // Cards render in-process meanwhile: the app being closed isn't an outage.
                         #[cfg(feature = "effectcraft-inproc")]
                         if matches!(job, Job::Revision) {
@@ -1718,6 +1770,16 @@ mod io {
             match job {
                 #[cfg(feature = "effectcraft-inproc")]
                 Job::Override { .. } => Ok(Reply::Error("EffectCraft: an override is not a request".into())),
+                Job::AppProject { card, comp } => {
+                    let path = match self.call("project.summary", json!({}))? {
+                        Ok(v) => v.get("path").and_then(Value::as_str).filter(|p| !p.is_empty()).map(str::to_string),
+                        Err(_) => None,
+                    };
+                    let Some(path) = path else { return Ok(Reply::AppProject { card, path: None }) };
+                    let p = json!({"comp": comp_ref(&comp), "start": comp.start, "end": comp.start + 1.0 / comp.fps.max(1.0), "depth": 0});
+                    let has = matches!(self.call("figcraft.tree", p)?, Ok(_));
+                    Ok(Reply::AppProject { card, path: has.then_some(path) })
+                }
                 Job::Revision => Ok(match self.call("app.revision", json!({}))? {
                     Ok(v) => Reply::Revision(v.get("revision").and_then(Value::as_u64).unwrap_or(0)),
                     Err(_) => Reply::Revision(0),
@@ -1852,7 +1914,12 @@ mod io {
             let is_file = path.is_file();
             // The app is asked only for cards that could render here.
             let app = if is_file { state_of(&self.seen(), &path) } else { AppState::Closed };
-            (choose(true, is_file, app) == Route::InProc).then_some(path)
+            let route = choose(true, is_file, app);
+            // Said once per project and route (why a card renders where it does).
+            if self.routes.insert(path.clone(), route) != Some(route) {
+                log::info!("EffectCraft card {:?} of {}: {route:?} (file there: {is_file}, app: {app:?})", job.comp().map(|c| c.comp.as_str()).unwrap_or(""), path.display());
+            }
+            (route == Route::InProc).then_some(path)
         }
 
         /// Run `job` on the in-process session of the project at `path`.
@@ -1882,7 +1949,10 @@ mod io {
             };
             let work = match from {
                 Ok((comp_id, snapshot)) => worker::Work { store, comp: comp.comp, comp_id, frames, side, poster, snapshot },
-                Err(error) => return Some(Reply::FramesFailed { store, frames, error }),
+                Err(error) => {
+                    log::warn!("EffectCraft in FigCraft: {} in {}: {error}", comp.comp, path.display());
+                    return Some(Reply::FramesFailed { store, frames, error: format!("in FigCraft: {error}") });
+                }
             };
             if self.worker.is_none() {
                 self.worker = worker::start(self.ctx.clone(), self.out.clone());
@@ -2016,7 +2086,17 @@ mod io {
                     }
                     Ok(Picture::Native { texture, width, height }) => match shower.and_then(|s| s.register(texture.as_ref())) {
                         Some(id) => got.push((f, FrameTex::Native(NativeFrame::new(id, [width as usize, height as usize])))),
-                        None => failed.push(f),
+                        None => {
+                            log::warn!("EffectCraft frame {f} of {}: the GPU frame couldn't be shown; on the CPU", w.comp);
+                            let cpu = w.snapshot.frame(w.comp_id, f, w.side, Compositor::Cpu).ok().and_then(|p| match p {
+                                Picture::Png(bytes) => decode(ctx, format!("effectcraft-inproc-{}-{}-{}-{f}", w.comp_id, w.comp, w.side), &bytes),
+                                Picture::Native { .. } => None,
+                            });
+                            match cpu {
+                                Some(tex) => got.push((f, FrameTex::Cpu(tex))),
+                                None => failed.push(f),
+                            }
+                        }
                     },
                     Err(e) => {
                         log::warn!("EffectCraft frame {f} of {}: {e}", w.comp);

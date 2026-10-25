@@ -78,3 +78,23 @@ fn the_slider_runs_over_the_cards_stretch() {
     assert!((slider_time(&c, pic, 900.0) - 5.1).abs() < 1e-9, "past the end stays on it");
     assert!((slider_time(&c, pic, -50.0) - 1.4).abs() < 1e-9);
 }
+
+/// Regression (live test 25 Oct): a card whose frames failed (comp not in the app's project) and
+/// then got a project stayed black and asked nothing: failed frames were never asked again and
+/// the project wasn't part of the store. Now a failed frame is asked again after FAILED_RETRY,
+/// and another project is another store.
+#[test]
+fn failed_frames_are_asked_again_and_a_new_project_is_a_new_store() {
+    use crate::effectcraft_ui::{FAILED_RETRY, Store, StoreKey, wants};
+    let mut s = Store::default();
+    assert!(wants(&s, 10, 0.0, 0, false));
+    s.fail(10, 1.0);
+    assert!(!wants(&s, 10, 1.0 + FAILED_RETRY / 2.0, 0, false), "not hammered right away");
+    assert!(wants(&s, 10, 1.0 + FAILED_RETRY + 0.1, 0, false), "asked again later");
+    let mut c = main_card();
+    let before = StoreKey::of(&c, 240);
+    c.project = "/x/p.ecproj".into();
+    let after = StoreKey::of(&c, 240);
+    assert_ne!(before, after);
+    assert!(after.same_comp(&c) && !before.same_comp(&c));
+}

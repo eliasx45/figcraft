@@ -326,15 +326,25 @@ impl Pool {
         let at = match self.sessions.iter().position(|s| s.path == k) {
             Some(i) => {
                 let mut s = self.sessions.remove(i);
-                if let Err(e) = s.refresh() {
-                    // Gone or unreadable now: forget it.
-                    return Err(e);
+                match s.refresh() {
+                    Ok(true) => log::info!("EffectCraft in FigCraft: reloaded {} (saved since)", k.display()),
+                    Ok(false) => {}
+                    Err(e) => {
+                        // Gone or unreadable now: forget it.
+                        log::warn!("EffectCraft in FigCraft: {} went away: {e}", k.display());
+                        return Err(e);
+                    }
                 }
                 self.sessions.push(s);
                 self.sessions.len() - 1
             }
             None => {
-                let s = InProc::open(&k)?;
+                let t0 = std::time::Instant::now();
+                let s = InProc::open(&k).map_err(|e| {
+                    log::warn!("EffectCraft in FigCraft: can't open {}: {e}", k.display());
+                    e
+                })?;
+                log::info!("EffectCraft in FigCraft: opened {} in {:.1} s", k.display(), t0.elapsed().as_secs_f64());
                 if self.sessions.len() >= POOL {
                     self.sessions.remove(0);
                 }
