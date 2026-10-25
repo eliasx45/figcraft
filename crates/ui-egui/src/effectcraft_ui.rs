@@ -1368,6 +1368,7 @@ mod io {
     /// Biggest decoded frame accepted (pixels).
     const MAX_PIXELS: usize = 4096 * 4096;
 
+    #[derive(Clone)]
     pub enum Job {
         Frames { store: StoreKey, comp: EcComp, frames: Vec<i64>, side: u32, poster: Option<(NodeId, i64)> },
         Sound { key: SoundKey, comp: EcComp, start: f64, end: f64 },
@@ -1518,8 +1519,8 @@ mod io {
     pub(crate) fn app_state_now(project: &Path) -> AppState {
         let seen = match Conn::open(port()) {
             Err(_) => Seen::Closed,
-            Ok(mut c) => match c.call("project.summary", json!({})) {
-                Ok(v) => Seen::Open(v.get("path").and_then(Value::as_str).filter(|p| !p.is_empty()).map(|p| figcraft_ec_inproc::key(Path::new(p)))),
+            Ok(mut c) => match c.call("engine.execute", summary()) {
+                Ok(v) => seen_of(&v),
                 Err(CallError::Remote(_)) => Seen::Unknown,
                 Err(CallError::Io(_)) => Seen::Closed,
             },
@@ -1602,6 +1603,25 @@ mod io {
                 return Err(CallError::Remote(e.to_string()));
             }
         }
+    }
+
+    /// What the app's `project.summary` says it has open (`path: null`: nothing, or untitled).
+    #[cfg(feature = "effectcraft-inproc")]
+    pub(crate) fn seen_of(summary: &Value) -> Seen {
+        Seen::Open(summary.get("path").and_then(Value::as_str).filter(|p| !p.is_empty()).map(|p| figcraft_ec_inproc::key(Path::new(p))))
+    }
+
+    /// The app's error says it doesn't have the comp (so a saved project can render it here).
+    #[cfg(feature = "effectcraft-inproc")]
+    pub(crate) fn not_in_app(error: &str) -> bool {
+        let e = error.to_ascii_lowercase();
+        e.contains("no composition") || e.contains("no such comp") || e.contains("not found")
+    }
+
+    /// What the app has open: `project.summary` is an engine command, reached through the control
+    /// channel's `engine.execute` (`{path: null}` with nothing open).
+    fn summary() -> Value {
+        json!({"command": "project.summary", "params": {}})
     }
 
     /// How the comp is named to EffectCraft: its id when known, else its name.
@@ -1701,7 +1721,24 @@ mod io {
                     _ => Some(self.in_process(job, path)),
                 };
             }
-            Some(self.over_tcp(job))
+            // The app answered but doesn't have the comp (another or no project open) while the
+            // card's project is on disk: render it here after all.
+            #[cfg(feature = "effectcraft-inproc")]
+            let fallback = match &job {
+                Job::Frames { comp, .. } if !comp.project.is_empty() && Path::new(&comp.project).is_file() => Some(job.clone()),
+                _ => None,
+            };
+            let reply = self.over_tcp(job);
+            #[cfg(feature = "effectcraft-inproc")]
+            if let (Reply::FramesFailed { error, .. }, Some(job)) = (&reply, fallback)
+                && not_in_app(error)
+                && let Some(project) = job.comp().map(|c| figcraft_ec_inproc::key(Path::new(&c.project)))
+            {
+                log::warn!("EffectCraft card {:?}: the app answered \"{error}\"; rendering {} in FigCraft", job.comp().map(|c| c.comp.as_str()).unwrap_or(""), project.display());
+                self.routes.insert(project.clone(), Route::InProc);
+                return self.in_process_frames(job, project);
+            }
+            Some(reply)
         }
 
         fn over_tcp(&mut self, job: Job) -> Reply {
@@ -1771,7 +1808,7 @@ mod io {
                 #[cfg(feature = "effectcraft-inproc")]
                 Job::Override { .. } => Ok(Reply::Error("EffectCraft: an override is not a request".into())),
                 Job::AppProject { card, comp } => {
-                    let path = match self.call("project.summary", json!({}))? {
+                    let path = match self.call("engine.execute", summary())? {
                         Ok(v) => v.get("path").and_then(Value::as_str).filter(|p| !p.is_empty()).map(str::to_string),
                         Err(_) => None,
                     };
@@ -1897,8 +1934,8 @@ mod io {
                     Err(_) => return Seen::Closed,
                 }
             }
-            match self.call("project.summary", json!({})) {
-                Ok(Ok(v)) => Seen::Open(v.get("path").and_then(Value::as_str).filter(|p| !p.is_empty()).map(|p| figcraft_ec_inproc::key(Path::new(p)))),
+            match self.call("engine.execute", summary()) {
+                Ok(Ok(v)) => seen_of(&v),
                 Ok(Err(_)) => Seen::Unknown,
                 Err(_) => {
                     self.conn = None;
@@ -1917,7 +1954,8 @@ mod io {
             let route = choose(true, is_file, app);
             // Said once per project and route (why a card renders where it does).
             if self.routes.insert(path.clone(), route) != Some(route) {
-                log::info!("EffectCraft card {:?} of {}: {route:?} (file there: {is_file}, app: {app:?})", job.comp().map(|c| c.comp.as_str()).unwrap_or(""), path.display());
+                // (WARN for now, so it shows in the app's log)
+                log::warn!("EffectCraft card {:?} of {}: {route:?} (file there: {is_file}, app: {app:?})", job.comp().map(|c| c.comp.as_str()).unwrap_or(""), path.display());
             }
             (route == Route::InProc).then_some(path)
         }

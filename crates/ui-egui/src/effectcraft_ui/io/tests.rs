@@ -89,6 +89,27 @@ mod in_process {
         (p, cid)
     }
 
+    /// Regression (live test 25 Oct, 21:19 build): the probe asked for a `project.summary` method
+    /// the app doesn't have ("unknown method" -> "can't say" -> every card over TCP). It is an
+    /// engine command; an app with nothing open answers `path: null`, which renders here.
+    #[test]
+    fn an_app_with_nothing_or_another_project_open_renders_here() {
+        use super::super::{AppState, Route, Seen, choose, not_in_app, seen_of, state_of, summary};
+        use serde_json::json;
+        assert_eq!(summary()["command"], json!("project.summary"));
+        let card = std::path::PathBuf::from("/x/a.ecproj");
+        let nothing = seen_of(&json!({"activeComp": null, "items": [], "path": null}));
+        assert_eq!(nothing, Seen::Open(None));
+        assert_eq!(choose(true, true, state_of(&nothing, &card)), Route::InProc);
+        let other = seen_of(&json!({"path": "/y/b.ecproj"}));
+        assert_eq!(choose(true, true, state_of(&other, &card)), Route::InProc);
+        let same = seen_of(&json!({"path": "/x/a.ecproj"}));
+        assert_eq!(state_of(&same, &card), AppState::Owns);
+        // The app's "doesn't have it" answers fall back to rendering here.
+        assert!(not_in_app("figcraft.frames: no composition \"13 Spotlight\""));
+        assert!(!not_in_app("EffectCraft closed the connection"));
+    }
+
     #[test]
     fn the_gpu_only_when_shared_showable_and_not_the_poster() {
         assert_eq!(compositor(false, true, true), Compositor::Gpu);
