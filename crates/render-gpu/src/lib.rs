@@ -1273,6 +1273,8 @@ impl GpuTilePainter {
         // Pixels the scene makes (images, greeked text) for the tile level at or above the view's
         // scale: zooming within a level keeps the scene.
         let scale = figcraft_render::tiles::level_at_least(view.scale).map_or(view.scale, figcraft_render::tiles::level_scale);
+        // This view's timings alone (its report).
+        self.counts = Counts::default();
         let t = std::time::Instant::now();
         self.update(doc, page, &opts.skip, scale, opts.lod);
         let shown = view.page_rect();
@@ -1536,14 +1538,16 @@ impl TilePainter for GpuTilePainter {
         let c = self.counts;
         let why = self.last_fallback.map(|w| format!(", last CPU: {w}")).unwrap_or_default();
         format!(
-            "gpu {}: {} on the GPU, {} on the CPU, {} empty{why}; scene {:.1} ms, compose {:.1} ms, submit {:.1} ms",
+            "gpu {}: {} on the GPU, {} on the CPU, {} empty{why}; scene {:.1} ms, effects {:.1} ms, compose {:.1} ms, submit {:.1} ms, wait {:.1} ms",
             self.adapter(),
             c.gpu,
             c.cpu,
             c.empty,
             c.scene_ms,
+            c.fx_ms,
             c.compose_ms,
-            c.submit_ms
+            c.submit_ms,
+            c.wait_ms
         )
     }
 }

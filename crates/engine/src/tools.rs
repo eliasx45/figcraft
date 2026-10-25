@@ -644,6 +644,11 @@ impl ToolState {
     pub fn busy(&self) -> bool {
         !matches!(self.gesture, Gesture::None)
     }
+
+    /// The Hand tool is dragging the view.
+    pub fn panning(&self) -> bool {
+        matches!(self.gesture, Gesture::Pan { .. })
+    }
 }
 
 const HANDLE_PX: f64 = 5.0;

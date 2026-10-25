@@ -487,6 +487,12 @@ pub(crate) fn repaint_in(ctx: &egui::Context, secs: f64) {
     }
 }
 
+/// Which version of the document `ds` shows, for caches of what's in it: unlike the revision, a pan
+/// or zoom doesn't change it (a listing of a large file rebuilt every frame of a pan made it judder).
+pub(crate) fn doc_version(ds: &figcraft_engine::DocState) -> u64 {
+    Arc::as_ptr(&ds.doc) as usize as u64
+}
+
 /// The side panels' widths: the least and most a drag of their edge gives, what a double-click on
 /// the edge puts back, and how much of the window they leave the canvas.
 pub const LEFT_PANEL: std::ops::RangeInclusive<f32> = 200.0..=480.0;

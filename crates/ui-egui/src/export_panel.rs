@@ -256,7 +256,7 @@ fn preview(app: &mut FigApp, ui: &mut Ui, doc: &Document, id: NodeId) {
     if !open {
         return;
     }
-    let revision = app.session.ds().map(|d| d.revision).unwrap_or(0);
+    let revision = app.session.ds().map(crate::doc_version).unwrap_or(0);
     let now = ui.input(|i| i.time);
     let cache_id = Id::new("export_preview_tex");
     let cached: Option<PreviewTex> = ui.data(|d| d.get_temp(cache_id));

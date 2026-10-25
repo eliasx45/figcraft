@@ -44,7 +44,7 @@ pub struct CanvasState {
     zoom_drag: Option<Pos2>,
     pub last_pointer: Option<Point>,
     /// The real pointer was over the canvas last frame (leaving it clears what it hovered).
-    hovering: bool,
+    pub(crate) hovering: bool,
     /// What the pointer shows over the canvas (`ui.inspect`); none while it is elsewhere or
     /// something on the canvas with a cursor of its own has it (a ruler guide, a gradient handle).
     pub cursor: Option<crate::cursors::Shown>,
@@ -211,7 +211,12 @@ pub fn show(app: &mut FigApp, ui: &mut Ui, worker: &mut Worker) {
         app.canvas.tiles.insert(&ctx, d);
     }
     app.canvas.tiles.begin_frame();
-    request_render(app, worker, ppp, max_texture_side, tiled);
+    // A pan with tiles waits for no render of the whole view (hundreds of ms on a busy page, its
+    // edge blank meanwhile): tiles fill what comes into view, and one render follows the release.
+    let panning = app.canvas.middle_pan.is_some() || app.session.tool.panning();
+    if !(tiled && panning) {
+        request_render(app, worker, ppp, max_texture_side, tiled);
+    }
     // Every finished render is shown, even when a newer one is already on its way: renders finish
     // in order, and an edit every frame (a drag) would otherwise never show until it stopped.
     let shown = app.session.ds().map(|ds| (ds.uid, ds.page)).ok();
@@ -277,11 +282,12 @@ pub fn show(app: &mut FigApp, ui: &mut Ui, worker: &mut Worker) {
         }
     }
     crate::dev_mode::draw(app, &painter);
-    // Tiles once the canvas render is done, between edits and never while a button is held.
+    // Tiles once the canvas render is done, between edits and never while a button is held (a
+    // pan's excepted: it edits nothing).
     if tiled
         && !edited
         && !worker.in_flight()
-        && !ctx.input(|i| i.pointer.any_down())
+        && (panning || !ctx.input(|i| i.pointer.any_down()))
         && let Some((visible, scale)) = visible_page(app, ppp)
         && let Some(batch) = app.canvas.tiles.plan(visible, scale)
     {

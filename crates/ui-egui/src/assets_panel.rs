@@ -588,7 +588,7 @@ pub fn show(app: &mut FigApp, ui: &mut Ui) {
     let w = ui.available_width();
     let Ok(ds) = app.session.ds() else { return };
     let doc = ds.doc.clone();
-    let revision = ds.revision;
+    let revision = crate::doc_version(ds);
     let q = search_row(app, ui, w);
     let key = (revision, q.clone(), libraries_key(app, &doc));
     let listing_id = Id::new("asset_listing");

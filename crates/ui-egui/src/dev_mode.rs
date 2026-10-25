@@ -133,7 +133,7 @@ pub fn draw(app: &mut FigApp, painter: &egui::Painter) {
         return;
     }
     let Ok(ds) = app.session.ds() else { return };
-    let key = (ds.uid, ds.revision, ds.page);
+    let key = (ds.uid, crate::doc_version(ds), ds.page);
     if app.ui.dev.annotated_key != Some(key) {
         app.ui.dev.annotated = annotations::on_page(&ds.doc, ds.page);
         app.ui.dev.annotated_key = Some(key);
@@ -273,7 +273,7 @@ pub fn code(app: &mut FigApp, ui: &Ui, id: NodeId, lang: CodeLang) -> String {
         let draft = CodeLink { template, ..link.clone() };
         return code_connect::connected_code(&ds.doc, id, lang, &draft).unwrap_or_default();
     }
-    let key = (ds.uid, ds.revision, id, lang);
+    let key = (ds.uid, crate::doc_version(ds), id, lang);
     match &app.ui.dev.code {
         Some((k, c)) if *k == key => c.clone(),
         _ => {
@@ -291,7 +291,7 @@ pub fn code(app: &mut FigApp, ui: &Ui, id: NodeId, lang: CodeLang) -> String {
 pub fn playground_section(app: &mut FigApp, ui: &mut Ui, doc: &Document, id: NodeId, lang: CodeLang) -> Option<String> {
     figcraft_engine::playground::component_of(doc, id)?;
     let t = Tokens::get(ui.ctx());
-    let Ok((uid, revision)) = app.session.ds().map(|d| (d.uid, d.revision)) else { return None };
+    let Ok((uid, revision)) = app.session.ds().map(|d| (d.uid, crate::doc_version(d))) else { return None };
     let play = &mut app.ui.dev.playground;
     if play.target != Some(id) {
         *play = Playground { target: Some(id), ..Playground::default() };
@@ -821,7 +821,7 @@ pub fn ready_list(app: &mut FigApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
     let Ok(ds) = app.session.ds() else { return };
     let filter = app.ui.dev.filter.min(FILTERS.len() - 1);
-    let key = (ds.uid, ds.revision, filter);
+    let key = (ds.uid, crate::doc_version(ds), filter);
     if app.ui.dev.ready_key != Some(key) {
         let (status, changed_only) = FILTERS.get(filter).map_or((None, false), |f| (f.0, f.1));
         app.ui.dev.ready = devinspect::dev_items(&ds.doc, status, None);
@@ -911,7 +911,7 @@ pub fn focus_bar(app: &mut FigApp, ctx: &egui::Context, canvas: Rect) {
     // A version preview has the top of the canvas.
     let (Some(id), None) = (ds.focused(), ds.preview.as_ref()) else { return };
     let doc = ds.doc.clone();
-    let key = (ds.uid, ds.revision);
+    let key = (ds.uid, crate::doc_version(ds));
     if app.ui.dev.focus_key != Some(key) {
         app.ui.dev.focus_list = devinspect::dev_items(&doc, Some(DevStatus::ReadyForDev), None).into_iter().map(|i| i.id).collect();
         app.ui.dev.focus_key = Some(key);

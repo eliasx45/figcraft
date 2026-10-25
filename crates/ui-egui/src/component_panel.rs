@@ -72,7 +72,7 @@ fn description_ui(app: &mut FigApp, ui: &mut Ui, id: NodeId, description: &str) 
 /// frame).
 fn local_components(app: &FigApp, ui: &Ui, doc: &Document) -> std::sync::Arc<Vec<(NodeId, String)>> {
     type Cached = ((u64, u64), std::sync::Arc<Vec<(NodeId, String)>>);
-    let key = app.session.ds().map(|d| (d.uid, d.revision)).unwrap_or_default();
+    let key = app.session.ds().map(|d| (d.uid, crate::doc_version(d))).unwrap_or_default();
     let id = Id::new("component_panel_local_components");
     if let Some((k, list)) = ui.data(|d| d.get_temp::<Cached>(id))
         && k == key
