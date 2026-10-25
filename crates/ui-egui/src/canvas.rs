@@ -653,6 +653,15 @@ fn zoom_tool(app: &mut FigApp, ui: &Ui, resp: &egui::Response, pos: Pos2, mods: 
 /// the pointer (a comment pin, a ruler guide, a gradient or padding handle): the tool's cursor
 /// then doesn't show.
 fn input(app: &mut FigApp, ui: &mut Ui, resp: &egui::Response) -> bool {
+    // Fork: the docked EffectCraft panel owns the pointer over it (a click on a Timeline row
+    // never zooms, plays or selects on the canvas).
+    #[cfg(feature = "effectcraft-inproc")]
+    if crate::effectcraft_ui::panel_takes_pointer(app, ui.ctx(), app.canvas.dragging) {
+        if std::mem::take(&mut app.canvas.hovering) {
+            app.session.vector_pointer_left();
+        }
+        return true;
+    }
     if crate::proto_canvas::input(app, ui, resp) {
         // A prototype gesture is a press on the canvas too: the Pages list gives up the keyboard.
         app.ui.pages_focus = None;

@@ -169,3 +169,85 @@ fn the_timeline_time_follows_the_card() {
     h.set_time(0.5);
     assert_eq!(h.session().revision, rev, "moving the time is no edit (no re-render)");
 }
+
+/// Whose pointer it is: over the docked panel or pressed in it and still held, the panel's;
+/// a press that began on the canvas keeps its release over the panel; no panel, the canvas's.
+#[test]
+fn the_panel_owns_the_pointer_over_it() {
+    use crate::effectcraft_ui::panel_has_pointer;
+    let panel = Some(egui::Rect::from_min_max(egui::pos2(0.0, 600.0), egui::pos2(1000.0, 900.0)));
+    let (inside, canvas) = (Some(egui::pos2(500.0, 800.0)), Some(egui::pos2(500.0, 300.0)));
+    assert!(panel_has_pointer(panel, inside, None, false), "hovering a Timeline row");
+    assert!(panel_has_pointer(panel, canvas, inside, false), "dragged out of the Timeline onto the canvas");
+    assert!(!panel_has_pointer(panel, inside, canvas, true), "a canvas drag over the panel stays the canvas's");
+    assert!(!panel_has_pointer(panel, canvas, None, false), "over the canvas");
+    assert!(!panel_has_pointer(None, inside, inside, false), "no panel drawn this frame");
+}
+
+/// Regression: a click on a layer row in the docked Timeline zoomed the canvas out (162 % →
+/// 25 %) and played the card. Clicks, drags, scroll and pinch over the panel reach only the
+/// panel, which takes the keyboard.
+#[test]
+fn pointer_input_over_the_panel_never_reaches_the_canvas() {
+    use egui::{Event, PointerButton, pos2, vec2};
+    let (_p, c) = sample("route");
+    let mut s = figcraft_engine::Session::new();
+    s.execute(
+        "effectcraft.place",
+        &json!({"comp": c.comp, "compId": c.comp_id, "project": c.project, "start": 0, "end": 2, "fps": 25, "x": 0, "y": 0, "cardWidth": 1400}),
+    )
+    .unwrap();
+    let card = s.doc().unwrap().nodes().find(|n| n.effectcraft.is_some()).unwrap().id;
+    let mut u = crate::layers_drag_tests::Ui::new(s);
+    assert!(u.app.effectcraft_open_panel(card));
+    u.frame(vec![]);
+    u.frame(vec![]);
+    let (_, rect) = u.app.effectcraft.panel_rect.expect("the panel drew");
+    assert!(!u.app.canvas.rect.intersects(rect.shrink(1.0)), "the canvas is above the panel");
+    // Click away first: the panel gives up the keyboard.
+    let canvas_spot = pos2(u.app.canvas.rect.center().x, u.app.canvas.rect.max.y - 20.0);
+    u.button(canvas_spot, true);
+    u.button(canvas_spot, false);
+    assert!(!u.app.effectcraft.panel.as_ref().unwrap().focused);
+    for _ in 0..40 {
+        u.frame(vec![]);
+    }
+    let state = |u: &crate::layers_drag_tests::Ui| {
+        let ds = u.app.session.ds().unwrap();
+        (ds.view.zoom, ds.view.cx, ds.view.cy, ds.selection.clone(), u.app.session.effectcraft.playing())
+    };
+    let before = state(&u);
+    let row = pos2(rect.center().x, rect.max.y - 60.0);
+    // A click (press and release in one frame, as the control channel sends it) and a slow one.
+    u.frame(vec![
+        Event::PointerMoved(row),
+        Event::PointerButton { pos: row, button: PointerButton::Primary, pressed: true, modifiers: Default::default() },
+        Event::PointerButton { pos: row, button: PointerButton::Primary, pressed: false, modifiers: Default::default() },
+    ]);
+    u.frame(vec![]);
+    assert!(u.app.effectcraft.panel.as_ref().unwrap().focused, "the click gave the panel the keyboard");
+    u.button(row, true);
+    u.button(row, false);
+    // Scroll, ⌘-scroll and a pinch over it.
+    u.frame(vec![Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: vec2(0.0, -120.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: Default::default(),
+    }]);
+    u.frame_with(
+        vec![Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: vec2(0.0, -120.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::COMMAND,
+        }],
+        egui::Modifiers::COMMAND,
+    );
+    u.frame(vec![Event::Zoom(0.5)]);
+    // A drag out of the Timeline, let go over the canvas.
+    u.drag_to(row, canvas_spot);
+    u.button(canvas_spot, false);
+    u.frame(vec![]);
+    assert_eq!(state(&u), before, "the canvas's view, selection, and card transport are untouched");
+}

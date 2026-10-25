@@ -144,7 +144,8 @@ impl EcHost {
     pub fn show(&mut self, ui: &mut egui::Ui, rect: egui::Rect) -> Option<egui::Rect> {
         let before = self.ec.session().revision;
         self.auto.begin_frame();
-        let fx = (rect.width() >= EFFECT_CONTROLS_MIN_ROOM).then(|| egui::Rect::from_min_size(rect.min, egui::vec2(EFFECT_CONTROLS_WIDTH, rect.height())));
+        let fx =
+            (rect.width() >= EFFECT_CONTROLS_MIN_ROOM).then(|| egui::Rect::from_min_size(rect.min, egui::vec2(EFFECT_CONTROLS_WIDTH, rect.height())));
         let timeline = match fx {
             Some(f) => egui::Rect::from_min_max(egui::pos2(f.max.x + 1.0, rect.min.y), rect.max),
             None => rect,
@@ -179,7 +180,11 @@ impl EcHost {
             // Undo is EffectCraft's here, whatever its keymap says: ⌘Z never reaches FigCraft's
             // undo while the panel has focus (and FigCraft's never reaches this session).
             let redo_shift = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
-            for (m, k, id) in [(redo_shift, egui::Key::Z, "edit.redo"), (egui::Modifiers::COMMAND, egui::Key::Y, "edit.redo"), (egui::Modifiers::COMMAND, egui::Key::Z, "edit.undo")] {
+            for (m, k, id) in [
+                (redo_shift, egui::Key::Z, "edit.redo"),
+                (egui::Modifiers::COMMAND, egui::Key::Y, "edit.redo"),
+                (egui::Modifiers::COMMAND, egui::Key::Z, "edit.undo"),
+            ] {
                 if ctx.input_mut(|i| i.consume_key(m, k)) {
                     if let Err(e) = self.guarded_run(id, json!({})) {
                         self.ui.status = e;
@@ -189,7 +194,9 @@ impl EcHost {
             }
         }
         let focus = self.focus;
-        let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| effectcraft_ui_egui::panels::timeline::keys::forward_shortcuts(self, ctx, focus)))
+        let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            effectcraft_ui_egui::panels::timeline::keys::forward_shortcuts(self, ctx, focus)
+        }))
         .unwrap_or_default();
         out.extend(ran.into_iter().map(PanelAction::Ran));
         out
@@ -218,7 +225,8 @@ impl EcHost {
     pub fn pick(&mut self, ctx: &egui::Context, pointer: Option<PointerColor>) -> bool {
         self.pointer = pointer;
         let before = self.ec.session().revision;
-        let armed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| effectcraft_ui_egui::panels::effect_controls::hosted_pick(self, ctx))).unwrap_or(false);
+        let armed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| effectcraft_ui_egui::panels::effect_controls::hosted_pick(self, ctx)))
+            .unwrap_or(false);
         self.pointer = None;
         self.keep_read_only(before);
         armed

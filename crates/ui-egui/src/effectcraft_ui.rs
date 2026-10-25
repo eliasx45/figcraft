@@ -229,6 +229,10 @@ pub struct Link {
     /// A docked panel's colour eyedropper is armed: canvas clicks take a colour.
     #[cfg(feature = "effectcraft-inproc")]
     pub(crate) picking: bool,
+    /// Where the docked panel was drawn, and in which pass (the canvas leaves the pointer over
+    /// it alone: [`panel_takes_pointer`]).
+    #[cfg(feature = "effectcraft-inproc")]
+    pub(crate) panel_rect: Option<(u64, Rect)>,
 }
 
 impl Store {
@@ -245,7 +249,9 @@ impl Store {
 pub(crate) fn wants(s: &Store, f: i64, now: f64, rev: u64, headless: bool) -> bool {
     let file = s.file.is_some();
     let fresh = |x: &Slot| x.rev >= rev || ((headless || file) && x.rev == 0);
-    !(s.failed.get(&f).is_some_and(|t| now - t < FAILED_RETRY) || s.frames.get(&f).is_some_and(fresh) || s.pending.get(&f).is_some_and(|t| now - t < REPOLL))
+    !(s.failed.get(&f).is_some_and(|t| now - t < FAILED_RETRY)
+        || s.frames.get(&f).is_some_and(fresh)
+        || s.pending.get(&f).is_some_and(|t| now - t < REPOLL))
 }
 
 impl Link {
@@ -601,6 +607,25 @@ fn card_at(app: &FigApp, doc: &Document, page: NodeId, pos: Pos2) -> Option<(Nod
         let r = screen_rect(app, doc, id)?;
         r.contains(pos).then(|| (id, fit(r, c.width, c.height)))
     })
+}
+
+/// Whether the pointer belongs to the docked EffectCraft panel (`panel`, as drawn this frame):
+/// over it, or pressed in it and still held (a drag out of the Timeline). A press that began on
+/// the canvas (`canvas_drag`) keeps its moves and release wherever they are.
+#[cfg(feature = "effectcraft-inproc")]
+pub(crate) fn panel_has_pointer(panel: Option<Rect>, hover: Option<Pos2>, held_from: Option<Pos2>, canvas_drag: bool) -> bool {
+    let Some(r) = panel else { return false };
+    !canvas_drag && (hover.is_some_and(|p| r.contains(p)) || held_from.is_some_and(|p| r.contains(p)))
+}
+
+/// The canvas leaves this frame's pointer (clicks, drags, scroll, pinch) to the docked panel:
+/// only the panel acts on what happens over it.
+#[cfg(feature = "effectcraft-inproc")]
+pub(crate) fn panel_takes_pointer(app: &FigApp, ctx: &egui::Context, canvas_drag: bool) -> bool {
+    let pass = ctx.cumulative_pass_nr();
+    let rect = app.effectcraft.panel_rect.filter(|(p, _)| *p == pass).map(|(_, r)| r);
+    let (hover, held_from) = ctx.input(|i| (i.pointer.hover_pos(), i.pointer.press_origin().filter(|_| i.pointer.any_down())));
+    panel_has_pointer(rect, hover, held_from, canvas_drag)
 }
 
 /// A press on a card's play or explode button or its slider (dragged, it scrubs), or a
@@ -968,7 +993,12 @@ impl FigApp {
     /// What the canvas shows under the pointer, for an armed eyedropper: over a card of the
     /// panel's project, its comp frame there as the panel's session renders it; elsewhere the
     /// document's pixel. Sampled only on the click that takes it (the colour is unused before).
-    fn effectcraft_canvas_color(&self, ctx: &egui::Context, p: &crate::effectcraft_panel::Panel, panel: Rect) -> Option<effectcraft_ui_egui::panels::timeline::PointerColor> {
+    fn effectcraft_canvas_color(
+        &self,
+        ctx: &egui::Context,
+        p: &crate::effectcraft_panel::Panel,
+        panel: Rect,
+    ) -> Option<effectcraft_ui_egui::panels::timeline::PointerColor> {
         use effectcraft_ui_egui::panels::timeline::PointerColor;
         let pos = ctx.input(|i| i.pointer.hover_pos())?;
         if !self.canvas.rect.contains(pos) || panel.contains(pos) {
@@ -1083,12 +1113,17 @@ impl FigApp {
             self.session.prefs.effectcraft_panel_height = kept;
             self.panels_unsaved = true;
         }
+        self.effectcraft.panel_rect = Some((ctx.cumulative_pass_nr(), shown.response.rect));
         // The panel has the keyboard from a click in it until a click elsewhere.
         if let Some(press) = ctx.input(|i| if i.pointer.any_pressed() { i.pointer.interact_pos() } else { None }) {
             p.focused = shown.response.rect.contains(press);
             if p.focused {
                 let fx = shown.inner.is_some_and(|r| r.contains(press));
-                p.host.set_focus(if fx { effectcraft_ui_egui::dock::PanelKind::EffectControls } else { effectcraft_ui_egui::dock::PanelKind::Timeline });
+                p.host.set_focus(if fx {
+                    effectcraft_ui_egui::dock::PanelKind::EffectControls
+                } else {
+                    effectcraft_ui_egui::dock::PanelKind::Timeline
+                });
             }
         }
         if p.focused {
@@ -1237,7 +1272,8 @@ impl FigApp {
                 io::Reply::Revealed(comp) => self.toast(format!("{comp} is open in EffectCraft")),
                 io::Reply::AppProject { card, path } => {
                     // Only a card still without a project (the user may have set one meanwhile).
-                    let empty = self.session.doc().ok().and_then(|d| d.node(card)?.effectcraft.as_deref().map(|c| c.project.is_empty())).unwrap_or(false);
+                    let empty =
+                        self.session.doc().ok().and_then(|d| d.node(card)?.effectcraft.as_deref().map(|c| c.project.is_empty())).unwrap_or(false);
                     if let Some(path) = path.filter(|_| empty) {
                         log::info!("EffectCraft card {card:?}: project {path} (open in EffectCraft)");
                         let _ = self.session.execute("effectcraft.set", &json!({"ids": [card], "project": path}));
@@ -1424,18 +1460,42 @@ mod io {
 
     #[derive(Clone)]
     pub enum Job {
-        Frames { store: StoreKey, comp: EcComp, frames: Vec<i64>, side: u32, poster: Option<(NodeId, i64)> },
-        Sound { key: SoundKey, comp: EcComp, start: f64, end: f64 },
+        Frames {
+            store: StoreKey,
+            comp: EcComp,
+            frames: Vec<i64>,
+            side: u32,
+            poster: Option<(NodeId, i64)>,
+        },
+        Sound {
+            key: SoundKey,
+            comp: EcComp,
+            start: f64,
+            end: f64,
+        },
         Revision,
-        Tree { card: NodeId, comp: EcComp, at: f64 },
-        Reveal { comp: EcComp, time: f64 },
+        Tree {
+            card: NodeId,
+            comp: EcComp,
+            at: f64,
+        },
+        Reveal {
+            comp: EcComp,
+            time: f64,
+        },
         /// The EffectCraft app's open project, when it has card `card`'s comp (a card placed
         /// without a project gets it).
-        AppProject { card: NodeId, comp: EcComp },
+        AppProject {
+            card: NodeId,
+            comp: EcComp,
+        },
         /// Frames of the project at `path` render from this snapshot (a hosted EffectCraft panel's
         /// unsaved edits) instead of the saved file; `None` goes back to the file.
         #[cfg(feature = "effectcraft-inproc")]
-        Override { path: PathBuf, snapshot: Option<Box<figcraft_ec_inproc::Snapshot>> },
+        Override {
+            path: PathBuf,
+            snapshot: Option<Box<figcraft_ec_inproc::Snapshot>>,
+        },
     }
 
     /// What a failed job was, so the UI can stop waiting for it.
@@ -1479,7 +1539,10 @@ mod io {
         },
         Revealed(String),
         /// `path`: the app's open project, which has the card's comp.
-        AppProject { card: NodeId, path: Option<String> },
+        AppProject {
+            card: NodeId,
+            path: Option<String>,
+        },
         Error(String),
         Down {
             error: String,
@@ -1788,7 +1851,11 @@ mod io {
                 && not_in_app(error)
                 && let Some(project) = job.comp().map(|c| figcraft_ec_inproc::key(Path::new(&c.project)))
             {
-                log::warn!("EffectCraft card {:?}: the app answered \"{error}\"; rendering {} in FigCraft", job.comp().map(|c| c.comp.as_str()).unwrap_or(""), project.display());
+                log::warn!(
+                    "EffectCraft card {:?}: the app answered \"{error}\"; rendering {} in FigCraft",
+                    job.comp().map(|c| c.comp.as_str()).unwrap_or(""),
+                    project.display()
+                );
                 self.routes.insert(project.clone(), Route::InProc);
                 return self.in_process_frames(job, project);
             }
@@ -1868,7 +1935,7 @@ mod io {
                     };
                     let Some(path) = path else { return Ok(Reply::AppProject { card, path: None }) };
                     let p = json!({"comp": comp_ref(&comp), "start": comp.start, "end": comp.start + 1.0 / comp.fps.max(1.0), "depth": 0});
-                    let has = matches!(self.call("figcraft.tree", p)?, Ok(_));
+                    let has = self.call("figcraft.tree", p)?.is_ok();
                     Ok(Reply::AppProject { card, path: has.then_some(path) })
                 }
                 Job::Revision => Ok(match self.call("app.revision", json!({}))? {
@@ -2009,7 +2076,11 @@ mod io {
             // Said once per project and route (why a card renders where it does).
             if self.routes.insert(path.clone(), route) != Some(route) {
                 // (WARN for now, so it shows in the app's log)
-                log::warn!("EffectCraft card {:?} of {}: {route:?} (file there: {is_file}, app: {app:?})", job.comp().map(|c| c.comp.as_str()).unwrap_or(""), path.display());
+                log::warn!(
+                    "EffectCraft card {:?} of {}: {route:?} (file there: {is_file}, app: {app:?})",
+                    job.comp().map(|c| c.comp.as_str()).unwrap_or(""),
+                    path.display()
+                );
             }
             (route == Route::InProc).then_some(path)
         }
@@ -2034,7 +2105,9 @@ mod io {
         /// Hand frames of the project at `path` to the frame worker (`None`: it answers), or
         /// fail them at once (a project that won't open, an unknown comp, no worker).
         fn in_process_frames(&mut self, job: Job, path: PathBuf) -> Option<Reply> {
-            let Job::Frames { store, comp, frames, side, poster } = job else { return Some(Reply::Error("EffectCraft: not a frames request".into())) };
+            let Job::Frames { store, comp, frames, side, poster } = job else {
+                return Some(Reply::Error("EffectCraft: not a frames request".into()));
+            };
             let from = match self.overrides.get(&path) {
                 Some(snap) => snap.comp_id(&comp_ref(&comp)).map(|id| (id, snap.clone())),
                 None => self.inproc.get(&path).and_then(|ec| Ok((ec.comp_id(&comp_ref(&comp))?, ec.snapshot()))),

@@ -24,9 +24,9 @@ pub mod cursors;
 pub mod dev_compare;
 pub mod dev_mode;
 pub mod dialogs;
-pub mod effectcraft_ui;
 #[cfg(feature = "effectcraft-inproc")]
 pub mod effectcraft_panel;
+pub mod effectcraft_ui;
 pub mod export_panel;
 pub mod field_math;
 pub mod font_preview;
@@ -100,6 +100,8 @@ mod canvas_fixes_tests;
 #[cfg(test)]
 mod canvas_image_rect_tests;
 #[cfg(test)]
+mod card_cover_tests;
+#[cfg(test)]
 mod colorpicker_selection_tests;
 #[cfg(test)]
 mod comments_tests;
@@ -115,8 +117,6 @@ mod dev_mode_tests;
 mod devmode_tail_tests;
 #[cfg(test)]
 mod duplicate_paint_tests;
-#[cfg(test)]
-mod card_cover_tests;
 #[cfg(test)]
 mod effectcraft_ui_tests;
 #[cfg(test)]
