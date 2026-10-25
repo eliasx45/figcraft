@@ -338,6 +338,10 @@ pub fn install_fonts(ctx: &Context, system: bool, cjk: u8) {
             }
         }
     }
+    // Fork: the `medium` family EffectCraft's docked panels draw with (FigCraft's own `semibold`
+    // is kept); here so every later set_fonts keeps it.
+    #[cfg(feature = "effectcraft-inproc")]
+    effectcraft_ui_egui::theme::add_panel_fonts(&mut fonts);
     ctx.set_fonts(fonts);
 }
 

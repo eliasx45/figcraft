@@ -215,6 +215,9 @@ pub struct Link {
     bytes: usize,
     /// The layers over each card, drawn over its frame ([`crate::card_cover`]).
     covers: std::cell::RefCell<crate::card_cover::Covers>,
+    /// EffectCraft's Timeline docked at the bottom (fork-only; its fonts: `theme::install_fonts`).
+    #[cfg(feature = "effectcraft-inproc")]
+    pub(crate) panel: Option<crate::effectcraft_panel::Panel>,
 }
 
 impl Link {
@@ -589,6 +592,11 @@ pub fn input(app: &mut FigApp, ctx: &egui::Context, pos: Pos2, hovered: bool, do
     let (doc, page) = (ds.doc.clone(), ds.page);
     let Some((id, pic)) = card_at(app, &doc, page, pos) else { return false };
     if double {
+        // Fork: EffectCraft's Timeline docked here, editing the card's comp.
+        #[cfg(feature = "effectcraft-inproc")]
+        if app.effectcraft_open_panel(id) {
+            return true;
+        }
         let t = doc.node(id).and_then(|n| n.effectcraft.as_deref()).map(|c| card_time(app, &doc, id, c, Some(pos)));
         app.run("effectcraft.reveal", json!({"id": id, "time": t}));
         return true;
@@ -835,6 +843,130 @@ impl FigApp {
             let _ = (kind, c);
             self.toast("EffectCraft comps play in the desktop app");
         }
+    }
+}
+
+/// Fork-only: EffectCraft's Timeline docked at the bottom ([`crate::effectcraft_panel`]).
+#[cfg(feature = "effectcraft-inproc")]
+impl FigApp {
+    /// Open the Timeline on card `id`'s comp. `false` when it can't (no saved project, the comp
+    /// isn't in it): the caller opens the comp in the EffectCraft app instead.
+    pub(crate) fn effectcraft_open_panel(&mut self, id: NodeId) -> bool {
+        let Some(c) = self.session.doc().ok().and_then(|d| d.node(id)?.effectcraft.as_deref().cloned()) else { return false };
+        let path = std::path::PathBuf::from(&c.project);
+        if c.project.is_empty() || !path.is_file() {
+            return false;
+        }
+        let key = figcraft_ec_inproc::key(&path);
+        if let Some(p) = self.effectcraft.panel.as_mut()
+            && p.host.path() == key
+            && p.card == id
+        {
+            p.open = true;
+            p.focused = true;
+            return true;
+        }
+        if let Some(p) = &self.effectcraft.panel
+            && p.host.is_dirty()
+        {
+            self.toast("Save the EffectCraft edits first (⌘S in its Timeline)");
+            if let Some(p) = self.effectcraft.panel.as_mut() {
+                p.open = true;
+            }
+            return true;
+        }
+        let owns = !matches!(io::app_state_now(&key), io::AppState::Closed | io::AppState::Other);
+        match crate::effectcraft_panel::EcHost::open(&key, &c, owns) {
+            Ok(host) => {
+                if let Some(old) = self.effectcraft.panel.take() {
+                    self.effectcraft_send(io::Job::Override { path: old.path(), snapshot: None });
+                }
+                let height = 280.0;
+                self.effectcraft.panel = Some(crate::effectcraft_panel::Panel { host, card: id, open: true, focused: true, height });
+                true
+            }
+            Err(e) => {
+                log::warn!("EffectCraft Timeline: {e}");
+                false
+            }
+        }
+    }
+
+    /// The docked Timeline (before the canvas takes the rest of the window): its header, the
+    /// panel, its keys while it has focus, and the card following its edits.
+    pub(crate) fn effectcraft_panel_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let Some(mut p) = self.effectcraft.panel.take() else { return };
+        if !p.open {
+            self.effectcraft.panel = Some(p);
+            return;
+        }
+        let t = crate::theme::Tokens::get(ctx);
+        let mut close = false;
+        let mut save = false;
+        let shown = egui::Panel::bottom("effectcraft_timeline")
+            .resizable(true)
+            .default_size(p.height)
+            .size_range(120.0..=900.0)
+            .frame(egui::Frame::NONE.fill(t.panel).stroke(egui::Stroke::new(1.0, t.border)))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add_space(8.0);
+                    ui.strong("EffectCraft Timeline");
+                    if let Some(why) = p.host.read_only() {
+                        ui.label(egui::RichText::new(why).color(t.text_secondary));
+                    } else if p.host.is_dirty() {
+                        ui.label("● unsaved");
+                        save = ui.button("Save").clicked();
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        close = ui.button("Close").clicked();
+                    });
+                });
+                let rect = ui.available_rect_before_wrap();
+                p.host.show(ui, rect)
+            });
+        p.height = shown.response.rect.height();
+        // The panel has the keyboard from a click in it until a click elsewhere.
+        if let Some(press) = ctx.input(|i| if i.pointer.any_pressed() { i.pointer.interact_pos() } else { None }) {
+            p.focused = shown.response.rect.contains(press);
+            if p.focused {
+                let fx = shown.inner.is_some_and(|r| r.contains(press));
+                p.host.set_focus(if fx { effectcraft_ui_egui::dock::PanelKind::EffectControls } else { effectcraft_ui_egui::dock::PanelKind::Timeline });
+            }
+        }
+        if p.focused {
+            for a in p.host.keys(ctx) {
+                match a {
+                    crate::effectcraft_panel::PanelAction::Play => {
+                        self.run("effectcraft.togglePlay", json!({"id": p.card}));
+                    }
+                    crate::effectcraft_panel::PanelAction::Save => save = true,
+                    crate::effectcraft_panel::PanelAction::Ran(_) => {}
+                }
+            }
+        }
+        if save {
+            let owns = !matches!(io::app_state_now(p.host.path()), io::AppState::Closed | io::AppState::Other);
+            match p.host.save(owns) {
+                Ok(()) => self.toast("Saved the EffectCraft project"),
+                Err(e) => self.toast(e),
+            }
+        }
+        // Edits re-render the card from this session.
+        let rev = effectcraft_ui_egui::panels::timeline::TimelineHost::session(&p.host).revision;
+        if p.host.read_only().is_none() && rev != p.host.shown_revision {
+            p.host.shown_revision = rev;
+            self.effectcraft_send(io::Job::Override { path: p.path(), snapshot: Some(Box::new(p.host.snapshot())) });
+        }
+        if close {
+            p.open = false;
+            if !p.host.is_dirty() {
+                self.effectcraft_send(io::Job::Override { path: p.path(), snapshot: None });
+                return;
+            }
+            self.toast("The EffectCraft edits are kept: double-click the card to save them");
+        }
+        self.effectcraft.panel = Some(p);
     }
 }
 
@@ -1123,6 +1255,10 @@ mod io {
         Revision,
         Tree { card: NodeId, comp: EcComp, at: f64 },
         Reveal { comp: EcComp, time: f64 },
+        /// Frames of the project at `path` render from this snapshot (a hosted EffectCraft panel's
+        /// unsaved edits) instead of the saved file; `None` goes back to the file.
+        #[cfg(feature = "effectcraft-inproc")]
+        Override { path: PathBuf, snapshot: Option<Box<figcraft_ec_inproc::Snapshot>> },
     }
 
     /// What a failed job was, so the UI can stop waiting for it.
@@ -1183,6 +1319,8 @@ mod io {
             match self {
                 Job::Frames { comp, .. } | Job::Sound { comp, .. } | Job::Tree { comp, .. } => Some(comp),
                 Job::Revision | Job::Reveal { .. } => None,
+                #[cfg(feature = "effectcraft-inproc")]
+                Job::Override { .. } => None,
             }
         }
     }
@@ -1248,6 +1386,20 @@ mod io {
     /// Seconds between asks of which project the app has open.
     #[cfg(feature = "effectcraft-inproc")]
     const PROBE_EVERY: Duration = Duration::from_secs(2);
+
+    /// Ask the EffectCraft app now (its own connection) what it has to do with `project`.
+    #[cfg(feature = "effectcraft-inproc")]
+    pub(crate) fn app_state_now(project: &Path) -> AppState {
+        let seen = match Conn::open(port()) {
+            Err(_) => Seen::Closed,
+            Ok(mut c) => match c.call("project.summary", json!({})) {
+                Ok(v) => Seen::Open(v.get("path").and_then(Value::as_str).filter(|p| !p.is_empty()).map(|p| figcraft_ec_inproc::key(Path::new(p)))),
+                Err(CallError::Remote(_)) => Seen::Unknown,
+                Err(CallError::Io(_)) => Seen::Closed,
+            },
+        };
+        state_of(&seen, &figcraft_ec_inproc::key(project))
+    }
 
     impl Io {
         pub fn start(ctx: egui::Context) -> Option<Io> {
@@ -1372,6 +1524,9 @@ mod io {
         /// The in-process frame worker (started with the first in-process frames).
         #[cfg(feature = "effectcraft-inproc")]
         worker: Option<Sender<worker::Work>>,
+        /// Projects whose frames render from a hosted panel's session instead of the file.
+        #[cfg(feature = "effectcraft-inproc")]
+        overrides: std::collections::HashMap<PathBuf, figcraft_ec_inproc::Snapshot>,
     }
 
     impl Thread {
@@ -1390,11 +1545,24 @@ mod io {
                 out,
                 #[cfg(feature = "effectcraft-inproc")]
                 worker: None,
+                #[cfg(feature = "effectcraft-inproc")]
+                overrides: Default::default(),
             }
         }
 
         /// Answer `job`: `None` when the in-process frame worker took it (it answers on `out`).
         pub(crate) fn run(&mut self, job: Job) -> Option<Reply> {
+            #[cfg(feature = "effectcraft-inproc")]
+            let job = match job {
+                Job::Override { path, snapshot } => {
+                    match snapshot {
+                        Some(s) => self.overrides.insert(figcraft_ec_inproc::key(&path), *s),
+                        None => self.overrides.remove(&figcraft_ec_inproc::key(&path)),
+                    };
+                    return None;
+                }
+                job => job,
+            };
             #[cfg(feature = "effectcraft-inproc")]
             if let Some(path) = self.in_process_route(&job) {
                 return match job {
@@ -1459,6 +1627,8 @@ mod io {
         /// Run `job`: `Err` is a lost connection.
         fn job(&mut self, job: Job) -> Result<Reply, String> {
             match job {
+                #[cfg(feature = "effectcraft-inproc")]
+                Job::Override { .. } => Ok(Reply::Error("EffectCraft: an override is not a request".into())),
                 Job::Revision => Ok(match self.call("app.revision", json!({}))? {
                     Ok(v) => Reply::Revision(v.get("revision").and_then(Value::as_u64).unwrap_or(0)),
                     Err(_) => Reply::Revision(0),
@@ -1617,7 +1787,11 @@ mod io {
         /// fail them at once (a project that won't open, an unknown comp, no worker).
         fn in_process_frames(&mut self, job: Job, path: PathBuf) -> Option<Reply> {
             let Job::Frames { store, comp, frames, side, poster } = job else { return Some(Reply::Error("EffectCraft: not a frames request".into())) };
-            let work = match self.inproc.get(&path).and_then(|ec| Ok((ec.comp_id(&comp_ref(&comp))?, ec.snapshot()))) {
+            let from = match self.overrides.get(&path) {
+                Some(snap) => snap.comp_id(&comp_ref(&comp)).map(|id| (id, snap.clone())),
+                None => self.inproc.get(&path).and_then(|ec| Ok((ec.comp_id(&comp_ref(&comp))?, ec.snapshot()))),
+            };
+            let work = match from {
                 Ok((comp_id, snapshot)) => worker::Work { store, comp: comp.comp, comp_id, frames, side, poster, snapshot },
                 Err(error) => return Some(Reply::FramesFailed { store, frames, error }),
             };

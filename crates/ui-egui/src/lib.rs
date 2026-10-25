@@ -25,6 +25,8 @@ pub mod dev_compare;
 pub mod dev_mode;
 pub mod dialogs;
 pub mod effectcraft_ui;
+#[cfg(feature = "effectcraft-inproc")]
+pub mod effectcraft_panel;
 pub mod export_panel;
 pub mod field_math;
 pub mod font_preview;
@@ -1748,6 +1750,11 @@ impl FigApp {
                     a11y::region(&mut self.ui.nav, ui, a11y::Region::Properties, egui::accesskit::Role::Pane, label);
                     right::right_panel(self, ui)
                 });
+        }
+        // Fork: EffectCraft's Timeline docked under the canvas.
+        #[cfg(feature = "effectcraft-inproc")]
+        if !hidden {
+            self.effectcraft_panel_ui(ui, &ctx);
         }
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(t.canvas)).show(ui, |ui| {
             let worker = self.worker.take();

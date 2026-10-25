@@ -1214,6 +1214,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "craft-ui"
+version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=5c874d51eeb3de70e735c8ce87a59a7dedd47675#5c874d51eeb3de70e735c8ce87a59a7dedd47675"
+dependencies = [
+ "egui",
+ "serde",
+]
+
+[[package]]
 name = "crc32fast"
 version = "1.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1937,6 +1946,37 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
+ "web-time",
+]
+
+[[package]]
+name = "effectcraft-ui-egui"
+version = "0.10.0"
+dependencies = [
+ "craft-ui",
+ "effectcraft-buildgen",
+ "effectcraft-color",
+ "effectcraft-engine",
+ "effectcraft-geom",
+ "effectcraft-gpu",
+ "effectcraft-keyframe",
+ "effectcraft-media",
+ "effectcraft-path",
+ "effectcraft-project",
+ "effectcraft-render",
+ "effectcraft-text",
+ "effectcraft-time",
+ "eframe",
+ "egui",
+ "image",
+ "kurbo",
+ "log",
+ "pollster 0.4.0",
+ "rayon",
+ "serde",
+ "serde_json",
+ "sys-locale",
+ "toml",
  "web-time",
 ]
 
@@ -2737,6 +2777,7 @@ version = "0.7.0"
 dependencies = [
  "base64 0.22.1",
  "cpal",
+ "effectcraft-ui-egui",
  "egui",
  "egui_extras",
  "figcraft-audio",
@@ -6834,6 +6875,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
+]
+
+[[package]]
+name = "sys-locale"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8eab9a99a024a169fe8a903cf9d4a3b3601109bcc13bd9e3c6fff259138626c4"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

@@ -25,6 +25,8 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 mod frames;
+/// EffectCraft's engine, for hosts of its panels (the Timeline names its `Session`).
+pub use effectcraft_engine;
 pub use frames::{Compositor, Picture, Snapshot, gpu_shared, share_device};
 
 use effectcraft_engine::Session;
@@ -118,11 +120,42 @@ impl InProc {
         u64::try_from(self.stamp.modified / 1_000_000_000).unwrap_or(u64::MAX)
     }
 
-    /// The revision `figcraft.frames` / `app.revision` report: changes with every save.
+    /// The revision `figcraft.frames` / `app.revision` report: changes with every save, and
+    /// with every edit made in this session (a hosted panel editing it).
     pub fn revision(&self) -> u64 {
         // Never 0 (FigCraft reads 0 as "not known").
-        let mixed = (self.stamp.modified as u64) ^ self.stamp.len.rotate_left(32);
+        let mixed = (self.stamp.modified as u64) ^ self.stamp.len.rotate_left(32) ^ self.session.revision.wrapping_mul(0x9E37_79B9_7F4A_7C15);
         mixed.max(1)
+    }
+
+    /// The session (a hosted EffectCraft panel draws and edits it).
+    pub fn session(&self) -> &Session {
+        &self.session
+    }
+
+    pub fn session_mut(&mut self) -> &mut Session {
+        &mut self.session
+    }
+
+    /// Edits not saved yet.
+    pub fn is_dirty(&self) -> bool {
+        self.session.is_dirty()
+    }
+
+    /// Save the project over its file with EffectCraft's own save (atomic; refused when the file
+    /// changed on disk since it was opened or saved here).
+    pub fn save(&mut self) -> Result<(), String> {
+        let path = self.path.to_str().ok_or("not a UTF-8 path")?.to_string();
+        guarded("save", || self.session.execute("file.save", json!({"path": path})).map(|_| ()).map_err(|e| e.to_string()))?;
+        // What's on disk is now this session: no reload for it.
+        self.stamp = stamp(&self.path)?;
+        Ok(())
+    }
+
+    /// Throw away this session's edits: the project as saved.
+    pub fn reload(&mut self) -> Result<(), String> {
+        *self = InProc::open(&self.path)?;
+        Ok(())
     }
 
     /// Reopen the project when its file changed since it was opened (saved in EffectCraft).

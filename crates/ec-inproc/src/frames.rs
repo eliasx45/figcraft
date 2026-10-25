@@ -53,6 +53,7 @@ pub enum Compositor {
 }
 
 /// What rendering a comp of one project reads, detached from its session (cheap: shared `Arc`s).
+#[derive(Clone)]
 pub struct Snapshot {
     project: Arc<effectcraft_engine::project::Project>,
     services: Arc<dyn effectcraft_engine::Services>,
@@ -88,6 +89,22 @@ impl InProc {
 }
 
 impl Snapshot {
+    /// The id of the comp `comp` names (its id, or its name when that is unambiguous).
+    pub fn comp_id(&self, comp: &Value) -> Result<u64, String> {
+        match comp {
+            Value::Number(n) => n.as_u64().filter(|id| self.project.comp(ItemId(*id)).is_some()).ok_or_else(|| format!("no composition {n}")),
+            Value::String(name) => {
+                let mut found = self.project.items.values().filter(|i| &i.name == name && i.as_comp().is_some()).map(|i| i.id.0);
+                match (found.next(), found.next()) {
+                    (Some(id), None) => Ok(id),
+                    (Some(_), Some(_)) => Err(format!("more than one composition is called {name:?}")),
+                    _ => Err(format!("no composition {name:?}")),
+                }
+            }
+            _ => Err("not a composition id or name".into()),
+        }
+    }
+
     /// A session over this snapshot (`cache`: share the layer cache; a CPU retry after a failed
     /// GPU attempt doesn't, as EffectCraft's viewer does).
     fn session(&self, cache: bool) -> Session {
