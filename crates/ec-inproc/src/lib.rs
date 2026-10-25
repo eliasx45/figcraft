@@ -13,12 +13,19 @@
 //!   session on the next call and changes it.
 //! - `figcraft.reveal` needs the app (it opens the comp in EffectCraft's UI): refused here.
 //!
+//! Frames for the canvas render off the link thread from a [`Snapshot`], on EffectCraft's GPU
+//! compositor sharing FigCraft's wgpu device when the app shared it ([`share_device`]), as GPU
+//! textures egui draws without a copy ([`Picture::Native`]); else on the CPU.
+//!
 //! The session never saves, never announces itself as an EffectCraft host and writes no
 //! EffectCraft settings (it has no config directory). [`Pool`] keeps a few sessions, one per
 //! project.
 
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
+
+mod frames;
+pub use frames::{Compositor, Picture, Snapshot, gpu_shared, share_device};
 
 use effectcraft_engine::Session;
 use effectcraft_engine::project::ItemId;

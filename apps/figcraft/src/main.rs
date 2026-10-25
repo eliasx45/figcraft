@@ -259,6 +259,8 @@ fn main() -> eframe::Result {
                 _cc.egui_ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
             }
             gpu_tiles::install(_cc, gpu_canvas);
+            #[cfg(feature = "effectcraft-inproc")]
+            gpu_tiles::install_effectcraft(_cc);
             Ok(Box::new(App {
                 queue,
                 ctx_slot,

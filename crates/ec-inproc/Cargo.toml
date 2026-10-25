@@ -16,6 +16,10 @@ workspace = true
 effectcraft-engine = { path = "../../../effectcraft/crates/engine" }
 effectcraft-media = { path = "../../../effectcraft/crates/media" }
 effectcraft-expr = { path = "../../../effectcraft/crates/expr" }
+# EffectCraft's GPU compositor on FigCraft's own wgpu device (the app hands it over); frames stay
+# GPU textures that egui draws. wgpu 30 is the version eframe 0.36 uses.
+effectcraft-gpu = { path = "../../../effectcraft/crates/gpu" }
+wgpu = { version = "30.0.1", default-features = false }
 serde_json = { workspace = true }
 base64 = { workspace = true }
 log = { workspace = true }

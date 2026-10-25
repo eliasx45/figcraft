@@ -13,9 +13,12 @@
 //!
 //! Fork-only, with the `effectcraft-inproc` feature (desktop): a card whose saved `.ecproj` is on
 //! disk renders through EffectCraft's engine linked into FigCraft (`figcraft-ec-inproc`, the same
-//! `figcraft.*` methods answered in-process, CPU frames as PNG) whenever the EffectCraft app is
+//! `figcraft.*` methods answered in-process) whenever the EffectCraft app is
 //! closed or has another project open; when the app has that project open its live edits win and
 //! the card asks the app as before (`io::choose`). A save of the file refreshes those frames.
+//! Those frames render on their own worker (`io::worker`), one at a time, the newest request per
+//! card winning; on EffectCraft's GPU compositor sharing the window's wgpu device when the app
+//! shared it ([`set_native_frames`]), kept as GPU textures egui draws directly, else on the CPU.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -67,8 +70,89 @@ impl StoreKey {
     }
 }
 
+/// A card frame's texture: decoded on the CPU, or EffectCraft's GPU texture registered with egui
+/// (in-process frames on the shared device: no copy through the CPU).
+pub(crate) enum FrameTex {
+    Cpu(egui::TextureHandle),
+    #[cfg_attr(not(feature = "effectcraft-inproc"), allow(dead_code))]
+    Native(NativeFrame),
+}
+
+impl FrameTex {
+    pub(crate) fn id(&self) -> egui::TextureId {
+        match self {
+            FrameTex::Cpu(t) => t.id(),
+            FrameTex::Native(n) => n.id,
+        }
+    }
+
+    pub(crate) fn size(&self) -> [usize; 2] {
+        match self {
+            FrameTex::Cpu(t) => t.size(),
+            FrameTex::Native(n) => n.size,
+        }
+    }
+}
+
+/// The app's way to show EffectCraft's GPU frames (a `wgpu::Texture` on the window's device,
+/// passed as `Any` so this crate needs no wgpu) as egui textures.
+pub trait NativeFrames: Send + Sync {
+    /// The egui texture showing `texture`; `None` when it isn't one this app can show.
+    fn register(&self, texture: &(dyn std::any::Any + Send + Sync)) -> Option<egui::TextureId>;
+    fn free(&self, id: egui::TextureId);
+}
+
+static NATIVE_FRAMES: std::sync::OnceLock<Box<dyn NativeFrames>> = std::sync::OnceLock::new();
+
+/// Show in-process EffectCraft GPU frames through `frames` (once per process).
+pub fn set_native_frames(frames: Box<dyn NativeFrames>) {
+    let _ = NATIVE_FRAMES.set(frames);
+}
+
+#[cfg_attr(not(feature = "effectcraft-inproc"), allow(dead_code))]
+pub(crate) fn native_frames() -> Option<&'static dyn NativeFrames> {
+    NATIVE_FRAMES.get().map(|b| b.as_ref())
+}
+
+/// A registered GPU frame. Dropped, its texture id is freed two UI passes later (the pass that
+/// dropped it may still draw it).
+pub(crate) struct NativeFrame {
+    id: egui::TextureId,
+    size: [usize; 2],
+}
+
+impl NativeFrame {
+    #[cfg_attr(not(feature = "effectcraft-inproc"), allow(dead_code))]
+    pub(crate) fn new(id: egui::TextureId, size: [usize; 2]) -> NativeFrame {
+        NativeFrame { id, size }
+    }
+}
+
+/// Ids of dropped GPU frames: (dropped this pass, dropped the pass before).
+static RETIRED: std::sync::Mutex<(Vec<egui::TextureId>, Vec<egui::TextureId>)> = std::sync::Mutex::new((Vec::new(), Vec::new()));
+
+impl Drop for NativeFrame {
+    fn drop(&mut self) {
+        RETIRED.lock().unwrap_or_else(std::sync::PoisonError::into_inner).0.push(self.id);
+    }
+}
+
+/// Free the GPU frames dropped two passes ago (once per UI pass).
+fn retire_native_frames() {
+    let old = {
+        let mut r = RETIRED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let newer = std::mem::take(&mut r.0);
+        std::mem::replace(&mut r.1, newer)
+    };
+    if let Some(f) = NATIVE_FRAMES.get() {
+        for id in old {
+            f.free(id);
+        }
+    }
+}
+
 struct Slot {
-    tex: egui::TextureHandle,
+    tex: FrameTex,
     /// EffectCraft's project revision the frame was rendered at.
     rev: u64,
     bytes: usize,
@@ -141,8 +225,8 @@ impl Link {
 
     /// The texture of comp frame `f` of `c`, or the nearest one there is within the card's
     /// stretch and `NEAR` of `f` (else the card shows its poster, not some other moment).
-    fn texture_near(&self, c: &EcComp, f: i64) -> Option<&egui::TextureHandle> {
-        let mut best: Option<(i64, u32, &egui::TextureHandle)> = None;
+    fn texture_near(&self, c: &EcComp, f: i64) -> Option<&FrameTex> {
+        let mut best: Option<(i64, u32, &FrameTex)> = None;
         let r = c.frames();
         let reach = (c.fps * NEAR).round().max(1.0) as i64;
         let (lo, hi) = ((f - reach).max(*r.start()), (f + reach).min(*r.end()));
@@ -615,6 +699,7 @@ impl FigApp {
     /// strips. Runs every frame after the UI.
     pub(crate) fn effectcraft_sync(&mut self, ctx: &egui::Context) {
         let now = ctx.input(|i| i.time);
+        retire_native_frames();
         // The playhead's card went away (deleted, undone, another file).
         if let Some(n) = self.session.effectcraft.node
             && !self.session.doc().is_ok_and(|d| d.node(n).is_some_and(|n| n.effectcraft.is_some()))
@@ -1054,7 +1139,7 @@ mod io {
         Frames {
             store: StoreKey,
             revision: u64,
-            got: Vec<(i64, egui::TextureHandle)>,
+            got: Vec<(i64, super::FrameTex)>,
             pending: Vec<i64>,
             failed: Vec<i64>,
             poster: Option<(NodeId, Vec<u8>)>,
@@ -1171,10 +1256,11 @@ mod io {
             std::thread::Builder::new()
                 .name("effectcraft-link".into())
                 .spawn(move || {
-                    let mut link = Thread::new(ctx, port());
+                    let mut link = Thread::new(ctx, port(), rtx.clone());
                     while let Ok(job) = jrx.recv() {
                         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| link.run(job)));
-                        let reply = r.unwrap_or_else(|_| Reply::Error("EffectCraft link: an internal error".into()));
+                        // `None`: handed to the in-process frame worker, which answers itself.
+                        let Some(reply) = r.unwrap_or_else(|_| Some(Reply::Error("EffectCraft link: an internal error".into()))) else { continue };
                         if rtx.send(reply).is_err() {
                             break;
                         }
@@ -1280,10 +1366,16 @@ mod io {
         /// What the app last said it has open, and when.
         #[cfg(feature = "effectcraft-inproc")]
         seen: Option<(Instant, Seen)>,
+        /// Where replies go (the in-process frame worker answers there itself).
+        #[cfg_attr(not(feature = "effectcraft-inproc"), allow(dead_code))]
+        out: Sender<Reply>,
+        /// The in-process frame worker (started with the first in-process frames).
+        #[cfg(feature = "effectcraft-inproc")]
+        worker: Option<Sender<worker::Work>>,
     }
 
     impl Thread {
-        pub(crate) fn new(ctx: egui::Context, port: u16) -> Thread {
+        pub(crate) fn new(ctx: egui::Context, port: u16, out: Sender<Reply>) -> Thread {
             Thread {
                 conn: None,
                 legacy: false,
@@ -1295,20 +1387,31 @@ mod io {
                 via: None,
                 #[cfg(feature = "effectcraft-inproc")]
                 seen: None,
+                out,
+                #[cfg(feature = "effectcraft-inproc")]
+                worker: None,
             }
         }
 
-        pub(crate) fn run(&mut self, job: Job) -> Reply {
+        /// Answer `job`: `None` when the in-process frame worker took it (it answers on `out`).
+        pub(crate) fn run(&mut self, job: Job) -> Option<Reply> {
+            #[cfg(feature = "effectcraft-inproc")]
+            if let Some(path) = self.in_process_route(&job) {
+                return match job {
+                    Job::Frames { .. } => self.in_process_frames(job, path),
+                    _ => Some(self.in_process(job, path)),
+                };
+            }
+            Some(self.over_tcp(job))
+        }
+
+        fn over_tcp(&mut self, job: Job) -> Reply {
             let kind = match &job {
                 Job::Frames { .. } => Kind::Frames,
                 Job::Revision => Kind::Revision,
                 Job::Sound { key, .. } => Kind::Sound(key.clone()),
                 _ => Kind::Other,
             };
-            #[cfg(feature = "effectcraft-inproc")]
-            if let Some(path) = self.in_process_route(&job) {
-                return self.in_process(job, path);
-            }
             if self.conn.is_none() {
                 match Conn::open(self.port) {
                     Ok(c) => self.conn = Some(c),
@@ -1404,7 +1507,7 @@ mod io {
                                 pending.push(f);
                             } else if let Some(bytes) = b64(e.get("jpeg").or_else(|| e.get("png"))) {
                                 match decode(&self.ctx, name(f), &bytes) {
-                                    Some(tex) => got.push((f, tex)),
+                                    Some(tex) => got.push((f, super::FrameTex::Cpu(tex))),
                                     None => failed.push(f),
                                 }
                                 if poster.is_some_and(|(_, pf)| pf == f) {
@@ -1436,7 +1539,7 @@ mod io {
                     Ok(v) => match b64(v.get("png")) {
                         Some(bytes) => {
                             match decode(&self.ctx, name(f), &bytes) {
-                                Some(tex) => got.push((f, tex)),
+                                Some(tex) => got.push((f, super::FrameTex::Cpu(tex))),
                                 None => failed.push(f),
                             }
                             if poster.is_some_and(|(_, pf)| pf == f) {
@@ -1509,6 +1612,157 @@ mod io {
                 Err(error) => Reply::Error(format!("EffectCraft (in FigCraft): {error}")),
             }
         }
+
+        /// Hand frames of the project at `path` to the frame worker (`None`: it answers), or
+        /// fail them at once (a project that won't open, an unknown comp, no worker).
+        fn in_process_frames(&mut self, job: Job, path: PathBuf) -> Option<Reply> {
+            let Job::Frames { store, comp, frames, side, poster } = job else { return Some(Reply::Error("EffectCraft: not a frames request".into())) };
+            let work = match self.inproc.get(&path).and_then(|ec| Ok((ec.comp_id(&comp_ref(&comp))?, ec.snapshot()))) {
+                Ok((comp_id, snapshot)) => worker::Work { store, comp: comp.comp, comp_id, frames, side, poster, snapshot },
+                Err(error) => return Some(Reply::FramesFailed { store, frames, error }),
+            };
+            if self.worker.is_none() {
+                self.worker = worker::start(self.ctx.clone(), self.out.clone());
+            }
+            let Some(tx) = self.worker.as_ref() else {
+                return Some(Reply::FramesFailed { store: work.store, frames: work.frames, error: "EffectCraft frame worker didn't start".into() });
+            };
+            match tx.send(work) {
+                Ok(()) => None,
+                Err(std::sync::mpsc::SendError(w)) => {
+                    self.worker = None;
+                    Some(Reply::FramesFailed { store: w.store, frames: w.frames, error: "EffectCraft frame worker stopped".into() })
+                }
+            }
+        }
+    }
+
+    /// In-process frames, rendered one at a time off the link thread (sound and tree requests
+    /// never wait behind them): on the GPU sharing FigCraft's device when the app shared it and
+    /// can show its textures, else on the CPU. At most one request per card is queued: a newer
+    /// one replaces it (its frames come back `pending`, asked for again if still wanted), and a
+    /// request being rendered stops early when a newer one for its card arrives.
+    #[cfg(feature = "effectcraft-inproc")]
+    pub(crate) mod worker {
+        use std::sync::mpsc::{Receiver, Sender, channel};
+
+        use figcraft_doc::NodeId;
+        use figcraft_ec_inproc::{Compositor, FRAMES_PER_CALL, Picture, Snapshot};
+
+        use super::{Reply, StoreKey, decode};
+        use crate::effectcraft_ui::{FrameTex, NativeFrame, native_frames};
+
+        pub struct Work {
+            pub store: StoreKey,
+            /// The comp's name (texture names) and id in the project.
+            pub comp: String,
+            pub comp_id: u64,
+            pub frames: Vec<i64>,
+            pub side: u32,
+            pub poster: Option<(NodeId, i64)>,
+            pub snapshot: Snapshot,
+        }
+
+        /// Which compositor renders a frame: the CPU for the poster (its bytes go into the
+        /// document) and whenever the GPU frame couldn't be shown.
+        pub(crate) fn compositor(poster: bool, gpu_shared: bool, can_show: bool) -> Compositor {
+            if !poster && gpu_shared && can_show { Compositor::Gpu } else { Compositor::Cpu }
+        }
+
+        pub fn start(ctx: egui::Context, out: Sender<Reply>) -> Option<Sender<Work>> {
+            let (tx, rx) = channel::<Work>();
+            std::thread::Builder::new().name("effectcraft-frames".into()).spawn(move || run(&ctx, &rx, &out)).ok()?;
+            Some(tx)
+        }
+
+        fn run(ctx: &egui::Context, rx: &Receiver<Work>, out: &Sender<Reply>) {
+            let mut queue: Vec<Work> = Vec::new();
+            loop {
+                if queue.is_empty() {
+                    match rx.recv() {
+                        Ok(w) => enqueue(&mut queue, w, out),
+                        Err(_) => return,
+                    }
+                }
+                while let Ok(w) = rx.try_recv() {
+                    enqueue(&mut queue, w, out);
+                }
+                if queue.is_empty() {
+                    continue;
+                }
+                let w = queue.remove(0);
+                let (store, frames) = (w.store.clone(), w.frames.clone());
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| render(ctx, w, rx, &mut queue, out)));
+                let reply = r.unwrap_or_else(|_| Reply::FramesFailed { store, frames, error: "EffectCraft frame worker: an internal error".into() });
+                if out.send(reply).is_err() {
+                    return;
+                }
+                ctx.request_repaint();
+            }
+        }
+
+        /// Queue `w`, replacing (and answering `pending`) a queued request for the same card.
+        pub(crate) fn enqueue(queue: &mut Vec<Work>, mut w: Work, out: &Sender<Reply>) {
+            if let Some(i) = queue.iter().position(|q| q.store == w.store) {
+                let old = queue.remove(i);
+                w.poster = w.poster.or(old.poster);
+                let _ = out.send(superseded(old));
+            }
+            queue.push(w);
+        }
+
+        fn superseded(w: Work) -> Reply {
+            Reply::Frames {
+                store: w.store,
+                revision: 0,
+                got: Vec::new(),
+                pending: w.frames,
+                failed: Vec::new(),
+                poster: None,
+                headless: None,
+                file: Some(w.snapshot.revision),
+            }
+        }
+
+        pub(crate) fn render(ctx: &egui::Context, w: Work, rx: &Receiver<Work>, queue: &mut Vec<Work>, out: &Sender<Reply>) -> Reply {
+            let (mut got, mut pending, mut failed, mut poster_bytes) = (Vec::new(), Vec::new(), Vec::new(), None);
+            let shared = figcraft_ec_inproc::gpu_shared();
+            for (i, &f) in w.frames.iter().enumerate() {
+                if i > 0 {
+                    while let Ok(n) = rx.try_recv() {
+                        enqueue(queue, n, out);
+                    }
+                }
+                // A newer request for this card wins: the rest wait.
+                if i >= FRAMES_PER_CALL || queue.iter().any(|q| q.store == w.store) {
+                    pending.push(f);
+                    continue;
+                }
+                let is_poster = w.poster.is_some_and(|(_, pf)| pf == f);
+                let shower = native_frames();
+                let with = compositor(is_poster, shared, shower.is_some());
+                match w.snapshot.frame(w.comp_id, f, w.side, with) {
+                    Ok(Picture::Png(bytes)) => {
+                        match decode(ctx, format!("effectcraft-inproc-{}-{}-{}-{f}", w.comp_id, w.comp, w.side), &bytes) {
+                            Some(tex) => got.push((f, FrameTex::Cpu(tex))),
+                            None => failed.push(f),
+                        }
+                        if is_poster {
+                            poster_bytes = w.poster.map(|(id, _)| (id, bytes));
+                        }
+                    }
+                    Ok(Picture::Native { texture, width, height }) => match shower.and_then(|s| s.register(texture.as_ref())) {
+                        Some(id) => got.push((f, FrameTex::Native(NativeFrame::new(id, [width as usize, height as usize])))),
+                        None => failed.push(f),
+                    },
+                    Err(e) => {
+                        log::warn!("EffectCraft frame {f} of {}: {e}", w.comp);
+                        failed.push(f);
+                    }
+                }
+            }
+            Reply::Frames { store: w.store, revision: 0, got, pending, failed, poster: poster_bytes, headless: None, file: Some(w.snapshot.revision) }
+        }
     }
 
     // (src/effectcraft_ui/io/tests.rs)
@@ -1578,7 +1832,7 @@ mod io {
             // Frames the run didn't get to (it stopped on an error) count as failed.
             let bytes = std::fs::read(file(f)).ok();
             match bytes.as_deref().and_then(|b| decode(ctx, format!("effectcraft-file-{}-{}-{side}-{f}", comp.comp_id, comp.comp), b)) {
-                Some(tex) => got.push((f, tex)),
+                Some(tex) => got.push((f, super::FrameTex::Cpu(tex))),
                 None => failed.push(f),
             }
             if let Some(b) = bytes

@@ -69,6 +69,50 @@ pub fn install(cc: &eframe::CreationContext<'_>, pref: bool) {
     }));
 }
 
+/// In-process EffectCraft frames as the window's textures (EffectCraft leaves them on the GPU).
+#[cfg(feature = "effectcraft-inproc")]
+struct EffectCraftFrames {
+    device: wgpu::Device,
+    renderer: Arc<egui::mutex::RwLock<egui_wgpu::Renderer>>,
+}
+
+#[cfg(feature = "effectcraft-inproc")]
+impl figcraft_ui_egui::effectcraft_ui::NativeFrames for EffectCraftFrames {
+    fn register(&self, texture: &(dyn std::any::Any + Send + Sync)) -> Option<egui::TextureId> {
+        let texture = texture.downcast_ref::<wgpu::Texture>()?;
+        // (premultiplied RGBA8 with mips: egui-wgpu's native format; linear filtering)
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        Some(self.renderer.write().register_native_texture(&self.device, &view, wgpu::FilterMode::Linear))
+    }
+
+    fn free(&self, id: egui::TextureId) {
+        self.renderer.write().free_texture(&id);
+    }
+}
+
+/// Fork-only (`effectcraft-inproc`): EffectCraft cards rendered in-process composite on
+/// EffectCraft's GPU compositor on this window's wgpu device, and their frames are shown as the
+/// window's textures without a copy through the CPU. Without wgpu (or when the compositor can't
+/// start on this device) they render on the CPU. The GPU tiles preference doesn't affect it.
+#[cfg(feature = "effectcraft-inproc")]
+pub fn install_effectcraft(cc: &eframe::CreationContext<'_>) {
+    let Some(rs) = &cc.wgpu_render_state else {
+        log::info!("EffectCraft cards: the window doesn't draw with wgpu; frames render on the CPU");
+        return;
+    };
+    let (adapter, device, queue) = (rs.adapter.clone(), rs.device.clone(), rs.queue.clone());
+    // The compositor's context builds off the UI thread; frames render on the CPU until then.
+    let started = std::thread::Builder::new().name("effectcraft-gpu".into()).spawn(move || {
+        match figcraft_ec_inproc::share_device(&adapter, device, queue) {
+            Ok(()) => log::info!("EffectCraft cards: compositing on the window's GPU"),
+            Err(e) => log::warn!("EffectCraft cards: the GPU compositor didn't start ({e}); frames render on the CPU"),
+        }
+    });
+    if started.is_ok() {
+        figcraft_ui_egui::effectcraft_ui::set_native_frames(Box::new(EffectCraftFrames { device: rs.device.clone(), renderer: rs.renderer.clone() }));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

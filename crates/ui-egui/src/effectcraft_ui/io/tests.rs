@@ -40,9 +40,13 @@ fn what_the_app_has_open_decides_ownership() {
 #[cfg(feature = "effectcraft-inproc")]
 mod in_process {
     use std::path::PathBuf;
+    use std::sync::mpsc::{Receiver, channel};
+    use std::time::Duration;
 
     use figcraft_doc::{EcComp, NodeId};
+    use figcraft_ec_inproc::{Compositor, FRAMES_PER_CALL, InProc};
 
+    use super::super::worker::{self, Work, compositor, enqueue};
     use super::super::{Job, Kind, Reply, StoreKey, Thread};
 
     fn closed_port() -> u16 {
@@ -51,8 +55,14 @@ mod in_process {
         // (dropped: connections to it are refused)
     }
 
-    fn thread() -> Thread {
-        Thread::new(egui::Context::default(), closed_port())
+    /// The thread and where the frame worker answers.
+    fn thread() -> (Thread, Receiver<Reply>) {
+        let (tx, rx) = channel();
+        (Thread::new(egui::Context::default(), closed_port(), tx), rx)
+    }
+
+    fn reply(rx: &Receiver<Reply>) -> Reply {
+        rx.recv_timeout(Duration::from_secs(120)).unwrap()
     }
 
     fn dir(name: &str) -> PathBuf {
@@ -73,74 +83,127 @@ mod in_process {
         Job::Frames { store: StoreKey::of(c, 240), comp: c.clone(), frames, side: 240, poster: None }
     }
 
-    #[test]
-    fn a_saved_project_renders_with_the_app_closed() {
-        let d = dir("ok");
-        let p = d.join("p.ecproj");
+    fn sample(name: &str) -> (PathBuf, u64) {
+        let p = dir(name).join("p.ecproj");
         let cid = figcraft_ec_inproc::sample_project(&p).unwrap();
+        (p, cid)
+    }
+
+    #[test]
+    fn the_gpu_only_when_shared_showable_and_not_the_poster() {
+        assert_eq!(compositor(false, true, true), Compositor::Gpu);
+        assert_eq!(compositor(true, true, true), Compositor::Cpu);
+        assert_eq!(compositor(false, false, true), Compositor::Cpu);
+        assert_eq!(compositor(false, true, false), Compositor::Cpu);
+    }
+
+    #[test]
+    fn a_saved_project_renders_on_the_worker_with_the_app_closed() {
+        let (p, cid) = sample("ok");
         let c = card(p.to_str().unwrap(), "C", cid);
-        let mut t = thread();
+        let (mut t, rx) = thread();
         assert!(t.in_process_route(&frames(&c, vec![0])).is_some());
-        match t.run(frames(&c, vec![0, 1, 2, 3, 4, 5])) {
+        // Handed to the worker: no reply from the link thread.
+        assert!(t.run(frames(&c, vec![0, 1, 2, 3, 4, 5])).is_none());
+        // Sound and trees answer meanwhile (they don't wait for frames).
+        assert!(matches!(t.run(Job::Tree { card: NodeId(1), comp: c.clone(), at: 0.0 }), Some(Reply::Tree { .. })));
+        let key = (c.comp.clone(), c.comp_id, 0, 1000);
+        assert!(matches!(t.run(Job::Sound { key, comp: c.clone(), start: 0.0, end: 1.0 }), Some(Reply::Sound { sound: None, .. })));
+        // The app being closed isn't an outage while cards render here.
+        assert!(matches!(t.run(Job::Revision), Some(Reply::Revision(0))));
+        match reply(&rx) {
             Reply::Frames { got, pending, failed, headless, file, revision, .. } => {
-                assert_eq!(got.len(), figcraft_ec_inproc::FRAMES_PER_CALL);
-                assert_eq!(pending.len(), 6 - figcraft_ec_inproc::FRAMES_PER_CALL);
+                // No shared device in tests: CPU frames.
+                assert_eq!(got.len(), FRAMES_PER_CALL);
+                assert!(got.iter().all(|(_, t)| matches!(t, crate::effectcraft_ui::FrameTex::Cpu(_))));
+                assert_eq!(pending.len(), 6 - FRAMES_PER_CALL);
                 assert!(failed.is_empty());
                 assert_eq!((headless, revision), (None, 0));
                 assert!(file.is_some_and(|f| f > 0));
             }
             _ => panic!("expected frames"),
         }
-        // A tree and a (silent) sound too.
-        assert!(matches!(t.run(Job::Tree { card: NodeId(1), comp: c.clone(), at: 0.0 }), Reply::Tree { .. }));
-        let key = (c.comp.clone(), c.comp_id, 0, 1000);
-        assert!(matches!(t.run(Job::Sound { key, comp: c.clone(), start: 0.0, end: 1.0 }), Reply::Sound { sound: None, .. }));
-        // The app being closed isn't an outage while cards render here.
-        assert!(matches!(t.run(Job::Revision), Reply::Revision(0)));
+    }
+
+    #[test]
+    fn a_newer_request_for_a_card_replaces_the_queued_one() {
+        let (p, cid) = sample("newest");
+        let ec = InProc::open(&p).unwrap();
+        let c = card(p.to_str().unwrap(), "C", cid);
+        let work = |frames: Vec<i64>, poster: Option<(NodeId, i64)>| Work {
+            store: StoreKey::of(&c, 240),
+            comp: "C".into(),
+            comp_id: cid,
+            frames,
+            side: 240,
+            poster,
+            snapshot: ec.snapshot(),
+        };
+        let (tx, rx) = channel();
+        let mut queue = Vec::new();
+        enqueue(&mut queue, work(vec![0, 1], Some((NodeId(7), 0))), &tx);
+        enqueue(&mut queue, work(vec![9], None), &tx);
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].frames, vec![9]);
+        // The poster request carries over to the newer request.
+        assert_eq!(queue[0].poster, Some((NodeId(7), 0)));
+        match rx.try_recv().unwrap() {
+            Reply::Frames { got, pending, .. } => assert!(got.is_empty() && pending == vec![0, 1]),
+            _ => panic!("expected the replaced request back as pending"),
+        }
+        // A request being rendered stops when a newer one for its card is waiting.
+        let (jtx, jrx) = channel();
+        jtx.send(work(vec![20], None)).unwrap();
+        let mut queue = Vec::new();
+        match worker::render(&egui::Context::default(), work(vec![10, 11, 12], None), &jrx, &mut queue, &tx) {
+            Reply::Frames { got, pending, .. } => {
+                assert_eq!(got.len(), 1);
+                assert_eq!(pending, vec![11, 12]);
+            }
+            _ => panic!("expected frames"),
+        }
+        assert_eq!(queue.len(), 1);
     }
 
     #[test]
     fn a_bad_comp_fails_its_frames_not_the_link() {
-        let d = dir("badcomp");
-        let p = d.join("p.ecproj");
-        figcraft_ec_inproc::sample_project(&p).unwrap();
-        let mut t = thread();
+        let (p, _) = sample("badcomp");
+        let (mut t, _rx) = thread();
         for c in [card(p.to_str().unwrap(), "Nope", 0), card(p.to_str().unwrap(), "C", 987_654)] {
             match t.run(frames(&c, vec![0, 1])) {
-                Reply::FramesFailed { frames, error, .. } => {
+                Some(Reply::FramesFailed { frames, error, .. }) => {
                     assert_eq!(frames, vec![0, 1]);
                     assert!(!error.is_empty());
                 }
                 _ => panic!("expected FramesFailed for {}", c.comp),
             }
-            assert!(matches!(t.run(Job::Tree { card: NodeId(1), comp: c.clone(), at: 0.0 }), Reply::Error(_)));
+            assert!(matches!(t.run(Job::Tree { card: NodeId(1), comp: c.clone(), at: 0.0 }), Some(Reply::Error(_))));
             let key = (c.comp.clone(), c.comp_id, 0, 1000);
-            assert!(matches!(t.run(Job::Sound { key, comp: c.clone(), start: 0.0, end: 1.0 }), Reply::Sound { sound: None, .. }));
+            assert!(matches!(t.run(Job::Sound { key, comp: c.clone(), start: 0.0, end: 1.0 }), Some(Reply::Sound { sound: None, .. })));
         }
     }
 
     #[test]
     fn a_junk_project_fails_its_frames() {
-        let d = dir("junk");
-        let p = d.join("p.ecproj");
+        let p = dir("junk").join("p.ecproj");
         std::fs::write(&p, b"{ not a project").unwrap();
         let c = card(p.to_str().unwrap(), "C", 1);
-        let mut t = thread();
-        assert!(matches!(t.run(frames(&c, vec![0])), Reply::FramesFailed { .. }));
+        let (mut t, _rx) = thread();
+        assert!(matches!(t.run(frames(&c, vec![0])), Some(Reply::FramesFailed { .. })));
     }
 
     #[test]
     fn a_missing_project_goes_to_the_app_which_is_closed() {
         let d = dir("missing");
         let c = card(d.join("gone.ecproj").to_str().unwrap(), "C", 1);
-        let mut t = thread();
+        let (mut t, _rx) = thread();
         assert!(t.in_process_route(&frames(&c, vec![0])).is_none());
         // No project file, no app: the link is down (the CLI fallback needs the file too).
-        assert!(matches!(t.run(frames(&c, vec![0])), Reply::Down { kind: Kind::Frames, .. }));
+        assert!(matches!(t.run(frames(&c, vec![0])), Some(Reply::Down { kind: Kind::Frames, .. })));
         // A card without a project at all.
         let c = card("", "C", 1);
         assert!(t.in_process_route(&frames(&c, vec![0])).is_none());
         // Opening a comp in EffectCraft always needs the app.
-        assert!(matches!(t.run(Job::Reveal { comp: c, time: 0.0 }), Reply::Down { kind: Kind::Other, .. }));
+        assert!(matches!(t.run(Job::Reveal { comp: c, time: 0.0 }), Some(Reply::Down { kind: Kind::Other, .. })));
     }
 }

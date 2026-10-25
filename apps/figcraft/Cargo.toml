@@ -14,7 +14,7 @@ workspace = true
 default = []
 # Fork-only (scripts/fork/app.sh turns it on): EffectCraft's engine in-process for EffectCraft
 # cards, so they render without the EffectCraft app. Needs ../effectcraft checked out.
-effectcraft-inproc = ["figcraft-ui-egui/effectcraft-inproc"]
+effectcraft-inproc = ["figcraft-ui-egui/effectcraft-inproc", "dep:figcraft-ec-inproc"]
 
 [dependencies]
 figcraft-engine = { workspace = true }
@@ -24,6 +24,8 @@ figcraft-format = { workspace = true }
 figcraft-text = { workspace = true }
 figcraft-render = { workspace = true }
 figcraft-render-gpu = { workspace = true }
+# Fork-only (`effectcraft-inproc`): EffectCraft's compositor on this window's wgpu device.
+figcraft-ec-inproc = { workspace = true, optional = true }
 egui = { workspace = true }
 eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit", "wayland", "x11"] }
 serde_json = { workspace = true }
