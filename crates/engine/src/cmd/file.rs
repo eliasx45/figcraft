@@ -121,11 +121,13 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "file.recover",
             "Recover file",
-            "{path}  open a recovery copy (written while the app runs, read back after a crash) as a document with unsaved changes and no path: saving asks where → {index}",
+            "{path, origin?}  open a recovery copy (written while the app runs, read back after a crash) as a document with unsaved changes; `origin`: the path it was saved at, which Save writes to again (without it, saving asks where) → {index}",
             false,
             |s, p| {
                 let path = req_string("file.recover", p, "path")?;
-                s.docs.push(recovered(&path)?);
+                let mut ds = recovered(&path)?;
+                ds.path = string(p, "origin").filter(|o| !o.is_empty());
+                s.docs.push(ds);
                 s.active = s.docs.len() - 1;
                 Ok(json!({"index": s.active}))
             }

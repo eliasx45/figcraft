@@ -208,7 +208,13 @@ fn main() -> eframe::Result {
     fig.ui.home = false;
     // Files named on the command line are the user's too: their missing fonts are listed.
     fig.ui.font_checks = opened;
-    fig.note_recovered(recovered.copies);
+    if recovered.changed > 0 {
+        // Saved files that changed on disk since: they came back without a path, so neither is lost.
+        let msg = figcraft_ui_egui::i18n::trn("Recovered files: {n} changed on disk since, so saving them asks where", recovered.changed, &[]);
+        fig.toast(msg);
+    } else {
+        fig.note_recovered(recovered.copies);
+    }
     if let Some(link) = &args.join {
         figcraft_ui_egui::live::open_invite(&mut fig, link);
     }

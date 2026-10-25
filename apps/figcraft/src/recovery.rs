@@ -18,6 +18,11 @@
 //! changed, or the file couldn't be joined and the copy was opened as any other. Whatever a copy
 //! became is copied into this run's folder before the old copy is removed. Without the note, or
 //! when the file is no longer recorded, the copy opens as any other.
+//!
+//! A document saved somewhere has a note beside its copy (`<uid>.origin`): its path, and when that
+//! file was last changed as of the first copy after a save. A copy whose file is unchanged opens
+//! with that path again, so Save writes where it was; when the file changed or went meanwhile, the
+//! copy opens without one, so saving asks where and neither version is lost.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -60,6 +65,9 @@ struct Copy {
     done: Option<Vec<u64>>,
     /// The write in flight: the stamp it copies, and whether it succeeded once it ends.
     flight: Option<(Vec<u64>, JoinHandle<bool>)>,
+    /// The `.origin` note: the document's path and its file's [`modified`] time, taken at the first
+    /// copy after a save (`None`: never saved).
+    origin: Option<String>,
 }
 
 impl Copy {
@@ -109,6 +117,9 @@ pub struct Recovered {
     pub copies: usize,
     /// The copies kept until what they became is safe ([`Recovery::adopt`]).
     pub waiting: Vec<Waiting>,
+    /// Of [`copies`](Self::copies), those whose saved file changed or went since: they opened
+    /// without a path, so saving asks where.
+    pub changed: usize,
 }
 
 impl Recovery {
@@ -182,12 +193,14 @@ impl Recovery {
         for d in &s.docs {
             let path = self.dir.join(format!("{}.figcraft", d.uid));
             let note = path.with_extension(ONLINE);
+            let origin_note = path.with_extension(ORIGIN);
             if !needs_copy(s, d) {
                 if let Some(mut w) = self.written.remove(&d.uid) {
                     // A write still running would bring the copy back after it was removed.
                     w.join();
                     let _ = std::fs::remove_file(&path);
                     let _ = std::fs::remove_file(&note);
+                    let _ = std::fs::remove_file(&origin_note);
                 }
                 continue;
             }
@@ -198,6 +211,11 @@ impl Recovery {
             } else {
                 entry.reap();
             }
+            // The file as it was when the changes began: one changed on disk later shows as changed.
+            if entry.origin.is_none() {
+                entry.origin = d.path.as_deref().filter(|p| !p.is_empty()).map(|p| format!("{p}\n{}", modified(Path::new(p))));
+            }
+            let origin = entry.origin.clone();
             // A write still in flight (for any revision) is waited for; a failed one is tried again.
             let stamp = stamp(s, d);
             if entry.done.as_ref() == Some(&stamp) || entry.flight.is_some() {
@@ -217,6 +235,10 @@ impl Recovery {
                 let _ = match online {
                     Some(text) => std::fs::write(&note, text),
                     None => std::fs::remove_file(&note),
+                };
+                let _ = match origin {
+                    Some(text) => std::fs::write(&origin_note, text),
+                    None => std::fs::remove_file(&origin_note),
                 };
                 true
             };
@@ -238,6 +260,7 @@ impl Recovery {
                 w.join();
                 let _ = std::fs::remove_file(dir.join(format!("{uid}.figcraft")));
                 let _ = std::fs::remove_file(dir.join(format!("{uid}.{ONLINE}")));
+                let _ = std::fs::remove_file(dir.join(format!("{uid}.{ORIGIN}")));
             }
             keep
         });
@@ -280,6 +303,7 @@ impl Recovery {
 fn remove_kept(w: Waiting) {
     let _ = std::fs::remove_file(&w.copy);
     let _ = std::fs::remove_file(w.copy.with_extension(ONLINE));
+    let _ = std::fs::remove_file(w.copy.with_extension(ORIGIN));
     let last = w._lock.as_ref().is_some_and(|l| Arc::strong_count(l) == 1);
     let dir = w.copy.parent().map(Path::to_path_buf).filter(|_| last);
     drop(w);
@@ -291,6 +315,32 @@ fn remove_kept(w: Waiting) {
 
 /// The extension of the note beside the copy of a document that is one of your online files.
 const ONLINE: &str = "online";
+
+/// The extension of the note beside the copy of a document saved somewhere: where, and when that
+/// file was last changed.
+const ORIGIN: &str = "origin";
+
+/// When `path` was last changed (nanoseconds since 1970), empty when that can't be read (no file).
+fn modified(path: &Path) -> String {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos().to_string())
+        .unwrap_or_default()
+}
+
+/// Where the copy at `file` was saved, when that file is as it was then (Save writes there again);
+/// and whether it was saved somewhere that changed or went since (it opens without a path).
+fn origin(file: &Path) -> (Option<String>, bool) {
+    let Ok(note) = std::fs::read_to_string(file.with_extension(ORIGIN)) else { return (None, false) };
+    let mut lines = note.lines();
+    let (path, then) = (lines.next().unwrap_or_default().trim(), lines.next().unwrap_or_default().trim());
+    if path.is_empty() {
+        return (None, false);
+    }
+    if !then.is_empty() && modified(Path::new(path)) == then { (Some(path.to_string()), false) } else { (None, true) }
+}
 
 /// How long the startup waits, once, for folder locks that may free themselves (#334).
 #[cfg(unix)]
@@ -365,8 +415,10 @@ pub fn recover_all(root: &Path, s: &mut Session) -> Recovered {
             return;
         }
         let before: Vec<u64> = s.docs.iter().map(|d| d.uid).collect();
-        if s.execute("file.recover", &json!({"path": file.to_string_lossy()})).is_ok() {
+        let (origin, changed) = origin(file);
+        if s.execute("file.recover", &json!({"path": file.to_string_lossy(), "origin": origin})).is_ok() {
             out.copies += 1;
+            out.changed += usize::from(changed);
             if let Some(uid) = s.docs.iter().map(|d| d.uid).find(|u| !before.contains(u)) {
                 out.waiting.push(Waiting { until: Until::Copied(uid), copy: file.to_path_buf(), _lock: lock.cloned() });
             }
@@ -407,7 +459,7 @@ pub fn recover_all(root: &Path, s: &mut Session) -> Recovered {
             }
         }
         // The notes go with their copies (one whose copy stays, stays with it).
-        for f in files.iter().filter(|f| f.extension().is_some_and(|e| e == ONLINE) && !f.with_extension("figcraft").exists()) {
+        for f in files.iter().filter(|f| f.extension().is_some_and(|e| e == ONLINE || e == ORIGIN) && !f.with_extension("figcraft").exists()) {
             let _ = std::fs::remove_file(f);
         }
         // Empty now unless a copy couldn't be read, or is kept (its lock held).

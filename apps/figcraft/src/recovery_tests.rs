@@ -388,3 +388,53 @@ fn a_background_copy_that_failed_is_tried_again_without_another_edit() {
     r.finish();
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A crashed run's copy of a document saved at `file` (edited since), for [`recover_all`].
+fn saved_then_crashed(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let root = root(name);
+    std::fs::create_dir_all(&root).unwrap();
+    let file = root.join("saved.figcraft");
+    let mut s = edited();
+    s.execute("file.saveAs", &json!({"path": file.to_string_lossy()})).unwrap();
+    s.execute("shape.rectangle", &json!({"x": 20, "y": 0, "width": 10, "height": 10})).unwrap();
+    let mut r = Recovery::start(&root.join("Recovery")).unwrap();
+    r.write(&s, true);
+    drop(r);
+    (root, file)
+}
+
+#[test]
+fn a_recovered_copy_of_a_saved_file_saves_where_it_was() {
+    let (root, file) = saved_then_crashed("origin");
+    let mut next = Session::empty();
+    let got = recover_all(&root.join("Recovery"), &mut next);
+    assert_eq!((got.copies, got.changed), (1, 0));
+    let ds = next.docs.first().unwrap();
+    assert!(ds.is_dirty(), "the changes are still unsaved");
+    assert_eq!(ds.path.as_deref(), Some(file.to_string_lossy().as_ref()), "Save writes where it was");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_recovered_copy_whose_file_changed_on_disk_asks_where_to_save() {
+    let (root, file) = saved_then_crashed("origin-changed");
+    // Another app (or another run) wrote the file after the copy was taken.
+    let later = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+    std::fs::File::options().write(true).open(&file).unwrap().set_modified(later).unwrap();
+    let mut next = Session::empty();
+    let got = recover_all(&root.join("Recovery"), &mut next);
+    assert_eq!((got.copies, got.changed), (1, 1));
+    assert!(next.docs.first().unwrap().path.is_none(), "saving asks where: neither version is lost");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_recovered_copy_whose_file_went_asks_where_to_save() {
+    let (root, file) = saved_then_crashed("origin-gone");
+    std::fs::remove_file(&file).unwrap();
+    let mut next = Session::empty();
+    let got = recover_all(&root.join("Recovery"), &mut next);
+    assert_eq!((got.copies, got.changed), (1, 1));
+    assert!(next.docs.first().unwrap().path.is_none());
+    let _ = std::fs::remove_dir_all(&root);
+}

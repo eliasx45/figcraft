@@ -1086,6 +1086,7 @@ name = "English"
 "Recent" = "Recent"
 "Recent files" = "Recent files"
 "Recents" = "Recents"
+"Recovered files: {n} changed on disk since, so saving them asks where" = { one = "A recovered file changed on disk since: saving it asks where, so neither version is lost", other = "Recovered files: {n} changed on disk since, so saving them asks where" }
 "Recovered {n} unsaved files after the app quit unexpectedly: save them to keep them" = { one = "Recovered an unsaved file after the app quit unexpectedly: save it to keep it", other = "Recovered {n} unsaved files after the app quit unexpectedly: save them to keep them" }
 "Rectangle" = "Rectangle"
 "Rectangles" = "Rectangles"
