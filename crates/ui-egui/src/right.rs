@@ -78,6 +78,20 @@ impl FigApp {
     }
 }
 
+/// Fork: the button at the canvas's top-right corner that shows the collapsed right sidebar again.
+pub fn expand_button(app: &mut FigApp, ui: &mut Ui) {
+    let t = Tokens::get(ui.ctx());
+    let area = ui.max_rect();
+    let r = Rect::from_min_size(pos2(area.max.x - 40.0, area.min.y + 12.0), vec2(28.0, 28.0));
+    let resp = ui.interact(r, Id::new("show_right_sidebar"), Sense::click()).tip(tr("Expand"));
+    ui.painter().rect_filled(r, CornerRadius::same(6), if resp.hovered() { t.hover } else { t.panel });
+    ui.painter().rect_stroke(r, CornerRadius::same(6), Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
+    icons::paint(ui.painter(), r.shrink(6.0), Icon::Panels, t.icon);
+    if resp.clicked() {
+        app.run("view.rightSidebar", json!({}));
+    }
+}
+
 pub fn right_panel(app: &mut FigApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
     let w = ui.available_width();
@@ -105,7 +119,17 @@ pub fn right_panel(app: &mut FigApp, ui: &mut Ui) {
     let c = tri.center();
     ui.painter().add(egui::Shape::closed_line(vec![c + vec2(-5.0, -7.0), c + vec2(7.0, 0.0), c + vec2(-5.0, 7.0)], Stroke::new(1.4, t.icon)));
     icons::paint(ui.painter(), Rect::from_center_size(play.center() + vec2(12.0, 0.0), vec2(10.0, 10.0)), Icon::Chevron, t.icon_secondary);
-    crate::live::people_bar(app, ui, Rect::from_min_max(pos2(top.min.x + 12.0, top.min.y), pos2(play.min.x - 6.0, top.max.y)));
+    // Fork: collapse the sidebar (the canvas's top-right button brings it back), mirroring the left one.
+    let hr = Rect::from_center_size(pos2(top.min.x + 24.0, top.center().y), vec2(24.0, 24.0));
+    let hresp = ui.interact(hr, ui.id().with("hide_right"), Sense::click()).tip(tr("Collapse panel"));
+    if hresp.hovered() {
+        ui.painter().rect_filled(hr, CornerRadius::same(5), t.hover);
+    }
+    icons::paint(ui.painter(), hr.shrink(5.0), Icon::Panels, t.icon);
+    if hresp.clicked() {
+        app.run("view.rightSidebar", json!({}));
+    }
+    crate::live::people_bar(app, ui, Rect::from_min_max(pos2(hr.max.x + 8.0, top.min.y), pos2(play.min.x - 6.0, top.max.y)));
     if presp.clicked() {
         app.run("proto.present", json!({}));
     }

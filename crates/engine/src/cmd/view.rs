@@ -315,6 +315,8 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!("view.designPrototype", "Switch between Design and Prototype", "{}", false, |s, _| ui(s, "panel.designPrototype")),
         spec!("view.devMode", "Dev Mode", "{}", false, |s, _| ui(s, "panel.devMode")),
         spec!("view.leftSidebar", "Show/Hide left sidebar", "{}", false, |s, _| ui(s, "panel.leftSidebar")),
+        // Fork: the right sidebar collapses like the left one.
+        spec!("view.rightSidebar", "Show/Hide right sidebar", "{}", false, |s, _| ui(s, "panel.rightSidebar")),
         spec!(
             "view.panelWidths",
             "Reset panel widths",

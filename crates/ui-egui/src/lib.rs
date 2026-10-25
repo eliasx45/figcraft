@@ -650,6 +650,9 @@ pub struct UiState {
     /// The Rename layers dialog (several layers), while open.
     pub batch_rename: Option<dialogs::BatchRenameUi>,
     pub left_collapsed: bool,
+    /// Fork: the right sidebar (Design / Prototype / Dev Mode) is hidden; a button on the canvas
+    /// brings it back.
+    pub right_collapsed: bool,
     pub comments: comments::CommentUi,
     pub versions: versions::VersionUi,
     /// The branch review dialog, while open.
@@ -776,6 +779,7 @@ impl Default for UiState {
             find: None,
             batch_rename: None,
             left_collapsed: false,
+            right_collapsed: false,
             comments: comments::CommentUi::default(),
             versions: versions::VersionUi::default(),
             branch_review: None,
@@ -1056,6 +1060,7 @@ impl FigApp {
                     self.ui.right_tab = if self.ui.right_tab == RightTab::Inspect { RightTab::Design } else { RightTab::Inspect };
                 }
                 "panel.leftSidebar" => self.ui.left_collapsed = !self.ui.left_collapsed,
+                "panel.rightSidebar" => self.ui.right_collapsed = !self.ui.right_collapsed,
                 "panel.widths" => {
                     let width = |k: &str| r.data.get(k).and_then(Value::as_f64).map(|w| w as f32);
                     let (left, right) = (width("left"), width("right"));
@@ -1648,7 +1653,7 @@ impl FigApp {
         if board {
             self.ui.right_tab = RightTab::Design;
         }
-        !hidden && (!board || self.ui.board_panel)
+        !hidden && !self.ui.right_collapsed && (!board || self.ui.board_panel)
     }
 
     /// One frame of the window drawing now.
@@ -1766,6 +1771,10 @@ impl FigApp {
                     a11y::container(ui, egui::accesskit::Role::Toolbar, i18n::tr("Tools"));
                     toolbar::show(self, ui);
                 });
+                // Fork: the hidden right sidebar comes back from the canvas's top-right corner.
+                if self.ui.right_collapsed {
+                    right::expand_button(self, ui);
+                }
             }
         });
         // The panels' edges, over the canvas and the panels (drawn after them: they take the press).
