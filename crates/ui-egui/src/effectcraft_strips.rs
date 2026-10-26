@@ -23,7 +23,11 @@
 //!   size is kept on the card (plugin data [`WIDTH_KEY`], [`HEIGHT_KEY`]); the height is at least
 //!   the header, ruler and a few rows. Effect Controls' right edge widens them the same way (wide
 //!   enough by default for names, values, checkbox labels and pop-ups; plugin data
-//!   [`FX_WIDTH_KEY`]); their height follows the Timeline's.
+//!   [`FX_WIDTH_KEY`]); their height follows the Timeline's. The edges are easy to grab: zones
+//!   [`BAND`] screen points either side of each edge and [`CORNER`] round each bottom-right
+//!   corner, at any zoom, win over the panels' content ([`edge_at`]); hovered or dragged, the
+//!   edge shows its resize cursor and an accent line (a grip at a corner), and a drag stays
+//!   captured until the button is let go.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -71,8 +75,10 @@ const CLOSED_HEADER: f64 = 16.0;
 const BAR: f64 = 5.0;
 /// Most layer bars a closed strip shows.
 const MAX_BARS: usize = 24;
-/// The right edge's grab width (panel units).
-pub(crate) const EDGE: f32 = 6.0;
+/// The resize zones (screen points, whatever the zoom): this far either side of an edge, and this
+/// far either way from a bottom-right corner.
+pub(crate) const BAND: f32 = 8.0;
+pub(crate) const CORNER: f32 = 14.0;
 /// Seconds between checks of the strips' project files (a save refreshes their bars).
 const RECHECK: f64 = 2.0;
 
@@ -406,17 +412,18 @@ pub(crate) enum Edge {
     Corner,
     /// Effect Controls' right edge: its width.
     FxRight,
+    /// Effect Controls' bottom-right corner: their width and the height.
+    FxCorner,
 }
 
 impl Edge {
-    pub(crate) const ALL: [Edge; 4] = [Edge::Right, Edge::Bottom, Edge::FxRight, Edge::Corner];
-
     fn label(self) -> &'static str {
         match self {
             Edge::Right => "Widen Timeline",
             Edge::Bottom => "Heighten Timeline",
             Edge::Corner => "Resize Timeline",
             Edge::FxRight => "Widen Effect Controls",
+            Edge::FxCorner => "Resize Effect Controls",
         }
     }
 
@@ -424,7 +431,7 @@ impl Edge {
         match self {
             Edge::Right | Edge::FxRight => egui::CursorIcon::ResizeHorizontal,
             Edge::Bottom => egui::CursorIcon::ResizeVertical,
-            Edge::Corner => egui::CursorIcon::ResizeNwSe,
+            Edge::Corner | Edge::FxCorner => egui::CursorIcon::ResizeNwSe,
         }
     }
 
@@ -437,15 +444,104 @@ impl Edge {
             Edge::Bottom => Size { height, ..Size::default() },
             Edge::Corner => Size { width, height, fx: None },
             Edge::FxRight => Size { fx: g.fx.map(|f| x - f.x0), ..Size::default() },
+            Edge::FxCorner => Size { height, fx: g.fx.map(|f| x - f.x0), width: None },
+        }
+    }
+
+    /// Where the edge is on the page for a Timeline at `g` (the point a drag moves).
+    fn at(self, g: &Geom) -> (f64, f64) {
+        let fx = g.fx.unwrap_or(g.strip);
+        match self {
+            Edge::Right | Edge::Corner => (g.strip.x1, g.strip.y1),
+            Edge::Bottom => (g.strip.x1, g.strip.y1),
+            Edge::FxRight | Edge::FxCorner => (fx.x1, fx.y1),
         }
     }
 }
 
-/// An edge of the open Timeline being dragged: the card, the edge, and the nodes it pushed and
-/// how far (x, y).
+/// The edge whose resize zone holds screen point `p`, for a Timeline at `strip` and Effect
+/// Controls at `fx` (screen rectangles). Zones are [`BAND`] points either side of an edge (inside
+/// and out) and [`CORNER`] points either way from a bottom-right corner, at any zoom; corners win
+/// over edges, and edges over the panels' content under them.
+pub(crate) fn edge_at(strip: Rect, fx: Option<Rect>, p: Pos2) -> Option<Edge> {
+    let near = |c: Pos2| (p.x - c.x).abs() <= CORNER && (p.y - c.y).abs() <= CORNER;
+    if near(strip.max) {
+        return Some(Edge::Corner);
+    }
+    if let Some(f) = fx
+        && near(f.max)
+    {
+        return Some(Edge::FxCorner);
+    }
+    let across = |x: f32| (p.x - x).abs() <= BAND;
+    let along = |r: Rect| p.y >= r.min.y - BAND && p.y <= r.max.y + BAND;
+    if across(strip.max.x) && along(strip) {
+        return Some(Edge::Right);
+    }
+    if let Some(f) = fx
+        && across(f.max.x)
+        && along(f)
+    {
+        return Some(Edge::FxRight);
+    }
+    let right = fx.map_or(strip.max.x, |f| f.max.x);
+    if (p.y - strip.max.y).abs() <= BAND && p.x >= strip.min.x - BAND && p.x <= right + BAND {
+        return Some(Edge::Bottom);
+    }
+    None
+}
+
+/// The screen rectangles the resize zones reach (the panels grown by [`BAND`], and the corners):
+/// the canvas leaves the pointer there to them.
+pub(crate) fn zones(strip: Rect, fx: Option<Rect>) -> Vec<Rect> {
+    let mut out: Vec<Rect> = [Some(strip), fx].into_iter().flatten().map(|r| r.expand(BAND)).collect();
+    out.extend([Some(strip), fx].into_iter().flatten().map(|r| Rect::from_center_size(r.max, egui::Vec2::splat(CORNER * 2.0))));
+    out
+}
+
+/// Draw edge `edge`'s affordance (hovered or dragged): an accent line along it and, at a corner,
+/// a grip mark. `strip`, `fx`: screen rectangles.
+pub(crate) fn draw_edge(painter: &egui::Painter, strip: Rect, fx: Option<Rect>, edge: Edge) {
+    let t = crate::theme::Tokens::get(painter.ctx());
+    let line = Stroke::new(2.0, t.accent);
+    let f = fx.unwrap_or(strip);
+    let right = f.max.x.max(strip.max.x);
+    let grip = |c: Pos2| {
+        for d in [4.0, 8.0, 12.0] {
+            painter.line_segment([c + vec2(-d, -1.5), c + vec2(-1.5, -d)], Stroke::new(1.5, t.accent));
+        }
+    };
+    match edge {
+        Edge::Right => {
+            painter.vline(strip.max.x, strip.y_range(), line);
+        }
+        Edge::FxRight => {
+            painter.vline(f.max.x, f.y_range(), line);
+        }
+        Edge::Bottom => {
+            painter.hline(strip.min.x..=right, strip.max.y, line);
+        }
+        Edge::Corner => {
+            painter.vline(strip.max.x, strip.y_range(), line);
+            painter.hline(strip.min.x..=right, strip.max.y, line);
+            grip(strip.max);
+        }
+        Edge::FxCorner => {
+            painter.vline(f.max.x, f.y_range(), line);
+            painter.hline(strip.min.x..=right, strip.max.y, line);
+            grip(f.max);
+        }
+    }
+}
+
+/// An edge of the open Timeline being dragged: the card, the edge, where it was grabbed relative
+/// to the edge (page units: the edge doesn't jump to the pointer), whether the drag has started
+/// (past egui's drag threshold), and the nodes it pushed and how far (x, y).
 pub(crate) struct Widen {
     pub card: NodeId,
     pub edge: Edge,
+    pub grab: (f64, f64),
+    pub started: bool,
     pub pushed: HashMap<NodeId, (f64, f64)>,
 }
 
@@ -578,40 +674,66 @@ fn apply(doc: &mut Document, pushed: &mut HashMap<NodeId, (f64, f64)>, moves: &[
     }
 }
 
-/// Start, follow or end a drag of edge `edge` of card `card`'s Timeline (`resp`: the edge's
-/// response; `at`: the pointer's page point).
-pub(crate) fn resize_input(app: &mut FigApp, card: NodeId, resp: &egui::Response, edge: Edge, at: Option<(f64, f64)>) {
-    if resp.drag_started() {
-        let _ = app.session.begin_interaction(edge.label());
-        app.effectcraft.widen = Some(Widen { card, edge, pushed: HashMap::new() });
-    }
-    if resp.dragged()
-        && let Some((x, y)) = at
-        && let Some(w) = app.effectcraft.widen.as_mut().filter(|w| w.card == card && w.edge == edge)
-    {
-        let mut pushed = std::mem::take(&mut w.pushed);
-        let (doc, page) = match app.session.ds() {
-            Ok(ds) => (ds.doc.clone(), ds.page),
-            Err(_) => return,
-        };
-        let strips: Vec<(NodeId, usize)> = closed(app, &doc, page)
-            .into_iter()
-            .filter_map(|(id, _)| Some((id, app.effectcraft.strips.peek(doc.node(id)?.effectcraft.as_deref()?).map_or(1, |b| b.bars.len().max(1)))))
-            .collect();
-        let Some(g) = geom_of(&doc, card, true, 0) else { return };
-        let size = edge.size(&g, x, y);
-        let _ = app.session.preview(|d, _| {
-            resize(d, page, card, size, &strips, &mut pushed);
-            Ok(())
-        });
-        if let Some(w) = app.effectcraft.widen.as_mut() {
-            w.pushed = pushed;
+/// The resize edges of card `card`'s open Timeline (`g`; `strip`, `fx`: on screen), from the raw
+/// pointer, before the panels draw: a press in a zone grabs that edge, and the drag stays its
+/// until the button is let go wherever the pointer goes; it sizes only once past egui's drag
+/// threshold. Returns the edge hovered or dragged (its affordance shows, and the panels sit this
+/// frame out so the edge wins over what is under it).
+pub(crate) fn edges_input(app: &mut FigApp, ctx: &egui::Context, card: NodeId, g: &Geom, strip: Rect, fx: Option<Rect>) -> Option<Edge> {
+    let (pos, pressed, down, past) =
+        ctx.input(|i| (i.pointer.interact_pos(), i.pointer.primary_pressed(), i.pointer.primary_down(), i.pointer.is_decidedly_dragging()));
+    if app.effectcraft.widen.as_ref().is_some_and(|w| w.card != card) {
+        // Another card's Timeline opened mid-drag: that drag is over.
+        if app.effectcraft.widen.take().is_some_and(|w| w.started) {
+            let _ = app.session.commit_interaction();
         }
     }
-    if resp.drag_stopped() && app.effectcraft.widen.as_ref().is_some_and(|w| w.edge == edge) {
-        app.effectcraft.widen = None;
-        let _ = app.session.commit_interaction();
+    if app.effectcraft.widen.is_none() {
+        let over = pos.filter(|p| app.canvas.rect.contains(*p)).and_then(|p| edge_at(strip, fx, p));
+        let Some(edge) = over else { return None };
+        if pressed && !egui::Popup::is_any_open(ctx) {
+            let (ex, ey) = edge.at(g);
+            let p = pos.map(|p| app.to_page(p)).unwrap_or_default();
+            app.effectcraft.widen = Some(Widen { card, edge, grab: (p.x - ex, p.y - ey), started: false, pushed: HashMap::new() });
+        }
+        return Some(edge);
     }
+    let Some(edge) = app.effectcraft.widen.as_ref().map(|w| w.edge) else { return None };
+    if !down {
+        if app.effectcraft.widen.take().is_some_and(|w| w.started) {
+            let _ = app.session.commit_interaction();
+        }
+        return Some(edge);
+    }
+    let Some(p) = pos.map(|p| app.to_page(p)) else { return Some(edge) };
+    if !past {
+        return Some(edge);
+    }
+    let (doc, page) = match app.session.ds() {
+        Ok(ds) => (ds.doc.clone(), ds.page),
+        Err(_) => return Some(edge),
+    };
+    let strips: Vec<(NodeId, usize)> = closed(app, &doc, page)
+        .into_iter()
+        .filter(|(id, _)| *id != card)
+        .filter_map(|(id, _)| Some((id, app.effectcraft.strips.peek(doc.node(id)?.effectcraft.as_deref()?).map_or(1, |b| b.bars.len().max(1)))))
+        .collect();
+    let Some(w) = app.effectcraft.widen.as_mut() else { return Some(edge) };
+    if !w.started {
+        w.started = true;
+        let _ = app.session.begin_interaction(edge.label());
+    }
+    let Some(w) = app.effectcraft.widen.as_mut() else { return Some(edge) };
+    let mut pushed = std::mem::take(&mut w.pushed);
+    let size = edge.size(g, p.x - w.grab.0, p.y - w.grab.1);
+    let _ = app.session.preview(|d, _| {
+        resize(d, page, card, size, &strips, &mut pushed);
+        Ok(())
+    });
+    if let Some(w) = app.effectcraft.widen.as_mut() {
+        w.pushed = pushed;
+    }
+    Some(edge)
 }
 
 #[cfg(test)]

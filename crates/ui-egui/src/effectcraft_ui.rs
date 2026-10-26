@@ -253,7 +253,7 @@ pub struct Link {
     /// The closed strips' layer bars ([`strips::Loader`]).
     #[cfg(feature = "effectcraft-inproc")]
     pub(crate) strips: strips::Loader,
-    /// An edge of the open Timeline being dragged ([`strips::resize_input`]).
+    /// An edge of the open Timeline being dragged ([`strips::edges_input`]).
     #[cfg(feature = "effectcraft-inproc")]
     pub(crate) widen: Option<strips::Widen>,
     /// Space pressed in the Timeline: it plays the card when let go, unless the pointer was pressed
@@ -1192,7 +1192,7 @@ impl FigApp {
         let mut save = false;
         let mut screen: Vec<Rect> = Vec::new();
         let mut fx_screen: Option<Rect> = None;
-        let mut edges: Vec<(egui::Response, strips::Edge, Option<(f64, f64)>)> = Vec::new();
+        let mut zones: Vec<Rect> = Vec::new();
         if let Some((g, xf)) = geom.and_then(|g| Some((g, strips::layer_transform(self, g.k)?))) {
             // One area in a layer egui scales and moves like the canvas: painting and input.
             let id = egui::Id::new("effectcraft_canvas_timeline");
@@ -1208,7 +1208,12 @@ impl FigApp {
             fx_screen = fx.and_then(visible);
             // Space held pans the canvas and a pinch or ⌘-scroll zooms it: the Timeline sits out.
             let zooming = ctx.input(|i| (i.zoom_delta() - 1.0).abs() > 1e-4);
-            let interactable = !self.canvas.space_pan && !zooming;
+            // The resize edges first, on the raw pointer: hovered or dragged, they win over the
+            // panels under them (which sit the frame out).
+            let (s_strip, s_fx) = (xf * strip, fx.map(|f| xf * f));
+            let hot = strips::edges_input(self, ctx, p.card, &g, s_strip, s_fx);
+            zones = strips::zones(s_strip, s_fx).into_iter().map(|r| r.intersect(canvas)).filter(|r| r.is_positive()).collect();
+            let interactable = !self.canvas.space_pan && !zooming && hot.is_none();
             egui::Area::new(id).order(egui::Order::Middle).fixed_pos(whole.min).constrain(false).movable(false).interactable(interactable).show(
                 ctx,
                 |ui| {
@@ -1236,51 +1241,19 @@ impl FigApp {
                     });
                     let body = Rect::from_min_max(pos2(strip.min.x, head.max.y + 1.0), strip.max);
                     p.host.show(ui, body, fx);
-                    // The right edge widens it, the bottom edge (under it and Effect Controls)
-                    // makes it taller, their corner does both, Effect Controls' right edge widens
-                    // them; each pushes what it would cover.
-                    let e = strips::EDGE / 2.0;
-                    let right = fx.map_or(strip.max.x, |f| f.max.x);
-                    for edge in strips::Edge::ALL {
-                        let grab = match edge {
-                            strips::Edge::Right => Rect::from_x_y_ranges((strip.max.x - e)..=(strip.max.x + e), strip.min.y..=(strip.max.y - e)),
-                            strips::Edge::Bottom => Rect::from_x_y_ranges(strip.min.x..=right, (strip.max.y - e)..=(strip.max.y + e)),
-                            strips::Edge::Corner => Rect::from_center_size(strip.max, vec2(strips::EDGE * 2.0, strips::EDGE * 2.0)),
-                            strips::Edge::FxRight => match fx {
-                                Some(f) => Rect::from_x_y_ranges((f.max.x - e)..=(f.max.x + e), f.min.y..=(f.max.y - e)),
-                                None => continue,
-                            },
-                        };
-                        let resp = ui.interact(grab, id.with(("edge", edge as u8)), egui::Sense::drag());
-                        if resp.hovered() || resp.dragged() {
-                            ui.ctx().set_cursor_icon(edge.cursor());
-                            let line = Stroke::new(2.0, t.accent);
-                            match edge {
-                                strips::Edge::Right => {
-                                    painter.vline(strip.max.x, strip.y_range(), line);
-                                }
-                                strips::Edge::Bottom => {
-                                    painter.hline(strip.min.x..=right, strip.max.y, line);
-                                }
-                                strips::Edge::Corner => {
-                                    painter.vline(strip.max.x, strip.y_range(), line);
-                                    painter.hline(strip.x_range(), strip.max.y, line);
-                                }
-                                strips::Edge::FxRight => {
-                                    if let Some(f) = fx {
-                                        painter.vline(f.max.x, f.y_range(), line);
-                                    }
-                                }
-                            }
-                        }
-                        let at = resp.interact_pointer_pos().map(|q| (f64::from(q.x) * g.k, f64::from(q.y) * g.k));
-                        edges.push((resp, edge, at));
-                    }
                     ui.advance_cursor_after_rect(whole);
                 },
             );
+            // The edge hovered or dragged: its cursor, an accent line along it, a corner's grip.
+            if let Some(edge) = hot {
+                ctx.set_cursor_icon(edge.cursor());
+                let layer = egui::LayerId::new(egui::Order::Foreground, id.with("edges"));
+                strips::draw_edge(&ctx.layer_painter(layer).with_clip_rect(canvas), s_strip, s_fx, edge);
+            }
         }
-        self.effectcraft.panel_rects = (!screen.is_empty()).then(|| (ctx.cumulative_pass_nr(), screen.clone()));
+        // The canvas leaves the pointer over the panels and their resize zones to them.
+        let owned: Vec<Rect> = screen.iter().copied().chain(zones).collect();
+        self.effectcraft.panel_rects = (!owned.is_empty()).then(|| (ctx.cumulative_pass_nr(), owned));
         // The Timeline has the keyboard from a click in it until a click elsewhere (not one in a
         // menu it opened).
         if !egui::Popup::is_any_open(ctx)
@@ -1312,7 +1285,6 @@ impl FigApp {
         // The colour eyedropper samples FigCraft's canvas under the pointer.
         let pointer = if p.host.picking() { self.effectcraft_canvas_color(ctx, &p, &screen) } else { None };
         self.effectcraft.picking = p.host.pick(ctx, pointer);
-        let card = p.card;
         if close {
             p.open = false;
             self.effectcraft.panel_rects = None;
@@ -1323,9 +1295,6 @@ impl FigApp {
             self.toast("The EffectCraft edits are kept: click its strip to save them");
         }
         self.effectcraft.panel = Some(p);
-        for (resp, edge, at) in edges {
-            strips::resize_input(self, card, &resp, edge, at);
-        }
     }
 }
 

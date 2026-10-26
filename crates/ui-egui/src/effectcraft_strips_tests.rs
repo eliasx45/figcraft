@@ -154,3 +154,63 @@ fn taller_pushes_down_and_effect_controls_follow() {
     assert_eq!(geom_of(&d3, card, true, 0).unwrap().fx.unwrap().width(), def * 2.0);
     assert_eq!(d3.node(card).unwrap().plugin_data.get(FX_WIDTH_KEY).map(String::as_str), Some(format!("{:.1}", def * 2.0).as_str()));
 }
+
+/// The resize zones are 8 screen points either side of each edge at any zoom (just outside the
+/// edge works as well as just inside), corners win over edges, and edges over the content under
+/// them (a point the Timeline's scroll bar would take is the right edge's).
+#[test]
+fn edges_are_easy_to_grab_at_any_zoom() {
+    use egui::{Rect, pos2, vec2};
+    for zoom in [0.1_f32, 0.25, 1.0, 3.0] {
+        // A 480×288 Timeline and a 360-wide Effect Controls 8 units to its right, on screen.
+        let strip = Rect::from_min_size(pos2(100.0, 100.0), vec2(480.0, 288.0) * zoom);
+        let fx = Rect::from_min_size(pos2(strip.max.x + 8.0 * zoom, strip.min.y), vec2(360.0, 288.0) * zoom);
+        let mid_y = strip.center().y;
+        let fx_y = fx.min.y + 2.0;
+        // The Timeline's right edge: just outside, on it, just inside (where its scroll bar is).
+        for dx in [-7.5, -2.0, 0.0, 2.0] {
+            let got = edge_at(strip, Some(fx), pos2(strip.max.x + dx, mid_y));
+            // Zoomed far out the two right edges are closer than a band: either one is fine there.
+            assert!(matches!(got, Some(Edge::Right) | Some(Edge::FxRight)), "zoom {zoom}, dx {dx}: {got:?}");
+        }
+        assert_eq!(edge_at(strip, Some(fx), pos2(strip.max.x - 7.5, mid_y)), Some(Edge::Right), "zoom {zoom}: inside the band");
+        // Effect Controls' right edge, both sides.
+        for dx in [-7.5, 0.0, 7.5] {
+            assert_eq!(edge_at(strip, Some(fx), pos2(fx.max.x + dx, fx_y.max(mid_y))), Some(Edge::FxRight), "zoom {zoom}, dx {dx}");
+        }
+        // The shared bottom edge, under the Timeline and under Effect Controls, both sides.
+        for dy in [-7.5, 0.0, 7.5] {
+            assert_eq!(edge_at(strip, Some(fx), pos2(strip.min.x + 30.0, strip.max.y + dy)), Some(Edge::Bottom), "zoom {zoom}, dy {dy}");
+            assert_eq!(edge_at(strip, Some(fx), pos2(fx.center().x, fx.max.y + dy)), Some(Edge::Bottom));
+        }
+        // Past the band: nothing (the content's, or the canvas's).
+        assert_eq!(edge_at(strip, Some(fx), pos2(strip.max.x + 9.0 + 8.0 * zoom, mid_y)).filter(|e| *e == Edge::Right), None);
+        assert_eq!(edge_at(strip, Some(fx), pos2(strip.min.x + 2.0, strip.max.y + 9.0)), None, "below the band");
+        if strip.width() > 40.0 {
+            assert_eq!(edge_at(strip, Some(fx), pos2(strip.min.x + 20.0, strip.min.y + 20.0).min(strip.center())), None, "the content's");
+        }
+        // Corners win over the edges that meet there, 14 points either way.
+        assert_eq!(edge_at(strip, Some(fx), strip.max + vec2(-6.0, -6.0)), Some(Edge::Corner));
+        assert_eq!(edge_at(strip, Some(fx), strip.max + vec2(12.0, 12.0)), Some(Edge::Corner), "just outside the corner");
+        assert_eq!(edge_at(strip, Some(fx), fx.max + vec2(13.0, -13.0)), Some(Edge::FxCorner));
+        assert_eq!(edge_at(strip, None, strip.max + vec2(5.0, 5.0)), Some(Edge::Corner), "no Effect Controls");
+    }
+    // The zones the canvas leaves to the edges reach past the panels.
+    let strip = Rect::from_min_size(pos2(0.0, 0.0), vec2(100.0, 50.0));
+    let z = zones(strip, None);
+    assert!(z.iter().any(|r| r.contains(pos2(107.0, 25.0))) && z.iter().any(|r| r.contains(pos2(112.0, 62.0))));
+}
+
+/// Every edge sizes what it should, from where it was grabbed.
+#[test]
+fn each_edge_sizes_its_own_panel() {
+    let g = geom(PRect::new(0.0, 0.0, 480.0, 270.0), Size::default(), true, 0);
+    let fx = g.fx.unwrap();
+    assert_eq!(Edge::Right.size(&g, 700.0, 0.0), Size { width: Some(700.0), ..Size::default() });
+    assert_eq!(Edge::Bottom.size(&g, 0.0, g.strip.y0 + 500.0), Size { height: Some(500.0), ..Size::default() });
+    assert_eq!(Edge::FxRight.size(&g, fx.x0 + 400.0, 0.0), Size { fx: Some(400.0), ..Size::default() });
+    let c = Edge::FxCorner.size(&g, fx.x0 + 400.0, g.strip.y0 + 300.0);
+    assert_eq!((c.width, c.height, c.fx), (None, Some(300.0), Some(400.0)));
+    let c = Edge::Corner.size(&g, 900.0, g.strip.y0 + 300.0);
+    assert_eq!((c.width, c.height, c.fx), (Some(900.0), Some(300.0), None));
+}
