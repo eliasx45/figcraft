@@ -444,6 +444,10 @@ impl TimelineHost for EcHost {
         if let Some(r) = hosted::inline(self, ctx, id, &params) {
             return r;
         }
+        // ⌘N (New Composition without settings): EffectCraft's dialog, the comp becomes a card.
+        if let Some(r) = crate::effectcraft_ui::cards::intercept(self, ctx, id, &params) {
+            return r;
+        }
         // Pre-compose, Interpret / Replace Footage without their settings: EffectCraft's dialogs.
         if let Some(r) = crate::effectcraft_ui::dialogs::intercept(self, ctx, id, &params) {
             return r;

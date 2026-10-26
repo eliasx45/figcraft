@@ -609,7 +609,10 @@ fn place_card(app: &mut FigApp, mut params: Value, from: Option<NodeId>, place: 
         o.extend(place.iter().map(|(k, v)| (k.clone(), v.clone())));
     }
     let r = app.run("effectcraft.place", params).ok_or("The card couldn't be placed")?;
-    r.get("id").and_then(figcraft_engine::params::id_of).ok_or_else(|| "The card couldn't be placed".to_string())
+    let card = r.get("id").and_then(figcraft_engine::params::id_of).ok_or_else(|| "The card couldn't be placed".to_string())?;
+    // The new card and its Timeline come into view.
+    super::cards::reveal(app, card);
+    Ok(card)
 }
 
 /// The first x from `x` rightwards where a new card (on the page of node `near`) at (x, `y`), `w` × `h` page units, with its
@@ -654,6 +657,7 @@ fn switch(app: &mut FigApp, card: NodeId, comp: u64) {
         p.focused = true;
         p.synced = None;
     }
+    super::cards::reveal(app, card);
 }
 
 /// A card on the page showing comp `comp` of project `key` (`comp` 0: any comp of it).

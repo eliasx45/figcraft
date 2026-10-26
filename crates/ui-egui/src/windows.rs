@@ -303,6 +303,9 @@ pub fn on_close_request(app: &mut FigApp, ctx: &Context) {
         return;
     }
     let unsaved = !app.unsaved().is_empty();
+    // Fork: the EffectCraft Timeline's unsaved edits are asked about too.
+    #[cfg(feature = "effectcraft-inproc")]
+    let unsaved = unsaved || crate::effectcraft_ui::cards::dirty(app);
     if app.windows.current == 0 && (unsaved || !app.windows.list.is_empty()) {
         ctx.send_viewport_cmd(ViewportCommand::CancelClose);
     }
@@ -311,6 +314,12 @@ pub fn on_close_request(app: &mut FigApp, ctx: &Context) {
 
 /// The custom title bar's Close button uses the same unsaved-file check as a system close event.
 pub(crate) fn request_close(app: &mut FigApp, ctx: &Context) {
+    // Fork: the EffectCraft Timeline's unsaved edits first (Save / Don't save / Cancel).
+    #[cfg(feature = "effectcraft-inproc")]
+    if crate::effectcraft_ui::cards::hold_close(app) {
+        ctx.request_repaint();
+        return;
+    }
     if !app.unsaved().is_empty() {
         app.ui.confirm_close = true;
         ctx.request_repaint();

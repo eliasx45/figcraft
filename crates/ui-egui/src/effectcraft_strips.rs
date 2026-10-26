@@ -226,6 +226,8 @@ pub(crate) struct Bars {
     pub count: usize,
     pub bars: Vec<(f64, f64, Color32)>,
     pub work: (f64, f64),
+    /// The comp viewer's resolution factor (`None`: Auto).
+    pub resolution: Option<u8>,
 }
 
 type Preset = figcraft_ec_inproc::effectcraft_engine::preview::PreviewPreset;
@@ -233,8 +235,9 @@ type Preset = figcraft_ec_inproc::effectcraft_engine::preview::PreviewPreset;
 /// FigCraft's preview rules for a card ([`figcraft_engine::effectcraft::Preview`]) from
 /// EffectCraft's Space preview options `p` and the comp's work area and duration (comp seconds).
 /// Applied: range (work area, extended by the current time, entire duration, around the current
-/// time), play from, loop, frame rate and skip. Not: resolution, cache before playback, full
-/// screen, audio/video only, moving the current time to the preview time.
+/// time), play from, loop, frame rate and skip. Resolution and cache before playback:
+/// `effectcraft_ui::cards`. Not: full screen, audio/video only, moving the current time to the
+/// preview time.
 pub(crate) fn preview_of(p: &Preset, work: (f64, f64), duration: f64) -> figcraft_engine::effectcraft::Preview {
     use figcraft_ec_inproc::effectcraft_engine::preview::{PlayFrom, PreviewRange as R};
     use figcraft_engine::effectcraft::{Preview, PreviewRange};
@@ -368,7 +371,13 @@ fn read_bars(ec: &figcraft_ec_inproc::InProc, c: &EcComp) -> Option<Bars> {
     let comp = ec.session().project.comp(ItemId(id))?;
     let tokens = effectcraft_ui_egui::theme::Tokens::for_kind(effectcraft_ui_egui::theme::ThemeKind::Dark);
     let bars = comp.layers.iter().take(MAX_BARS).map(|l| (l.in_point.seconds(), l.out_point.seconds(), tokens.label(l.label))).collect();
-    Some(Bars { duration: comp.duration.seconds(), count: comp.layers.len(), bars, work: (comp.work_area.0.seconds(), comp.work_area.1.seconds()) })
+    Some(Bars {
+        duration: comp.duration.seconds(),
+        count: comp.layers.len(),
+        bars,
+        work: (comp.work_area.0.seconds(), comp.work_area.1.seconds()),
+        resolution: comp.resolution.factor(),
+    })
 }
 
 /// The cards with a closed strip on the current page (every card but the one whose Timeline is

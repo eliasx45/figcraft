@@ -65,6 +65,12 @@ pub(crate) mod dialogs;
 #[path = "effectcraft_menu.rs"]
 pub(crate) mod menu;
 
+/// Fork: unsaved Timeline edits asked about, new cards brought into view, ⌘N, preview
+/// resolution and Cache Before Playback for cards.
+#[cfg(feature = "effectcraft-inproc")]
+#[path = "effectcraft_cards.rs"]
+pub(crate) mod cards;
+
 /// Play / explode button radius (screen points).
 const BUTTON: f32 = 10.0;
 /// Texture memory kept for card frames (bytes).
@@ -284,6 +290,9 @@ pub struct Link {
     /// Layer handles on the card the Timeline edits ([`handles`]).
     #[cfg(feature = "effectcraft-inproc")]
     pub(crate) handles: handles::State,
+    /// Unsaved-edits question, new cards into view, caching ([`cards`]).
+    #[cfg(feature = "effectcraft-inproc")]
+    pub(crate) cards: cards::State,
 }
 
 impl Store {
@@ -706,6 +715,9 @@ pub fn overlay(app: &FigApp, painter: &egui::Painter) {
     // Fork: the closed Timeline strips under the cards whose Timeline isn't open.
     #[cfg(feature = "effectcraft-inproc")]
     strips::draw_closed(app, painter, doc, ds.page, hover);
+    // Fork: "Caching n%" on a card rendering its play range.
+    #[cfg(feature = "effectcraft-inproc")]
+    cards::draw(app, painter);
 }
 
 pub(crate) fn round_button(painter: &egui::Painter, c: Pos2) {
@@ -981,6 +993,8 @@ impl FigApp {
                 let pv = wa.map(|(w, d)| strips::preview_of(&preset, w, d));
                 self.session.effectcraft.set_preview(*id, pv);
             }
+            // Cache Before Playback and the preview resolution.
+            cards::cache_step(self, ctx, &preset, now);
         }
         let ppp = ctx.pixels_per_point();
         let hover = ctx.input(|i| i.pointer.hover_pos()).filter(|h| self.canvas.rect.contains(*h));
@@ -996,6 +1010,9 @@ impl FigApp {
             let pic = fit(r, c.width, c.height);
             wanted.push((id, c.clone(), side_for(pic.width().max(pic.height()) * ppp, c), frame_at(c, t)));
         }
+        // Fork: the comp viewer's / Space preview's resolution; a caching card's range.
+        #[cfg(feature = "effectcraft-inproc")]
+        cards::shape_wanted(self, &mut wanted);
         if self.session.effectcraft.playing() || self.effectcraft.in_flight > 0 {
             ctx.request_repaint();
         }
@@ -1276,6 +1293,7 @@ impl FigApp {
     /// why it's read-only; ✕ closes it), EffectCraft's Timeline, Effect Controls to its right, the
     /// right and bottom edges (their corner, Effect Controls' right edge) that size them, the keyboard focus, and the card following its edits.
     pub(crate) fn effectcraft_panel_ui(&mut self, ctx: &egui::Context) {
+        cards::frame(self, ctx);
         let Some(mut p) = self.effectcraft.panel.take() else {
             self.effectcraft.panel_rects = None;
             return;
@@ -1691,10 +1709,15 @@ impl FigApp {
         steps.truncate(MAX_EXPLODE);
         let n = steps.len();
         let more = if total > n { format!(" ({} more left out)", total - n) } else { String::new() };
+        #[cfg(feature = "effectcraft-inproc")]
+        let before = cards::on_page(self);
         match self.session.batch("Explode precomps", &steps) {
             Ok(_) => self.toast(format!("{n} nested comp{} placed next to {}{more}. ⌘Z takes them away", if n == 1 { "" } else { "s" }, c.comp)),
             Err(e) => self.toast(e.to_string()),
         }
+        // Fork: the placed cards come into view.
+        #[cfg(feature = "effectcraft-inproc")]
+        cards::reveal_new(self, &before);
         self.handle_ui_requests();
     }
 }

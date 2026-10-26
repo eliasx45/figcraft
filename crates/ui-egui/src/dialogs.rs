@@ -388,6 +388,9 @@ pub fn show(app: &mut FigApp, ctx: &Context) {
     crate::online::dialogs(app, ctx);
     crate::windows::confirm_close(app, ctx);
     crate::tabs::confirm_close_tab(app, ctx);
+    // Fork: unsaved EffectCraft Timeline edits (quit, close, a card or its file left).
+    #[cfg(feature = "effectcraft-inproc")]
+    crate::effectcraft_ui::cards::confirm(app, ctx);
 }
 
 /// Menus and Actions cannot pass a value themselves. Gather it here, then run the regular
