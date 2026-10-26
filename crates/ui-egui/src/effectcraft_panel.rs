@@ -19,14 +19,21 @@
 //! - **Undo.** ⌘Z / ⇧⌘Z (⌘Y) undo and redo EffectCraft's edits while the panel has focus and
 //!   FigCraft's otherwise; neither reaches the other's history.
 //! - Effect Controls (the selected layer's effects) dock left of the Timeline when there is room.
-//! - What the Timeline still needs EffectCraft's whole app for (Graph Editor, markers, dialogs…,
-//!   `docs/embedding-panels.md` in EffectCraft) is left out by the panel itself.
+//! - **Graph Editor and speed curves.** The header's Graph button or Shift+F3 shows EffectCraft's
+//!   Graph Editor in the Timeline's place (F fits its graphs); the footer's ∿ button shows speed
+//!   curves in the property rows (on by default). Both edit through this host like any Timeline
+//!   edit: same undo, read-only guard and card refresh. Their two UI-only commands
+//!   (`timeline.graphEditor`, `timeline.graph.fit`) run through EffectCraft's
+//!   `panels::timeline::hosted`, which also binds their keys in this session.
+//! - What the Timeline still needs EffectCraft's whole app for (suggestions overlay, RAM chip,
+//!   EffectCraft's own dialogs…, `docs/embedding-panels.md` in EffectCraft) is left out by the
+//!   panel itself.
 
 use std::path::{Path, PathBuf};
 
 use effectcraft_ui_egui::automation::Registry;
 use effectcraft_ui_egui::dock::PanelKind;
-use effectcraft_ui_egui::panels::timeline::{PointerColor, TimelineHost, TimelineParts};
+use effectcraft_ui_egui::panels::timeline::{PointerColor, TimelineHost, TimelineParts, hosted};
 use effectcraft_ui_egui::state::UiState;
 use effectcraft_ui_egui::theme::{ThemeKind, Tokens};
 use figcraft_doc::{EcComp, NodeId};
@@ -64,6 +71,7 @@ impl EcHost {
     /// (or can't say), so the panel is read-only.
     pub fn open(path: &Path, comp: &EcComp, app_owns: bool) -> Result<EcHost, String> {
         let mut ec = InProc::open(path)?;
+        hosted::install(ec.session_mut());
         let comp_ref = if comp.comp_id > 0 { json!(comp.comp_id) } else { json!(comp.comp) };
         let id = ec.comp_id(&comp_ref)?;
         ec.session_mut().open_comp(ItemId(id));
@@ -121,6 +129,7 @@ impl EcHost {
         if self.ec.session().revision != before && self.ec.session().is_dirty() {
             // Undo couldn't take it back: the project as saved.
             if self.ec.reload().is_ok() {
+                hosted::install(self.ec.session_mut());
                 self.ec.session_mut().open_comp(ItemId(self.comp));
             }
         }
@@ -192,6 +201,10 @@ impl EcHost {
                     out.push(PanelAction::Ran(id.to_string()));
                 }
             }
+        }
+        // A session opened again (read-only taken back) needs the Graph Editor's keys again.
+        if !hosted::installed(self.ec.session()) {
+            hosted::install(self.ec.session_mut());
         }
         let focus = self.focus;
         let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -292,7 +305,12 @@ impl TimelineHost for EcHost {
     fn id_scope(&self) -> Option<egui::Id> {
         Some(egui::Id::new(("figcraft-effectcraft-timeline", self.ec.path())))
     }
-    fn invoke(&mut self, _ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
+    /// The Timeline's UI-only commands (Graph Editor switch and fit) change only the panel's
+    /// state; everything else runs on the session, read-only kept.
+    fn invoke(&mut self, ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
+        if let Some(r) = hosted::run(self, ctx, id, &params) {
+            return r;
+        }
         self.guarded_run(id, params)
     }
     /// The colour FigCraft's canvas shows under the pointer ([`EcHost::pointer`], set by the app

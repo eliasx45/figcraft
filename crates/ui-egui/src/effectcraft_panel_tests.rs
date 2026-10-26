@@ -150,6 +150,60 @@ fn undo_stays_in_effectcraft_while_the_panel_has_focus() {
     assert_eq!(layers(&h), n + 1, "and its redo");
 }
 
+/// The Graph Editor in the docked panel: Shift+F3 (the panel focused) opens it, it draws the
+/// selected layer's keys, F fits its graphs; the switch is the panel's state, not an edit (no
+/// unsaved change, no card re-render), and works read-only too.
+#[test]
+fn the_graph_editor_opens_and_draws_in_the_docked_panel() {
+    use effectcraft_ui_egui::panels::timeline::hosted;
+    let (p, c) = sample("graph");
+    let mut h = EcHost::open(&p, &c, false).unwrap();
+    assert!(hosted::installed(h.session()), "the Graph Editor's keys are bound in the panel's session");
+    let ctx = egui::Context::default();
+    effectcraft_ui_egui::theme::install_panel_fonts(&ctx);
+    let comp = h.session().active_comp().unwrap().clone();
+    let layer = comp.layers.iter().next().unwrap();
+    let (lid, uid) = (layer.id.0, layer.props.prop("transform/opacity").unwrap().uid);
+    for (t, v) in [(0.0, 0.0), (1.0, 100.0)] {
+        h.invoke(&ctx, "prop.addKey", json!({"layer": lid, "prop": uid, "time": t, "value": v})).unwrap();
+    }
+    h.invoke(&ctx, "layer.select", json!({"layers": [lid]})).unwrap();
+    let mut press = input();
+    press.events = vec![key(egui::Key::F3, egui::Modifiers::SHIFT)];
+    let mut actions = vec![];
+    let _ = ctx.run_ui(press, |_| actions = h.keys(&ctx));
+    assert!(actions.contains(&PanelAction::Ran("timeline.graphEditor".into())), "{actions:?}");
+    assert!(h.ui().timeline.graph_editor, "Shift+F3 opened the Graph Editor");
+    for _ in 0..3 {
+        frame(&ctx, &mut h, input());
+    }
+    assert!(h.auto().find_current("timeline.graph").is_some(), "the graph plot drew");
+    assert!(!h.auto().query_current("timeline.graph.key.").is_empty(), "the opacity keys drew in the graph");
+    let mut press = input();
+    press.events = vec![key(egui::Key::F, egui::Modifiers::NONE)];
+    let _ = ctx.run_ui(press, |_| actions = h.keys(&ctx));
+    assert!(actions.contains(&PanelAction::Ran("timeline.graph.fit".into())), "{actions:?}");
+    frame(&ctx, &mut h, input());
+    let rev = h.session().revision;
+    h.invoke(&ctx, "timeline.graphEditor", json!({})).unwrap();
+    assert!(!h.ui().timeline.graph_editor);
+    assert_eq!(h.session().revision, rev, "the switch is no edit");
+    assert!(h.invoke(&ctx, "timeline.graph.fit", json!({})).is_err(), "nothing to fit while it is closed");
+    // Read-only: the Graph Editor still opens (it only shows the keys).
+    let mut ro = EcHost::open(&p, &c, true).unwrap();
+    ro.invoke(&ctx, "timeline.graphEditor", json!({"value": true})).unwrap();
+    assert!(ro.ui().timeline.graph_editor);
+    assert!(!ro.is_dirty());
+}
+
+/// Speed curves in the property rows are on in the docked Timeline (footer ∿).
+#[test]
+fn speed_curves_show_in_the_docked_rows_by_default() {
+    let (p, c) = sample("speed");
+    let h = EcHost::open(&p, &c, false).unwrap();
+    assert!(h.ui().timeline.speed_rows);
+}
+
 /// The Timeline's time is the card's: set and read back in comp seconds, snapped to frames and
 /// kept inside the comp; junk times are ignored.
 #[test]
