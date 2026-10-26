@@ -596,9 +596,13 @@ fn place_card(app: &mut FigApp, mut params: Value, from: Option<NodeId>, place: 
         if let Some(b) = doc.world_bounds(from) {
             let right = super::strips::geom_of(doc, from, open, 0).map_or(b.x1, |g| g.whole().x1.max(b.x1));
             let gap = (b.width() * 0.08).max(16.0);
-            params["x"] = json!(right + gap);
+            let cw = b.width().max(64.0);
+            let (w, h) = (params.get("width").and_then(Value::as_f64).unwrap_or(16.0), params.get("height").and_then(Value::as_f64).unwrap_or(9.0));
+            let ch = if w > 0.0 && h > 0.0 && (h / w).is_finite() { cw * h / w } else { cw * 9.0 / 16.0 };
+            let open_card = app.effectcraft.panel.as_ref().filter(|p| p.open).map(|p| p.card);
+            params["x"] = json!(free_x(doc, from, open_card, right + gap, b.y0, cw, ch, gap));
             params["y"] = json!(b.y0);
-            params["cardWidth"] = json!(b.width().max(64.0));
+            params["cardWidth"] = json!(cw);
         }
     }
     if let Some(o) = params.as_object_mut() {
@@ -606,6 +610,38 @@ fn place_card(app: &mut FigApp, mut params: Value, from: Option<NodeId>, place: 
     }
     let r = app.run("effectcraft.place", params).ok_or("The card couldn't be placed")?;
     r.get("id").and_then(figcraft_engine::params::id_of).ok_or_else(|| "The card couldn't be placed".to_string())
+}
+
+/// The first x from `x` rightwards where a new card (on the page of node `near`) at (x, `y`), `w` × `h` page units, with its
+/// Timeline and Effect Controls open, covers nothing on its page (cards with their Timelines or
+/// strips, other layers), keeping `gap` (regression: a precomp's card landed on the card already
+/// right of its source).
+pub(crate) fn free_x(doc: &figcraft_doc::Document, near: NodeId, open: Option<NodeId>, mut x: f64, y: f64, w: f64, h: f64, gap: f64) -> f64 {
+    use figcraft_geom::Rect as PRect;
+    let Some(page) = doc.page_of(near).and_then(|p| doc.node(p)) else { return x };
+    let taken: Vec<PRect> = page
+        .children
+        .iter()
+        .filter_map(|id| {
+            let b = doc.world_bounds(*id)?;
+            let strip = doc.node(*id)?.effectcraft.as_ref().and_then(|_| super::strips::geom_of(doc, *id, open == Some(*id), 3)).map(|g| g.whole());
+            Some(strip.map_or(b, |s| s.union(b)))
+        })
+        .collect();
+    for _ in 0..256 {
+        let me = super::strips::geom(PRect::new(x, y, x + w, y + h), super::strips::Size::default(), true, 0).whole().union(PRect::new(
+            x,
+            y,
+            x + w,
+            y + h,
+        ));
+        let hit = taken.iter().filter(|t| t.intersect(me).area() > 0.0).map(|t| t.x1).fold(f64::NAN, f64::max);
+        if !hit.is_finite() {
+            return x;
+        }
+        x = hit + gap;
+    }
+    x
 }
 
 /// The open Timeline now edits comp `comp` on card `card` (same project: same session, unsaved

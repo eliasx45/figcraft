@@ -247,3 +247,26 @@ fn junk_never_panics() {
     }
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A new card (a precomp, a new comp) never lands on a card already right of its source: it moves
+/// past it and that card's strip (regression: "BG Precomp" covered "FigCraft New Comp").
+#[test]
+fn a_new_card_lands_in_a_free_spot() {
+    let (_d, p, cid) = sample("free-spot");
+    let (mut u, card) = app_with_card(&p, cid, 0.0);
+    let other = u
+        .app
+        .session
+        .execute(
+            "effectcraft.place",
+            &json!({"comp": "C", "compId": cid, "project": p.to_str().unwrap(), "start": 0, "end": 2, "fps": 25, "x": 1600, "y": 0, "cardWidth": 400}),
+        )
+        .unwrap();
+    let other = figcraft_engine::params::id_of(&other["id"]).unwrap();
+    let doc = u.app.session.doc().unwrap();
+    let b = doc.world_bounds(other).unwrap();
+    let x = super::free_x(doc, card, None, 1500.0, 0.0, 400.0, 225.0, 40.0);
+    assert!(x >= b.x1, "{x} lands past the card in the way (ends at {})", b.x1);
+    let clear = super::free_x(doc, card, None, 5000.0, 0.0, 400.0, 225.0, 40.0);
+    assert_eq!(clear, 5000.0, "a free spot is kept");
+}
