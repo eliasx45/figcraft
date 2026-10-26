@@ -1,4 +1,5 @@
-//! EffectCraft's Pre-compose, Interpret Footage and Replace Footage dialogs on a card's Timeline:
+//! EffectCraft's Pre-compose, Interpret Footage, Replace Footage and layer dialogs (Solid, Light,
+//! Camera, Layer Settings, Time Stretch, Layer Style; EMBED12) on a card's Timeline:
 //! they open from the keys' and menus' requests (never from programmatic calls), OK does what
 //! EffectCraft does through the Timeline's session (one undo step), Cancel changes nothing, junk
 //! never panics.
@@ -11,6 +12,8 @@ use effectcraft_ui_egui::panels::timeline::TimelineHost;
 use figcraft_doc::NodeId;
 use figcraft_ec_inproc::effectcraft_engine::project::{ItemId, ItemKind, LayerId, LayerSource};
 use serde_json::{Value, json};
+
+use effectcraft_ui_egui::panels::hosted_dialogs::Hosted;
 
 use super::{Which, shown};
 use crate::effectcraft_panel::EcHost;
@@ -271,9 +274,9 @@ fn never_from_programmatic_calls_or_the_control_channel() {
     let mut c = figcraft_doc::EcComp::new("C", 0.0, 2.0, 25.0);
     c.comp_id = cid;
     c.project = p.to_str().unwrap().to_string();
-    let ro = EcHost::open(&p, &c, true).unwrap();
+    let mut ro = EcHost::open(&p, &c, true).unwrap();
     let ctx = egui::Context::default();
-    assert!(matches!(super::intercept(&ro, &ctx, "layer.precompose", &json!({"layers": [solid]})), Some(Err(_))));
+    assert!(matches!(super::intercept(&mut ro, &ctx, "layer.precompose", &json!({"layers": [solid]})), Some(Err(_))));
     assert!(super::shown(&ctx).is_none());
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -314,6 +317,309 @@ fn junk_never_panics() {
     let solid = host(&mut u).session().active_comp().unwrap().layers[0].id.0;
     select_layers(&mut u, &[solid]);
     let _ = invoke(&mut u, "layer.precompose", json!({}));
+    u.app.effectcraft.panel = None;
+    u.frame(vec![]);
+    assert!(shown(&u.ctx).is_none());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+// ---- EMBED12: EffectCraft's layer dialogs.
+
+/// The dialog shown now, as one of EffectCraft's layer dialogs.
+fn layer_dialog(u: &Ui) -> Hosted {
+    let mut s = shown(&u.ctx).expect("a dialog shows");
+    s.layer().expect("one of EffectCraft's layer dialogs").clone()
+}
+
+/// OK in the dialog shown, with its state set to `h`.
+fn ok_with(u: &mut Ui, h: Hosted) {
+    let mut s = shown(&u.ctx).unwrap();
+    *s.layer().unwrap() = h;
+    let ctx = u.ctx.clone();
+    super::finish(&mut u.app, &ctx, &s).unwrap();
+    super::set_shown(&ctx, None);
+}
+
+fn layer_count(u: &mut Ui) -> usize {
+    host(u).session().active_comp().unwrap().layers.len()
+}
+
+fn undo_steps(u: &mut Ui) -> usize {
+    host(u).session().history.undo.len()
+}
+
+/// The card's right-click menu runs the entry's command through the Timeline's host.
+fn menu_entry(u: &mut Ui, card: NodeId, cmd: &str) -> Result<(), String> {
+    let ctx = u.ctx.clone();
+    crate::effectcraft_ui::menu::run(&mut u.app, &ctx, card, cmd, json!({}))
+}
+
+#[test]
+fn new_solid_opens_from_the_menu_and_ok_makes_the_typed_solid_in_one_undo_step() {
+    let (dir, p, cid) = sample("solid");
+    let (mut u, card) = app_with_timeline(&p, cid);
+    let (n, steps, rev) = (layer_count(&mut u), undo_steps(&mut u), host(&mut u).session().revision);
+    // New ▸ Solid… on the card: EffectCraft's Solid Settings with the comp's size, nothing made yet.
+    menu_entry(&mut u, card, "app.solidSettings").unwrap();
+    u.frame(vec![]);
+    let Hosted::Solid(mut d) = layer_dialog(&u) else { panic!("Solid Settings") };
+    assert_eq!((d.size, d.layer), ([64, 36], None), "Make Comp Size is the default");
+    assert_eq!(host(&mut u).session().revision, rev, "nothing changes until OK");
+    d.name = "Backdrop".into();
+    d.size = [20, 10];
+    d.color = [0.0, 1.0, 0.0];
+    ok_with(&mut u, Hosted::Solid(d));
+    assert_eq!(layer_count(&mut u), n + 1);
+    assert_eq!(undo_steps(&mut u), steps + 1, "one undo step");
+    let h = host(&mut u);
+    let c = h.session().active_comp().unwrap();
+    let l = c.layers.iter().find(|l| l.name == "Backdrop").expect("named as typed");
+    let LayerSource::Solid { item } = l.source else { panic!("a solid") };
+    let Some(ItemKind::Solid(so)) = h.session().project.item(item).map(|i| &i.kind) else { panic!("its solid") };
+    assert_eq!((so.width, so.height, so.color), (20, 10, [0.0, 1.0, 0.0]));
+    assert!(h.is_dirty(), "an unsaved edit (⌘S saves it)");
+    // The next New Solid starts from that colour, as in EffectCraft.
+    invoke(&mut u, "layer.newSolid", json!({})).unwrap();
+    let Hosted::Solid(d) = layer_dialog(&u) else { panic!() };
+    assert_eq!(d.color, [0.0, 1.0, 0.0]);
+    u.frame(vec![]);
+    escape(&mut u);
+    u.frame(vec![]);
+    invoke(&mut u, "edit.undo", json!({})).unwrap();
+    assert_eq!(layer_count(&mut u), n);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn the_timelines_keys_open_the_dialogs_from_effectcrafts_keymap() {
+    let (dir, p, cid) = sample("keys");
+    let (mut u, _) = app_with_timeline(&p, cid);
+    let solid = host(&mut u).session().active_comp().unwrap().layers[0].id.0;
+    select_layers(&mut u, &[solid]);
+    let mut tried = 0;
+    for id in ["layer.newSolid", "layer.newLight", "layer.newCamera", "layer.settings", "layer.timeStretch"] {
+        // Elias's own keys when he has a keymap (⇧Y for New Solid), else EffectCraft's (⌘Y, ⌥⌘⇧L, ⌥⌘⇧C, ⌘⇧Y).
+        let Some((mods, key)) = host(&mut u).session().shortcuts().shortcut_of(id, &json!({})).and_then(effectcraft_ui_egui::menus::parse_shortcut)
+        else {
+            continue;
+        };
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            events: vec![egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: mods }],
+            ..Default::default()
+        };
+        let rev = host(&mut u).session().revision;
+        let _ = ctx.run_ui(input, |ui| {
+            let _ = host(&mut u).keys(ui.ctx());
+        });
+        let s = shown(&ctx);
+        assert!(s.is_some(), "{id}: its dialog");
+        assert_eq!(host(&mut u).session().revision, rev, "{id}: nothing made yet");
+        tried += 1;
+    }
+    assert!(tried > 0, "no key bound at all");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn light_and_camera_of_the_chosen_type_and_their_layer_settings() {
+    let (dir, p, cid) = sample("3d");
+    let (mut u, card) = app_with_timeline(&p, cid);
+    // New ▸ Light…: a Point light.
+    menu_entry(&mut u, card, "layer.newLight").unwrap();
+    let Hosted::Light(mut d) = layer_dialog(&u) else { panic!("Light Settings") };
+    assert_eq!(d.layer, None);
+    d.name = "Key".into();
+    d.kind = 2;
+    let steps = undo_steps(&mut u);
+    ok_with(&mut u, Hosted::Light(d));
+    assert_eq!(undo_steps(&mut u), steps + 1, "one undo step");
+    let light = {
+        let c = host(&mut u).session().active_comp().unwrap().clone();
+        let l = c.layers.iter().find(|l| l.name == "Key").expect("the light");
+        assert!(matches!(l.source, LayerSource::Light { kind } if kind.label() == "Point"), "{:?}", l.source);
+        l.id.0
+    };
+    // New ▸ Camera…: one-node.
+    menu_entry(&mut u, card, "layer.newCamera").unwrap();
+    let Hosted::Camera(mut d) = layer_dialog(&u) else { panic!("Camera Settings") };
+    d.name = "Cam".into();
+    d.two_node = false;
+    ok_with(&mut u, Hosted::Camera(d));
+    let cam = host(&mut u).session().active_comp().unwrap().layers.iter().find(|l| l.name == "Cam").map(|l| l.id.0).expect("the camera");
+    // Layer Settings… on them: Light / Camera Settings with their values.
+    select_layers(&mut u, &[light]);
+    menu_entry(&mut u, card, "layer.settings").unwrap();
+    let Hosted::Light(mut d) = layer_dialog(&u) else { panic!("Light Settings for a light") };
+    assert_eq!((d.layer, d.kind), (Some(light), 2));
+    d.name = "Fill".into();
+    ok_with(&mut u, Hosted::Light(d));
+    assert_eq!(host(&mut u).session().active_comp().unwrap().layer(LayerId(light)).unwrap().name, "Fill");
+    select_layers(&mut u, &[cam]);
+    super::request(&mut u.app, Some(card), Which::LayerSettings).unwrap();
+    let Hosted::Camera(d) = layer_dialog(&u) else { panic!("Camera Settings for a camera") };
+    assert_eq!((d.layer, d.two_node), (Some(cam), false));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn layer_settings_on_a_solid_changes_it_and_on_a_null_its_name() {
+    let (dir, p, cid) = sample("settings");
+    let (mut u, card) = app_with_timeline(&p, cid);
+    let solid = host(&mut u).session().active_comp().unwrap().layers[0].id.0;
+    select_layers(&mut u, &[solid]);
+    let steps = undo_steps(&mut u);
+    invoke(&mut u, "layer.settings", json!({})).unwrap();
+    let Hosted::Solid(mut d) = layer_dialog(&u) else { panic!("Solid Settings for a solid") };
+    assert_eq!(d.layer, Some(solid));
+    d.color = [0.0, 0.0, 1.0];
+    d.size = [32, 18];
+    ok_with(&mut u, Hosted::Solid(d));
+    assert_eq!(undo_steps(&mut u), steps + 1, "one undo step");
+    let h = host(&mut u);
+    let LayerSource::Solid { item } = h.session().active_comp().unwrap().layer(LayerId(solid)).unwrap().source else { panic!() };
+    let Some(ItemKind::Solid(so)) = h.session().project.item(item).map(|i| &i.kind) else { panic!() };
+    assert_eq!((so.width, so.height, so.color), (32, 18, [0.0, 0.0, 1.0]));
+    // A null: Null Settings (its name).
+    let null = invoke(&mut u, "layer.newNull", json!({})).unwrap()["layer"].as_u64().unwrap();
+    select_layers(&mut u, &[null]);
+    menu_entry(&mut u, card, "layer.settings").unwrap();
+    let Hosted::Form(mut f) = layer_dialog(&u) else { panic!("Null Settings") };
+    assert_eq!(f.title, "Null Settings");
+    for fl in &mut f.fields {
+        if let FieldKind::Text(t) = &mut fl.kind {
+            *t = "Rig".into();
+        }
+    }
+    ok_with(&mut u, Hosted::Form(f));
+    assert_eq!(host(&mut u).session().active_comp().unwrap().layer(LayerId(null)).unwrap().name, "Rig");
+    // A text layer has none, as in EffectCraft: no dialog, an error to show.
+    let text = invoke(&mut u, "layer.newText", json!({"text": "Hi"})).unwrap()["layer"].as_u64().unwrap();
+    select_layers(&mut u, &[text]);
+    assert!(super::request(&mut u.app, Some(card), Which::LayerSettings).is_err());
+    assert!(shown(&u.ctx).is_none());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn time_stretch_applies_in_one_undo_step() {
+    let (dir, p, cid) = sample("stretch");
+    let (mut u, card) = app_with_timeline(&p, cid);
+    let solid = host(&mut u).session().active_comp().unwrap().layers[0].id.0;
+    select_layers(&mut u, &[solid]);
+    menu_entry(&mut u, card, "layer.timeStretch").unwrap();
+    let Hosted::TimeStretch(mut d) = layer_dialog(&u) else { panic!("Time Stretch") };
+    assert!((d.percent - 100.0).abs() < 1e-9);
+    d.percent = 200.0;
+    let steps = undo_steps(&mut u);
+    ok_with(&mut u, Hosted::TimeStretch(d));
+    assert_eq!(undo_steps(&mut u), steps + 1, "one undo step");
+    let stretch = host(&mut u).session().active_comp().unwrap().layer(LayerId(solid)).unwrap().stretch;
+    assert!((stretch - 200.0).abs() < 1e-6, "{stretch}");
+    invoke(&mut u, "edit.undo", json!({})).unwrap();
+    assert!((host(&mut u).session().active_comp().unwrap().layer(LayerId(solid)).unwrap().stretch - 100.0).abs() < 1e-6);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn layer_style_options_edit_live_ok_keeps_and_cancel_takes_back() {
+    let (dir, p, cid) = sample("styles");
+    let (mut u, card) = app_with_timeline(&p, cid);
+    let solid = host(&mut u).session().active_comp().unwrap().layers[0].id.0;
+    select_layers(&mut u, &[solid]);
+    let styles = |u: &mut Ui| {
+        host(u).session().active_comp().unwrap().layer(LayerId(solid)).unwrap().layer_styles().is_some_and(|s| s.sub("dropShadow").is_some())
+    };
+    // Layer Styles ▸ Drop Shadow from the card's menu: the style is added and the dialog shows it.
+    menu_entry(&mut u, card, "layer.style.dropShadow").unwrap();
+    assert!(styles(&mut u));
+    let Hosted::LayerStyle(st) = layer_dialog(&u) else { panic!("the Layer Style dialog") };
+    assert_eq!((st.layer, st.selected.as_str()), (solid, "dropShadow"));
+    // Cancel: the style goes again, nothing left changed.
+    u.frame(vec![]);
+    escape(&mut u);
+    u.frame(vec![]);
+    assert!(shown(&u.ctx).is_none());
+    assert!(!styles(&mut u), "Cancel took the style back");
+    // Layer Style Options…, a style ticked live, OK keeps it as one undo step.
+    let steps = undo_steps(&mut u);
+    menu_entry(&mut u, card, "layer.style.options").unwrap();
+    u.frame(vec![]);
+    let ctx = u.ctx.clone();
+    let r = host(&mut u).run_engine(&ctx, "layer.style.add", json!({"layers": [solid], "style": "dropShadow"}));
+    assert!(r.is_ok());
+    let s = shown(&u.ctx).unwrap();
+    super::finish(&mut u.app, &ctx, &s).unwrap();
+    super::set_shown(&ctx, None);
+    assert!(styles(&mut u), "OK keeps the edit");
+    assert_eq!(undo_steps(&mut u), steps + 1, "one undo step");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn layer_dialogs_never_open_from_programmatic_calls_or_read_only() {
+    let (dir, p, cid) = sample("layer-programmatic");
+    let (mut u, _) = app_with_timeline(&p, cid);
+    // With their settings, they run at once.
+    let n = layer_count(&mut u);
+    invoke(&mut u, "layer.newSolid", json!({"color": "#ff0000", "width": 4, "height": 4})).unwrap();
+    invoke(&mut u, "layer.newLight", json!({"kind": "Point"})).unwrap();
+    invoke(&mut u, "layer.newCamera", json!({"type": "oneNode"})).unwrap();
+    assert_eq!(layer_count(&mut u), n + 3);
+    assert!(shown(&u.ctx).is_none());
+    // FigCraft's control channel has no route to them.
+    for id in ["app.solidSettings", "layer.newSolid", "layer.settings", "layer.timeStretch", "layer.style.options"] {
+        let _ = u.app.run(id, json!({}));
+    }
+    u.frame(vec![]);
+    assert!(shown(&u.ctx).is_none());
+    // Read-only: no dialog (the edit is refused as usual).
+    let mut c = figcraft_doc::EcComp::new("C", 0.0, 2.0, 25.0);
+    c.comp_id = cid;
+    c.project = p.to_str().unwrap().to_string();
+    let mut ro = EcHost::open(&p, &c, true).unwrap();
+    let ctx = egui::Context::default();
+    assert!(super::intercept(&mut ro, &ctx, "layer.newSolid", &json!({})).is_none());
+    assert!(super::shown(&ctx).is_none());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn layer_dialog_junk_never_panics() {
+    let (dir, p, cid) = sample("layer-junk");
+    let (mut u, card) = app_with_timeline(&p, cid);
+    let ctx = u.ctx.clone();
+    let ids = [
+        "app.solidSettings",
+        "layer.newSolid",
+        "layer.newLight",
+        "layer.newCamera",
+        "layer.settings",
+        "layer.cameraSettings",
+        "layer.lightSettings",
+        "layer.timeStretch",
+        "layer.style.options",
+        "layer.style.dropShadow",
+        "layer.style.nope",
+    ];
+    for id in ids {
+        for params in [json!(null), json!([1]), json!({"layer": "x"}), json!({"layer": 999_999}), json!({"layer": -1}), json!({"style": "\u{0}"})] {
+            let _ = super::intercept(host(&mut u), &ctx, id, &params);
+            u.frame(vec![]);
+            escape(&mut u);
+            u.frame(vec![]);
+        }
+    }
+    host(&mut u).session_mut().state.selected_layers.clear();
+    for which in [Which::Solid, Which::Light, Which::Camera, Which::LayerSettings, Which::TimeStretch, Which::LayerStyleOptions] {
+        let _ = super::request(&mut u.app, Some(NodeId(999_999)), which);
+        let _ = super::request(&mut u.app, Some(card), which);
+        let _ = super::request(&mut u.app, None, which);
+        u.frame(vec![]);
+        escape(&mut u);
+    }
+    // The Timeline gone while a layer dialog is up: it closes quietly.
+    let _ = invoke(&mut u, "layer.newSolid", json!({}));
     u.app.effectcraft.panel = None;
     u.frame(vec![]);
     assert!(shown(&u.ctx).is_none());

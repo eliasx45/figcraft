@@ -1,12 +1,14 @@
-//! Fork-only (`effectcraft-inproc`): EffectCraft's own Pre-compose, Interpret Footage and Replace
-//! Footage dialogs for the comp a card's Timeline edits, shown in FigCraft windows.
+//! Fork-only (`effectcraft-inproc`): EffectCraft's own Pre-compose, Interpret Footage, Replace
+//! Footage and layer dialogs (Solid, Light, Camera, Layer Settings, Time Stretch, Layer Style) for
+//! the comp a card's Timeline edits, shown in FigCraft windows.
 //!
 //! **Entry point (the card's right-click menu, keys, the Timeline's and Project tab's menus):**
 //!
 //! ```ignore
 //! crate::effectcraft_ui::dialogs::request(app: &mut FigApp, card: Option<NodeId>, which: Which)
 //!     -> Result<(), String>
-//! // Which::{Precompose, InterpretFootage, ReplaceFootage}
+//! // Which::{Precompose, InterpretFootage, ReplaceFootage, Solid, Light, Camera, LayerSettings,
+//! //        TimeStretch, LayerStyleOptions}
 //! ```
 //!
 //! `card`: the card the menu was opened on; its Timeline opens first when it isn't the open one
@@ -32,12 +34,26 @@
 //! precomp is there for the card's explode. Replace Footage asks for a file with FigCraft's file
 //! dialog, then runs EffectCraft's `file.replaceFootage` on the item: every layer using it shows
 //! the new file.
+//!
+//! **Layer dialogs (EMBED12).** EffectCraft's `panels::hosted_dialogs` gives the layer dialogs its
+//! menus open, from the session alone: New ▸ Solid… (`app.solidSettings` / `layer.newSolid`
+//! without settings, ⌘Y or Elias's own key), New ▸ Light… / Camera… (`layer.newLight` /
+//! `layer.newCamera`, ⌥⌘⇧L / ⌥⌘⇧C), Layer Settings… (`layer.settings`, ⌘⇧Y: Solid Settings for
+//! solids and adjustment layers, Camera / Light Settings, Null Settings; other layers have none,
+//! as in EffectCraft), Time Stretch… (`layer.timeStretch`) and Layer Style Options… /
+//! Layer Styles ▸ <style> (the Layer Style dialog). The keys are EffectCraft's keymap (Elias's own
+//! from its settings folder) while the Timeline has the keyboard; the card's menu and the
+//! Timeline's menu run the same commands. OK runs EffectCraft's command through the Timeline's
+//! host: one undo step, ⌘S, the app mirror. The Layer Style dialog edits live (one undo step per
+//! control, as in EffectCraft) and its Cancel puts the layer's styles back. A new solid's colour
+//! is the next New Solid's, as in EffectCraft.
 
 use std::path::{Path, PathBuf};
 
 use effectcraft_ui_egui::automation::Registry;
 use effectcraft_ui_egui::dock::PanelKind;
 use effectcraft_ui_egui::panels::forms::{self, Built, Form};
+use effectcraft_ui_egui::panels::hosted_dialogs::{self as hd, Hosted};
 use effectcraft_ui_egui::panels::precomp::{self, PrecomposeDraft};
 use effectcraft_ui_egui::panels::timeline::TimelineHost;
 use effectcraft_ui_egui::theme::{ThemeKind, Tokens};
@@ -63,6 +79,49 @@ pub(crate) enum Which {
     InterpretFootage,
     /// File ▸ Replace Footage ▸ File… (⌘H): a file dialog, then EffectCraft's replace.
     ReplaceFootage,
+    /// Layer ▸ New ▸ Solid… (⌘Y): Solid Settings.
+    Solid,
+    /// Layer ▸ New ▸ Light… (⌥⌘⇧L): Light Settings.
+    Light,
+    /// Layer ▸ New ▸ Camera… (⌥⌘⇧C): Camera Settings.
+    Camera,
+    /// Layer ▸ Layer Settings… (⌘⇧Y): the selected layer's settings dialog.
+    LayerSettings,
+    /// Layer ▸ Time ▸ Time Stretch….
+    TimeStretch,
+    /// Layer ▸ Layer Styles ▸ Layer Style Options….
+    LayerStyleOptions,
+}
+
+impl Which {
+    /// The layer dialog a menu entry's command opens (Pre-compose and the footage dialogs have
+    /// their own routes).
+    pub(crate) fn of_layer_menu(cmd: &str) -> Option<Which> {
+        Some(match cmd {
+            "app.solidSettings" | "layer.newSolid" => Which::Solid,
+            "layer.newLight" => Which::Light,
+            "layer.newCamera" => Which::Camera,
+            "layer.settings" => Which::LayerSettings,
+            "layer.timeStretch" => Which::TimeStretch,
+            "layer.style.options" => Which::LayerStyleOptions,
+            _ => return None,
+        })
+    }
+
+    /// The EffectCraft command the menu entry runs (without its settings: the dialog).
+    pub(crate) fn command(self) -> &'static str {
+        match self {
+            Which::Precompose => "layer.precompose",
+            Which::InterpretFootage => "file.interpretFootage",
+            Which::ReplaceFootage => "file.replaceFootage",
+            Which::Solid => "app.solidSettings",
+            Which::Light => "layer.newLight",
+            Which::Camera => "layer.newCamera",
+            Which::LayerSettings => "layer.settings",
+            Which::TimeStretch => "layer.timeStretch",
+            Which::LayerStyleOptions => "layer.style.options",
+        }
+    }
 }
 
 /// The dialog open (or the file dialog to start) for the Timeline of project `path`.
@@ -72,6 +131,13 @@ pub(crate) struct Shown {
     kind: Kind,
 }
 
+/// Only so the dialog can be taken out of egui's memory for a frame ([`take_shown`]).
+impl Default for Shown {
+    fn default() -> Self {
+        Shown { path: PathBuf::new(), kind: Kind::Replace(0) }
+    }
+}
+
 #[derive(Clone, Debug)]
 enum Kind {
     Precompose(PrecomposeDraft),
@@ -79,6 +145,8 @@ enum Kind {
     Form(Form),
     /// Replace Footage of this item: FigCraft's file dialog first.
     Replace(u64),
+    /// One of EffectCraft's layer dialogs (EMBED12).
+    Layer(Box<Hosted>),
 }
 
 fn shown_id() -> egui::Id {
@@ -86,8 +154,23 @@ fn shown_id() -> egui::Id {
 }
 
 /// The dialog open, if any.
+#[cfg(test)]
 pub(crate) fn shown(ctx: &egui::Context) -> Option<Shown> {
     ctx.data(|d| d.get_temp::<Shown>(shown_id()))
+}
+
+/// Take the dialog out for the frame (no copy: the Layer Style dialog holds the project).
+fn take_shown(ctx: &egui::Context) -> Option<Shown> {
+    ctx.data_mut(|d| d.remove_temp::<Shown>(shown_id()))
+}
+
+fn last_color_id() -> egui::Id {
+    shown_id().with("last-solid-color")
+}
+
+/// The colour of the last solid made with Solid Settings (the next one starts from it).
+fn last_solid_color(ctx: &egui::Context) -> [f32; 3] {
+    ctx.data(|d| d.get_temp::<[f32; 3]>(last_color_id())).unwrap_or([0.0; 3])
 }
 
 fn set_shown(ctx: &egui::Context, s: Option<Shown>) {
@@ -155,6 +238,8 @@ fn open(host: &EcHost, ctx: &egui::Context, which: Which, id: &str, params: &Val
             }
         }
         Which::ReplaceFootage => Kind::Replace(footage_item(host, params).ok_or("Replace Footage: select a footage item")?.0),
+        // The layer dialogs open through `layer_dialog`.
+        _ => return Err(format!("{} has no dialog here", which.command())),
     };
     set_shown(ctx, Some(Shown { path: host.path().to_path_buf(), kind }));
     Ok(json!({"dialog": id}))
@@ -162,13 +247,45 @@ fn open(host: &EcHost, ctx: &egui::Context, which: Which, id: &str, params: &Val
 
 /// `EcHost::invoke`: an EffectCraft command that opens one of these dialogs in EffectCraft's app
 /// opens it here (`None`: run it as it is).
-pub(crate) fn intercept(host: &EcHost, ctx: &egui::Context, id: &str, params: &Value) -> Option<Result<Value, String>> {
-    let which = which_of(id, params)?;
+pub(crate) fn intercept(host: &mut EcHost, ctx: &egui::Context, id: &str, params: &Value) -> Option<Result<Value, String>> {
+    let Some(which) = which_of(id, params) else { return layer_dialog(host, ctx, id, params) };
     // Interpret Footage with its settings given runs as it is.
     if which == Which::InterpretFootage && params.as_object().is_some_and(|o| o.keys().any(|k| k != "item" && k != "items")) {
         return None;
     }
     Some(open(host, ctx, which, id, params))
+}
+
+/// The commands that may open one of EffectCraft's layer dialogs (`hosted_dialogs::open` says).
+fn layer_dialog_command(id: &str) -> bool {
+    matches!(
+        id,
+        "app.solidSettings"
+            | "layer.newSolid"
+            | "layer.newLight"
+            | "layer.newCamera"
+            | "layer.settings"
+            | "layer.cameraSettings"
+            | "layer.lightSettings"
+            | "layer.timeStretch"
+            | "layer.style.options"
+    ) || id.starts_with("layer.style.")
+}
+
+/// EffectCraft command `id` without its settings opens one of EffectCraft's layer dialogs, as in
+/// EffectCraft's app (`None`: it opens none, run it as it is). A read-only Timeline runs it as it
+/// is (and refuses the edit as usual).
+fn layer_dialog(host: &mut EcHost, ctx: &egui::Context, id: &str, params: &Value) -> Option<Result<Value, String>> {
+    if !layer_dialog_command(id) || host.read_only().is_some() {
+        return None;
+    }
+    let last = last_solid_color(ctx);
+    let h = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hd::open(host.session_mut(), id, params, last)))
+        .unwrap_or_else(|_| Some(Err(format!("EffectCraft: {id} failed (an internal error)"))))?;
+    Some(h.map(|h| {
+        set_shown(ctx, Some(Shown { path: host.path().to_path_buf(), kind: Kind::Layer(Box::new(h)) }));
+        json!({"dialog": id})
+    }))
 }
 
 /// Open dialog `which` for card `card`'s Timeline (the open one when `None`). The card's
@@ -181,13 +298,20 @@ pub(crate) fn request(app: &mut FigApp, card: Option<NodeId>, which: Which) -> R
         return Err("Save the EffectCraft project first: this card has no project to edit".into());
     }
     let ctx = app.ui_context.clone().unwrap_or_default();
-    let p = app.effectcraft.panel.as_ref().ok_or("Open the card's EffectCraft Timeline first")?;
-    let id = match which {
-        Which::Precompose => "layer.precompose",
-        Which::InterpretFootage => "file.interpretFootage",
-        Which::ReplaceFootage => "file.replaceFootage",
-    };
-    open(&p.host, &ctx, which, id, &json!({})).map(|_| ())
+    let p = app.effectcraft.panel.as_mut().ok_or("Open the card's EffectCraft Timeline first")?;
+    let id = which.command();
+    match which {
+        Which::Precompose | Which::InterpretFootage | Which::ReplaceFootage => open(&p.host, &ctx, which, id, &json!({})).map(|_| ()),
+        _ => {
+            if let Some(why) = p.host.read_only() {
+                return Err(why.to_string());
+            }
+            match layer_dialog(&mut p.host, &ctx, id, &json!({})) {
+                Some(r) => r.map(|_| ()),
+                None => Err("This kind of layer has no settings".into()),
+            }
+        }
+    }
 }
 
 /// Run EffectCraft command `id` on the Timeline of project `path` (its host: undo, read-only,
@@ -244,10 +368,9 @@ fn enter(ctx: &egui::Context) -> bool {
 
 /// Once a frame (after the Timeline drew): the dialog open, its OK and Cancel.
 pub(crate) fn frame(app: &mut FigApp, ctx: &egui::Context) {
-    let Some(mut s) = shown(ctx) else { return };
+    let Some(mut s) = take_shown(ctx) else { return };
     // The Timeline it was opened for has gone (closed for another project): nothing to do.
     if app.effectcraft.panel.as_ref().is_none_or(|p| p.host.path() != s.path) {
-        set_shown(ctx, None);
         return;
     }
     let t = Tokens::for_kind(ThemeKind::Dark);
@@ -277,17 +400,57 @@ pub(crate) fn frame(app: &mut FigApp, ctx: &egui::Context) {
             let close = modal(ctx, "form", &title, &t, 480.0, |ui| (ok, cancel) = forms::draw_form(ui, f, &t, max_h, &mut regs, &mut browse));
             decide(ok || enter(ctx), cancel || close)
         }
+        Kind::Layer(h) => layer_frame(app, ctx, h, &t, &mut auto),
     };
     match outcome {
         Outcome::Open => set_shown(ctx, Some(s)),
-        Outcome::Cancel => set_shown(ctx, None),
+        Outcome::Cancel => {
+            if let Err(e) = cancel(app, &mut s) {
+                app.toast(e);
+            }
+        }
         Outcome::Ok => {
-            set_shown(ctx, None);
             if let Err(e) = finish(app, ctx, &s) {
                 app.toast(e);
             }
         }
     }
+}
+
+/// One frame of an EffectCraft layer dialog (EMBED12): EffectCraft's contents in a FigCraft
+/// window, its live edits (the Layer Style dialog's) run through the Timeline's host.
+fn layer_frame(app: &mut FigApp, ctx: &egui::Context, h: &mut Hosted, t: &Tokens, auto: &mut Registry) -> Outcome {
+    let Some(p) = app.effectcraft.panel.as_mut() else { return Outcome::Cancel };
+    let Some(title) = hd::title(p.host.session(), h) else { return Outcome::Cancel };
+    let size = hd::size(h);
+    let height = (size.y - 80.0).min(ctx.content_rect().height() - 160.0).max(80.0);
+    let width = size.x - 36.0;
+    let mut step = hd::Step::default();
+    let session = p.host.session();
+    let close = modal(ctx, "layer", &title, t, width, |ui| {
+        ui.set_min_width(width);
+        step = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hd::draw(ui, h, session, t, height, auto))).unwrap_or_else(|_| {
+            log::warn!("EffectCraft dialog: an internal error");
+            hd::Step { cancel: true, ..Default::default() }
+        });
+    });
+    // Escape or a click beside it cancels, unless a colour picker or popup of the dialog has it.
+    let busy = egui::Popup::is_any_open(ctx) || effectcraft_ui_egui::color_picker::open_recently(ctx);
+    for (id, params) in std::mem::take(&mut step.actions) {
+        if let Err(e) = p.host.run_engine(ctx, &id, params) {
+            p.host.ui_mut().status = e;
+        }
+    }
+    decide(step.ok || (hd::enter_is_ok(h) && enter(ctx)), step.cancel || (close && !busy))
+}
+
+/// Cancel: nothing changes (the Layer Style dialog puts the layer's styles back).
+fn cancel(app: &mut FigApp, s: &mut Shown) -> Result<(), String> {
+    let Kind::Layer(h) = &mut s.kind else { return Ok(()) };
+    let p = app.effectcraft.panel.as_mut().filter(|p| p.host.path() == s.path).ok_or("The EffectCraft Timeline closed")?;
+    let host = &mut p.host;
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hd::finish(host.session_mut(), h, false)))
+        .unwrap_or_else(|_| Err("EffectCraft: Cancel failed (an internal error)".into()))
 }
 
 fn decide(ok: bool, cancel: bool) -> Outcome {
@@ -306,7 +469,33 @@ pub(crate) fn finish(app: &mut FigApp, ctx: &egui::Context, s: &Shown) -> Result
         Kind::Precompose(d) => precompose(app, ctx, &s.path, d).map(|_| ()),
         Kind::Form(f) => run(app, ctx, &s.path, &f.command, f.params()).map(|_| ()),
         Kind::Replace(_) => Ok(()),
+        Kind::Layer(h) => finish_layer(app, ctx, &s.path, h),
     }
+}
+
+/// OK in a layer dialog: EffectCraft's command with the dialog's settings through the Timeline's
+/// host (one undo step of its own), then the dialog's close (the Layer Style dialog's edits are
+/// already made: OK keeps them).
+fn finish_layer(app: &mut FigApp, ctx: &egui::Context, path: &Path, h: &Hosted) -> Result<(), String> {
+    let mut h = h.clone();
+    let r = match hd::command(&h) {
+        Some((id, params)) => {
+            if let Some(p) = app.effectcraft.panel.as_mut().filter(|p| p.host.path() == path) {
+                p.host.session_mut().history.merge_key = None;
+            }
+            let r = run(app, ctx, path, &id, params).map(|_| ());
+            if let (Ok(()), Hosted::Solid(d)) = (&r, &h)
+                && d.layer.is_none()
+            {
+                ctx.data_mut(|m| m.insert_temp(last_color_id(), d.color));
+            }
+            r
+        }
+        None => Ok(()),
+    };
+    let p = app.effectcraft.panel.as_mut().filter(|p| p.host.path() == path).ok_or("The EffectCraft Timeline closed")?;
+    let done = hd::finish(p.host.session_mut(), &mut h, true);
+    r.and(done)
 }
 
 #[cfg(test)]
@@ -320,6 +509,12 @@ impl Shown {
     pub(crate) fn form(&mut self) -> Option<&mut Form> {
         match &mut self.kind {
             Kind::Form(f) => Some(f),
+            _ => None,
+        }
+    }
+    pub(crate) fn layer(&mut self) -> Option<&mut Hosted> {
+        match &mut self.kind {
+            Kind::Layer(h) => Some(h),
             _ => None,
         }
     }

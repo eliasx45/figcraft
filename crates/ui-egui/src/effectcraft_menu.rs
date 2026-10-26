@@ -13,12 +13,13 @@
 //!   What they choose runs through the Timeline's host ([`crate::effectcraft_panel::EcHost`]):
 //!   the same command, one undo step (⌘Z / ⌘S in the Timeline; the app's history when it mirrors
 //!   the EffectCraft app), the card re-renders.
-//! - **Dialogs.** Pre-compose… is EffectCraft's dialog through [`super::dialogs`] (DIALOGS);
-//!   Composition Settings… is EffectCraft's own (`comp_settings::show`) in a FigCraft window, as
-//!   New Composition is ([`super::project`]). Entries whose dialog isn't hosted yet (New ▸
-//!   Solid…, Light…, Camera…, Layer Settings…, Time Stretch…, Layer Style Options…) show disabled
-//!   with the reason on hover ([`gate`]); Send to FigCraft too (the comp is already here). New ▸
-//!   Text puts the caret on the card, as EffectCraft's menu does in its viewer.
+//! - **Dialogs.** Pre-compose…, New ▸ Solid… / Light… / Camera…, Layer Settings…, Time Stretch…
+//!   and Layer Style Options… (and Layer Styles ▸ <style>) are EffectCraft's dialogs through
+//!   [`super::dialogs`] (DIALOGS, EMBED12): the entry's command reaches the Timeline's host
+//!   without its settings and the host opens the dialog. Composition Settings… is EffectCraft's own
+//!   (`comp_settings::show`) in a FigCraft window, as New Composition is ([`super::project`]).
+//!   Only Send to FigCraft shows disabled, with the reason on hover ([`gate`]): the comp is
+//!   already here. New ▸ Text puts the caret on the card, as EffectCraft's menu does in its viewer.
 //! - **FigCraft's own menu** stays reachable: on any card whose Timeline isn't open, with the
 //!   Timeline read-only, or with ⌥ (Alt) held, a right-click shows FigCraft's canvas menu for the
 //!   card as before.
@@ -85,18 +86,14 @@ fn close(ctx: &egui::Context) {
     egui::Popup::close_id(ctx, popup_id());
 }
 
-/// Entries whose EffectCraft dialog FigCraft doesn't host yet: `Some(why)` shows them disabled.
+/// Entries that can't run on a card: `Some(why)` shows them disabled. Every dialog the menu opens
+/// is hosted (Solid, Light, Camera, Layer Settings, Time Stretch, Layer Style: [`super::dialogs`],
+/// EMBED12); only Send to FigCraft is left (the comp is already here).
 pub(crate) fn gate(cmd: &str) -> Option<String> {
-    let why = match cmd {
-        "app.solidSettings" => "EffectCraft's Solid Settings isn't on the card yet: add the solid in EffectCraft",
-        "layer.settings" => "EffectCraft's Layer Settings isn't on the card yet: open it in EffectCraft",
-        "layer.newLight" | "layer.newCamera" => "Its settings dialog isn't on the card yet: add it in EffectCraft",
-        "layer.timeStretch" => "EffectCraft's Time Stretch isn't on the card yet: use it in EffectCraft",
-        "layer.style.options" => "EffectCraft's Layer Style options aren't on the card yet: open them in EffectCraft",
-        "comp.sendToFigCraft" => "This comp is already on FigCraft's canvas",
-        _ => return None,
-    };
-    Some(why.to_string())
+    match cmd {
+        "comp.sendToFigCraft" => Some("This comp is already on FigCraft's canvas".to_string()),
+        _ => None,
+    }
 }
 
 /// The card whose Timeline is open and may edit, when screen point `pos` is on its picture (and
@@ -226,6 +223,11 @@ pub(crate) fn run(app: &mut FigApp, ctx: &egui::Context, card: NodeId, cmd: &str
         "layer.precompose" if params.get("name").is_none() => return super::dialogs::request(app, Some(card), super::dialogs::Which::Precompose),
         "comp.settings" => return open_comp_settings(app, ctx, card, params.get("comp").and_then(Value::as_u64)),
         _ => {}
+    }
+    // Solid…, Light…, Camera…, Layer Settings…, Time Stretch…, Layer Style Options…: EffectCraft's
+    // dialogs (EMBED12).
+    if let Some(which) = super::dialogs::Which::of_layer_menu(cmd).filter(|_| params.as_object().is_none_or(serde_json::Map::is_empty)) {
+        return super::dialogs::request(app, Some(card), which);
     }
     let p = app.effectcraft.panel.as_mut().ok_or("The EffectCraft Timeline closed")?;
     if cmd == "comp.copyFrame" {

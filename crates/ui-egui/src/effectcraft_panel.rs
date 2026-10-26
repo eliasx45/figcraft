@@ -289,6 +289,14 @@ impl EcHost {
                 (egui::Modifiers::COMMAND, egui::Key::Y, "edit.redo"),
                 (egui::Modifiers::COMMAND, egui::Key::Z, "edit.undo"),
             ] {
+                // ⌘Y is EffectCraft's New Solid (its default keymap): redo only when its keymap
+                // leaves ⌘Y free.
+                if k == egui::Key::Y
+                    && (!ctx.input(|i| i.key_pressed(k))
+                        || self.ec.session().shortcuts().bindings().iter().any(|(s, b)| *s == "Cmd+Y" && b.command != "edit.redo"))
+                {
+                    continue;
+                }
                 if ctx.input_mut(|i| i.consume_key(m, k)) {
                     if let Err(e) = self.guarded_run(id, json!({})) {
                         self.ui.status = e;

@@ -195,7 +195,7 @@ fn junk_never_panics() {
         let _ = run(&mut u.app, &ctx, card, cmd, params.clone());
         let _ = run(&mut u.app, &ctx, NodeId(999_999), cmd, params);
     }
-    assert!(gate("app.solidSettings").is_some() && gate("layer.transform").is_none() && gate("").is_none());
+    assert!(gate("comp.sendToFigCraft").is_some() && gate("app.solidSettings").is_none() && gate("layer.transform").is_none() && gate("").is_none());
     let _ = super::apply_comp_settings(&mut u.app, &ctx, card, 424_242, json!({"width": -1}));
     let _ = super::apply_comp_settings(&mut u.app, &ctx, card, 1, json!(null));
     for at in [pos2(f32::NAN, 1.0), pos2(1e30, -1e30), pos2(-5.0, -5.0), pos2(1439.0, 899.0)] {
