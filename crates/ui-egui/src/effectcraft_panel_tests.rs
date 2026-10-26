@@ -349,3 +349,30 @@ fn pointer_input_over_the_panel_never_reaches_the_canvas() {
     let (_, rects) = u.app.effectcraft.panel_rects.clone().expect("still drawn");
     assert!((rects[0].width() - rect.width() * 0.5).abs() < 2.0 || rects[0].width() < rect.width(), "the Timeline shrinks with the canvas");
 }
+
+/// Moving a layer on the card is an EffectCraft edit: a press on the card keeps (or gives) the
+/// panel the keyboard, so ⌘Z right after undoes it in EffectCraft (it went to FigCraft's undo).
+#[test]
+fn a_press_on_the_card_keeps_undo_in_effectcraft() {
+    use egui::pos2;
+    let (_p, c) = sample("card-focus");
+    let mut s = figcraft_engine::Session::new();
+    s.execute(
+        "effectcraft.place",
+        &json!({"comp": c.comp, "compId": c.comp_id, "project": c.project, "start": 0, "end": 2, "fps": 25, "x": 0, "y": 0, "cardWidth": 1400}),
+    )
+    .unwrap();
+    let card = s.doc().unwrap().nodes().find(|n| n.effectcraft.is_some()).unwrap().id;
+    let mut u = crate::layers_drag_tests::Ui::new(s);
+    assert!(u.app.effectcraft_open_panel(card));
+    u.frame(vec![]);
+    u.frame(vec![]);
+    let canvas_spot = pos2(u.app.canvas.rect.min.x + 5.0, u.app.canvas.rect.min.y + 5.0);
+    u.button(canvas_spot, true);
+    u.button(canvas_spot, false);
+    assert!(!u.app.effectcraft.panel.as_ref().unwrap().focused, "a click beside the card gives the keyboard back");
+    let card_r = crate::effectcraft_ui::screen_rect(&u.app, u.app.session.doc().unwrap(), card).unwrap();
+    u.button(card_r.center(), true);
+    u.button(card_r.center(), false);
+    assert!(u.app.effectcraft.panel.as_ref().unwrap().focused, "a press on the card gives the panel the keyboard");
+}

@@ -1326,12 +1326,14 @@ impl FigApp {
         // The canvas leaves the pointer over the panels and their resize zones to them.
         let owned: Vec<Rect> = screen.iter().copied().chain(zones).collect();
         self.effectcraft.panel_rects = (!owned.is_empty()).then(|| (ctx.cumulative_pass_nr(), owned));
-        // The Timeline has the keyboard from a click in it until a click elsewhere (not one in a
-        // menu it opened).
+        // The Timeline has the keyboard from a click in it, or on its card (moving or scaling a
+        // layer there is an EffectCraft edit: ⌘Z undoes it), until a click elsewhere (not one in
+        // a menu it opened).
+        let card = self.session.doc().ok().and_then(|d| screen_rect(self, d, p.card));
         if !egui::Popup::is_any_open(ctx)
             && let Some(press) = ctx.input(|i| if i.pointer.any_pressed() { i.pointer.interact_pos() } else { None })
         {
-            p.focused = screen.iter().any(|r| r.contains(press));
+            p.focused = screen.iter().chain(card.as_ref()).any(|r| r.contains(press));
             if p.focused {
                 let fx = fx_screen.is_some_and(|r| r.contains(press));
                 p.host.set_focus(if fx {
