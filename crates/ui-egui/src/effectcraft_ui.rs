@@ -180,6 +180,9 @@ pub(crate) struct Store {
     /// Its frames were rendered in-process from the saved project, at this file revision (they
     /// stay fresh whatever the app's revision; a later save replaces them).
     file: Option<u64>,
+    /// The revision of the docked panel's unsaved edits these frames must show: frames of another
+    /// revision are asked for again (each edit re-renders the card; a later reply replaces them).
+    want: Option<u64>,
 }
 
 /// Comp, comp id, start and end (milliseconds).
@@ -244,6 +247,16 @@ pub struct Link {
 }
 
 impl Store {
+    /// Its frames show another revision of the docked panel's edits than the one wanted.
+    pub(crate) fn stale(&self) -> bool {
+        self.want.is_some() && self.file != self.want
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_revisions(file: Option<u64>, want: Option<u64>) -> Store {
+        Store { file, want, ..Store::default() }
+    }
+
     /// Frame `f` failed at `now`.
     pub(crate) fn fail(&mut self, f: i64, now: f64) {
         self.pending.remove(&f);
@@ -256,7 +269,8 @@ impl Store {
 /// and not failed in the last [`FAILED_RETRY`].
 pub(crate) fn wants(s: &Store, f: i64, now: f64, rev: u64, headless: bool) -> bool {
     let file = s.file.is_some();
-    let fresh = |x: &Slot| x.rev >= rev || ((headless || file) && x.rev == 0);
+    let stale = s.stale();
+    let fresh = |x: &Slot| !stale && (x.rev >= rev || ((headless || file) && x.rev == 0));
     !(s.failed.get(&f).is_some_and(|t| now - t < FAILED_RETRY)
         || s.frames.get(&f).is_some_and(fresh)
         || s.pending.get(&f).is_some_and(|t| now - t < REPOLL))
@@ -1182,7 +1196,9 @@ impl FigApp {
         let rev = effectcraft_ui_egui::panels::timeline::TimelineHost::session(&p.host).revision;
         if p.host.read_only().is_none() && rev != p.host.shown_revision {
             p.host.shown_revision = rev;
-            self.effectcraft_send(io::Job::Override { path: p.path(), snapshot: Some(Box::new(p.host.snapshot())) });
+            let snapshot = p.host.snapshot();
+            self.effectcraft_want(&p.path(), Some(snapshot.revision));
+            self.effectcraft_send(io::Job::Override { path: p.path(), snapshot: Some(Box::new(snapshot)) });
             self.effectcraft.sounds.retain(|_, s| matches!(s, SoundState::Loading));
         }
         self.effectcraft_sync_playhead(&mut p);
@@ -1208,6 +1224,16 @@ fn strips(doc: &Document, page: NodeId) -> Vec<NodeId> {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl FigApp {
+    /// The cards of the project at `path` show the panel's edits at `revision` (None: the file's).
+    #[cfg(feature = "effectcraft-inproc")]
+    fn effectcraft_want(&mut self, path: &std::path::Path, revision: Option<u64>) {
+        for (k, s) in self.effectcraft.stores.iter_mut() {
+            if !k.project.is_empty() && figcraft_ec_inproc::key(std::path::Path::new(&k.project)).as_path() == path {
+                s.want = revision;
+            }
+        }
+    }
+
     fn effectcraft_send(&mut self, job: io::Job) -> bool {
         if self.effectcraft.io.is_none()
             && let Some(ctx) = self.ui_context.clone()

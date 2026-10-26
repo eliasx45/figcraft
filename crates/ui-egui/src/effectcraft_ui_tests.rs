@@ -98,3 +98,15 @@ fn failed_frames_are_asked_again_and_a_new_project_is_a_new_store() {
     assert_ne!(before, after);
     assert!(after.same_comp(&c) && !before.same_comp(&c));
 }
+
+/// Regression (live test 26 Oct): a layer moved with the card's handles (or any docked-panel
+/// edit) moved its outline but the card kept showing the frames rendered before the edit: frames
+/// of the saved file counted as fresh forever. Now the panel's edit revision is wanted, and frames
+/// of another revision are asked for again.
+#[test]
+fn frames_of_an_older_panel_edit_are_asked_again() {
+    use crate::effectcraft_ui::Store;
+    assert!(!Store::with_revisions(Some(1), None).stale(), "no panel edits: the file's frames stay");
+    assert!(Store::with_revisions(Some(1), Some(2)).stale(), "an edit makes them stale");
+    assert!(!Store::with_revisions(Some(2), Some(2)).stale(), "frames of the edit are fresh");
+}
