@@ -1602,6 +1602,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "effectcraft-av1enc"
+version = "0.10.0"
+dependencies = [
+ "rayon",
+]
+
+[[package]]
 name = "effectcraft-buildgen"
 version = "0.10.0"
 
@@ -1673,6 +1680,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "effectcraft-export"
+version = "0.10.0"
+dependencies = [
+ "effectcraft-av1enc",
+ "effectcraft-hevcenc",
+ "effectcraft-opusenc",
+ "effectcraft-project",
+ "effectcraft-raster",
+ "effectcraft-render",
+ "effectcraft-time",
+ "effectcraft-vp9enc",
+ "filmcraft-aac",
+ "filmcraft-h264enc",
+ "filmcraft-isobmff",
+ "filmcraft-prores",
+ "gif",
+ "image",
+ "log",
+ "rayon",
+ "thiserror 2.0.21",
+ "web-time",
+]
+
+[[package]]
 name = "effectcraft-expr"
 version = "0.10.0"
 dependencies = [
@@ -1714,6 +1745,27 @@ dependencies = [
  "wasm-bindgen",
  "web-time",
  "wgpu",
+]
+
+[[package]]
+name = "effectcraft-hevcenc"
+version = "0.10.0"
+dependencies = [
+ "rayon",
+]
+
+[[package]]
+name = "effectcraft-host"
+version = "0.10.0"
+dependencies = [
+ "effectcraft-engine",
+ "effectcraft-export",
+ "effectcraft-expr",
+ "effectcraft-media",
+ "effectcraft-plugin",
+ "effectcraft-project",
+ "effectcraft-script",
+ "log",
 ]
 
 [[package]]
@@ -1819,6 +1871,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "effectcraft-opusenc"
+version = "0.10.0"
+
+[[package]]
 name = "effectcraft-path"
 version = "0.10.0"
 dependencies = [
@@ -1841,6 +1897,15 @@ dependencies = [
  "miniz_oxide 0.8.9",
  "skrifa 0.44.0",
  "zune-jpeg",
+]
+
+[[package]]
+name = "effectcraft-plugin"
+version = "0.10.0"
+dependencies = [
+ "effectcraft-effects",
+ "serde_json",
+ "wasmi",
 ]
 
 [[package]]
@@ -1893,6 +1958,21 @@ dependencies = [
  "lz4_flex",
  "rayon",
  "serde",
+ "web-time",
+]
+
+[[package]]
+name = "effectcraft-script"
+version = "0.10.0"
+dependencies = [
+ "boa_engine",
+ "effectcraft-engine",
+ "effectcraft-keyframe",
+ "effectcraft-path",
+ "effectcraft-project",
+ "effectcraft-render",
+ "effectcraft-time",
+ "serde_json",
  "web-time",
 ]
 
@@ -1959,6 +2039,7 @@ dependencies = [
  "effectcraft-engine",
  "effectcraft-geom",
  "effectcraft-gpu",
+ "effectcraft-host",
  "effectcraft-keyframe",
  "effectcraft-media",
  "effectcraft-path",
@@ -1978,6 +2059,13 @@ dependencies = [
  "sys-locale",
  "toml",
  "web-time",
+]
+
+[[package]]
+name = "effectcraft-vp9enc"
+version = "0.10.0"
+dependencies = [
+ "rayon",
 ]
 
 [[package]]
@@ -7657,6 +7745,7 @@ dependencies = [
  "wasmi_core",
  "wasmi_ir",
  "wasmparser 0.228.0",
+ "wat",
 ]
 
 [[package]]
