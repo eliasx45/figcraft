@@ -2,7 +2,9 @@
 //! in EffectCraft's Composition viewer, while the Timeline edits that card.
 //!
 //! - **When.** The Timeline is open for the card and may edit (not read-only), the card is
-//!   not playing, and the Move tool is on. Otherwise the card behaves as ever.
+//!   not playing, the Move tool is on and EffectCraft's Selection tool is the Timeline's (its
+//!   other tools, Rotation, Pan Behind, shapes and masks, Pen, Type, are [`super::viewer`]'s).
+//!   Otherwise the card behaves as ever. A double-click on a text layer edits it in place.
 //! - **What.** The selected layers show their box and eight handles. A press on a layer selects
 //!   it (⇧ adds or removes it; the Timeline follows) and dragging moves the selection
 //!   (⇧: along one axis). Dragging a handle scales (corners both axes, edges one; ⇧ on a corner
@@ -75,13 +77,13 @@ impl CardMap {
             .then(|| CardMap { pic, size: [f64::from(width), f64::from(height)] })
     }
 
-    pub(crate) fn to_screen(&self, p: [f64; 2]) -> Pos2 {
+    pub(crate) fn to_screen(self, p: [f64; 2]) -> Pos2 {
         let x = self.pic.min.x + (p[0] / self.size[0]) as f32 * self.pic.width();
         let y = self.pic.min.y + (p[1] / self.size[1]) as f32 * self.pic.height();
         pos2(x, y)
     }
 
-    pub(crate) fn to_comp(&self, p: Pos2) -> [f64; 2] {
+    pub(crate) fn to_comp(self, p: Pos2) -> [f64; 2] {
         let u = f64::from((p.x - self.pic.min.x) / self.pic.width());
         let v = f64::from((p.y - self.pic.min.y) / self.pic.height());
         [u * self.size[0], v * self.size[1]]
@@ -176,6 +178,15 @@ fn move_tool(app: &FigApp) -> bool {
     matches!(app.session.tool.tool, figcraft_engine::tools::ToolId::Move)
 }
 
+/// EffectCraft's Selection tool is the Timeline's (its other tools take the card,
+/// [`super::viewer`]).
+fn selection_tool(app: &FigApp) -> bool {
+    app.effectcraft
+        .panel
+        .as_ref()
+        .is_none_or(|p| effectcraft_ui_egui::panels::viewer_hosted::active(&p.host) == effectcraft_ui_egui::state::Tool::Selection)
+}
+
 /// Draw the selected layers' boxes and handles on card `card` (showing in `pic`), and a thin
 /// box round the layer under the pointer. Runs in the card overlay, after the frame.
 pub(crate) fn draw(app: &FigApp, painter: &egui::Painter, card: NodeId, c: &EcComp, pic: Rect, hover: Option<Pos2>) {
@@ -217,6 +228,18 @@ pub(crate) fn draw(app: &FigApp, painter: &egui::Painter, card: NodeId, c: &EcCo
 /// was used (the canvas then leaves it alone and shows this cursor).
 pub(crate) fn input(app: &mut FigApp, ctx: &egui::Context, target: Option<(NodeId, Rect)>, pos: Pos2, hovered: bool) -> bool {
     let (down, pressed, shift) = ctx.input(|i| (i.pointer.primary_down(), i.pointer.button_pressed(egui::PointerButton::Primary), i.modifiers.shift));
+    // A double-click on a text layer edits it in place (EffectCraft's viewer tools,
+    // [`super::viewer`]); egui reports it on the second release, when that press's drag ends.
+    let double = ctx.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary));
+    let card = target.map(|(c, _)| c).or(app.effectcraft.handles.drag.as_ref().map(|d| d.card));
+    if double && let Some(card) = card {
+        // The second press began a (still unmoved) drag: it ends here either way.
+        let drag = app.effectcraft.handles.drag.take();
+        if super::viewer::double_click(app, ctx, card, pos) {
+            return true;
+        }
+        app.effectcraft.handles.drag = drag;
+    }
     if app.effectcraft.handles.drag.is_some() {
         if down {
             drag_to(app, ctx, pos, shift);
@@ -225,7 +248,7 @@ pub(crate) fn input(app: &mut FigApp, ctx: &egui::Context, target: Option<(NodeI
         }
         return true;
     }
-    if !hovered || !move_tool(app) {
+    if !hovered || !move_tool(app) || !selection_tool(app) {
         return false;
     }
     let Some((card, pic)) = target.filter(|(_, pic)| pic.width() >= MIN_CARD && pic.height() >= MIN_CARD / 2.0 && pic.contains(pos)) else {

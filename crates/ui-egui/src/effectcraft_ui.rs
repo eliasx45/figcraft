@@ -39,6 +39,12 @@ use crate::FigApp;
 #[path = "effectcraft_handles.rs"]
 pub(crate) mod handles;
 
+/// Fork: EffectCraft's viewer tools (rotate, anchor, masks, pen, type) on the card the Timeline
+/// edits.
+#[cfg(feature = "effectcraft-inproc")]
+#[path = "effectcraft_viewer.rs"]
+pub(crate) mod viewer;
+
 /// Fork: the EffectCraft Timelines on the canvas, under their cards.
 #[cfg(feature = "effectcraft-inproc")]
 #[path = "effectcraft_strips.rs"]
@@ -1323,6 +1329,7 @@ impl FigApp {
                     ui.scope_builder(bar, |ui| {
                         ui.label("▾");
                         ui.strong(&comp);
+                        viewer::tool_row(ui, &mut p.host);
                         if let Some(why) = p.host.read_only() {
                             ui.label(egui::RichText::new(why).color(t.text_secondary));
                         } else if p.host.is_dirty() {
@@ -1351,6 +1358,8 @@ impl FigApp {
         // The canvas leaves the pointer over the panels and their resize zones to them.
         let owned: Vec<Rect> = screen.iter().copied().chain(zones).collect();
         self.effectcraft.panel_rects = (!owned.is_empty()).then(|| (ctx.cumulative_pass_nr(), owned));
+        // EffectCraft's viewer tools on the card (over the canvas, under nothing of the panel's).
+        viewer::card_tools(self, ctx, &mut p);
         // The Timeline has the keyboard from a click in it, or on its card (moving or scaling a
         // layer there is an EffectCraft edit: ⌘Z undoes it), until a click elsewhere (not one in
         // a menu it opened).
