@@ -247,6 +247,16 @@ final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate {
             fail("The FigCraft build failed.")
             return
         }
+        // FigCraft may have been started while this build waited on another one (an agent's
+        // app.sh): hand over to it instead of opening a second copy.
+        if run(["--status"]) == "running" {
+            window?.orderOut(nil)
+            handOver(pending)
+            pending = []
+            bringForward()
+            NSApp.terminate(nil)
+            return
+        }
         launchApp()
     }
 

@@ -112,6 +112,11 @@ if running; then
 fi
 if stale; then
     build || { echo "build failed, see $log" >&2; exit 1; }
+    # Started by the Dock launcher (or another app.sh) while this one built: don't open a second.
+    if running; then
+        echo "FigCraft is already running" >&2
+        exit 0
+    fi
 fi
 cd "$root" || exit 1
 nohup "$bin" "$@" >"$target/app.log" 2>&1 &
