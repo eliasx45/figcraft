@@ -232,6 +232,22 @@ fn b(p: &Value, k: &str) -> bool {
     p.get(k).and_then(Value::as_bool).unwrap_or(false)
 }
 
+/// The modifiers `ui.input`'s `cmd` / `ctrl` / `alt` / `shift` stand for, as the platform's own
+/// keyboard reports them: on macOS ⌘ is `mac_cmd` + `command` and Control is `ctrl` alone, else
+/// both are Ctrl (`ctrl` + `command`). Code that tells ⌘ from Control (EffectCraft's keymap in
+/// the hosted Timeline: Cmd+Alt+G, Elias's Ctrl+W) then sees what a real key press gives it.
+fn input_mods(e: &Value) -> egui::Modifiers {
+    let (cmd, ctrl) = (b(e, "cmd"), b(e, "ctrl"));
+    let mac = cfg!(target_os = "macos");
+    egui::Modifiers {
+        alt: b(e, "alt"),
+        shift: b(e, "shift"),
+        ctrl: if mac { ctrl } else { cmd || ctrl },
+        mac_cmd: mac && cmd,
+        command: if mac { cmd } else { cmd || ctrl },
+    }
+}
+
 /// Handle one control method (also used by tests and the headless snapshot tool).
 pub fn handle(app: &mut FigApp, ctx: &Context, method: &str, p: &Value) -> Result<Value, String> {
     match method {
@@ -346,8 +362,7 @@ pub fn handle(app: &mut FigApp, ctx: &Context, method: &str, p: &Value) -> Resul
                 } else {
                     egui::PointerButton::Primary
                 };
-                let command = b(e, "cmd") || b(e, "ctrl");
-                let mods = egui::Modifiers { alt: b(e, "alt"), ctrl: command, shift: b(e, "shift"), mac_cmd: false, command };
+                let mods = input_mods(e);
                 if let Some(p) = e.get("move").and_then(pos) {
                     events.push(egui::Event::PointerMoved(p));
                 } else if let Some((p, pressed)) =
@@ -376,14 +391,7 @@ pub fn handle(app: &mut FigApp, ctx: &Context, method: &str, p: &Value) -> Resul
                 } else if b(e, "leave") {
                     events.push(egui::Event::PointerGone);
                 } else if let Some(h) = e.get("hold") {
-                    let held = egui::Modifiers {
-                        alt: b(h, "alt"),
-                        ctrl: b(h, "cmd") || b(h, "ctrl"),
-                        shift: b(h, "shift"),
-                        mac_cmd: false,
-                        command: b(h, "cmd") || b(h, "ctrl"),
-                    };
-                    events.push(egui::Event::ModifiersChanged(held));
+                    events.push(egui::Event::ModifiersChanged(input_mods(h)));
                 } else {
                     return Err(format!("unknown input event {e}"));
                 }
@@ -768,3 +776,28 @@ fn pointer(app: &mut FigApp, p: &Value) -> Result<Value, String> {
 #[cfg(test)]
 #[path = "control_roots_tests.rs"]
 mod roots_tests;
+
+#[cfg(test)]
+mod input_mods_tests {
+    use super::input_mods;
+    use serde_json::json;
+
+    // Regression: `ui.input` sent ⌘ as Ctrl+⌘ on macOS, so shortcuts that tell ⌘ from Control
+    // (EffectCraft's Cmd+Alt+G Interpret Footage in the hosted Timeline, FigCraft's own exact
+    // macOS keymap) never fired from the control channel.
+    #[test]
+    fn cmd_and_ctrl_are_the_platforms_keys() {
+        let cmd = input_mods(&json!({"key": "G", "cmd": true, "alt": true}));
+        let ctrl = input_mods(&json!({"key": "W", "ctrl": true}));
+        assert!(cmd.command && cmd.alt && !cmd.shift);
+        if cfg!(target_os = "macos") {
+            assert_eq!(cmd, egui::Modifiers { alt: true, mac_cmd: true, command: true, ..Default::default() });
+            assert_eq!(ctrl, egui::Modifiers { ctrl: true, ..Default::default() });
+        } else {
+            assert!(cmd.ctrl && !cmd.mac_cmd);
+            assert!(ctrl.ctrl && ctrl.command);
+        }
+        assert_eq!(input_mods(&json!({})), egui::Modifiers::NONE);
+        assert_eq!(input_mods(&json!({"cmd": "yes", "shift": 1})), egui::Modifiers::NONE);
+    }
+}

@@ -316,6 +316,28 @@ impl Store {
 /// Whether frame `f` of store `s` is to be asked for at `now`: not held fresh (`rev`: the app's
 /// revision; `headless`: frames come from the saved file), not asked for in the last [`REPOLL`],
 /// and not failed in the last [`FAILED_RETRY`].
+/// The EffectCraft app has the project at `path` open (`io::Reply::AppOwns`): frames of its
+/// cards rendered here from the saved file stop counting as fresh (they would be forever: frames
+/// from the file never age by the app's revision), so the cards ask the app for its live frames
+/// and show its edits. They stay up until the app's replace them.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub(crate) fn app_owns(link: &mut Link, path: &std::path::Path) {
+    for (k, s) in link.stores.iter_mut() {
+        if s.file.is_some() && !k.project.is_empty() && key_of(&k.project).as_path() == path {
+            s.file = None;
+        }
+    }
+}
+
+/// A card project's path as the link compares them (canonical with `effectcraft-inproc`).
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+fn key_of(project: &str) -> std::path::PathBuf {
+    #[cfg(feature = "effectcraft-inproc")]
+    return figcraft_ec_inproc::key(std::path::Path::new(project));
+    #[cfg(not(feature = "effectcraft-inproc"))]
+    std::path::PathBuf::from(project)
+}
+
 pub(crate) fn wants(s: &Store, f: i64, now: f64, rev: u64, headless: bool) -> bool {
     let file = s.file.is_some();
     let stale = s.stale();
@@ -1290,7 +1312,7 @@ impl FigApp {
 
     /// The open Timeline on the canvas, under its card ([`strips`]); drawn after the canvas, so
     /// it sits over it where the card is this frame. Its header (comp, "● unsaved" and Save, or
-    /// why it's read-only; ✕ closes it), EffectCraft's Timeline, Effect Controls to its right, the
+    /// why it's read-only; × closes it), EffectCraft's Timeline, Effect Controls to its right, the
     /// right and bottom edges (their corner, Effect Controls' right edge) that size them, the keyboard focus, and the card following its edits.
     pub(crate) fn effectcraft_panel_ui(&mut self, ctx: &egui::Context) {
         cards::frame(self, ctx);
@@ -1369,11 +1391,11 @@ impl FigApp {
                             ui.label("● unsaved");
                             save = ui.button("Save").clicked();
                         } else if p.host.mirrored() {
-                            ui.label(egui::RichText::new("⇄ live in EffectCraft").color(t.text_secondary))
+                            ui.label(egui::RichText::new("live in EffectCraft").color(t.text_secondary))
                                 .on_hover_text("Edits here are EffectCraft's: its undo, its unsaved changes, its ⌘S");
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            close = ui.button("✕").on_hover_text("Close the Timeline").clicked();
+                            close = ui.button("×").on_hover_text("Close the Timeline").clicked();
                         });
                     });
                     let body = Rect::from_min_max(pos2(strip.min.x, head.max.y + 1.0), strip.max);
@@ -1551,6 +1573,7 @@ impl FigApp {
                         self.effectcraft.sounds.retain(|_, s| matches!(s, SoundState::Loading));
                     }
                 }
+                io::Reply::AppOwns(path) => app_owns(&mut self.effectcraft, &path),
                 io::Reply::Tree { card, tree } => self.effectcraft_explode(card, &tree),
                 io::Reply::Revealed(comp) => self.toast(format!("{comp} is open in EffectCraft")),
                 io::Reply::AppProject { card, path } => {
@@ -1821,6 +1844,10 @@ mod io {
             sound: Option<Arc<figcraft_audio::Sound>>,
         },
         Revision(u64),
+        /// The EffectCraft app has this card project open (canonical path): its live edits win,
+        /// so frames rendered here from the saved file are behind it.
+        #[cfg_attr(not(feature = "effectcraft-inproc"), allow(dead_code))]
+        AppOwns(PathBuf),
         Tree {
             card: NodeId,
             tree: Value,
@@ -2133,7 +2160,15 @@ mod io {
                 Job::Frames { comp, .. } if !comp.project.is_empty() && Path::new(&comp.project).is_file() => Some(job.clone()),
                 _ => None,
             };
+            #[cfg(feature = "effectcraft-inproc")]
+            let revision = matches!(job, Job::Revision);
             let reply = self.over_tcp(job);
+            // With the revision, which project the app has open: a card whose frames came from
+            // its saved file asks the app for them from now on.
+            #[cfg(feature = "effectcraft-inproc")]
+            if revision && let Seen::Open(Some(p)) = self.seen() {
+                let _ = self.out.send(Reply::AppOwns(p));
+            }
             #[cfg(feature = "effectcraft-inproc")]
             if let (Reply::FramesFailed { error, .. }, Some(job)) = (&reply, fallback)
                 && not_in_app(error)
@@ -2642,5 +2677,44 @@ mod io {
             return Some(Reply::FramesFailed { store, frames: failed, error: "effectcraft-cli couldn't render the saved project".into() });
         }
         Some(Reply::Frames { store, revision: 0, got, pending, failed, poster: poster_bytes, headless: Some(stamp), file: None })
+    }
+}
+
+/// Regression (live test 26 Oct, TESTER): a card whose frames had been rendered in FigCraft from
+/// its saved project kept showing them after the EffectCraft app opened that project: an edit in
+/// the mirrored Timeline (opacity 100 → 40 %) reached the app, but the card showed 100 % forever,
+/// since frames from the file counted as fresh whatever the app's revision. Once the app says it
+/// has the project open, they no longer do.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod app_owns_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::{Link, Store, StoreKey, app_owns, key_of};
+    use figcraft_doc::EcComp;
+
+    #[test]
+    fn file_frames_give_way_when_the_app_opens_the_project() {
+        let dir = std::env::temp_dir().join(format!("figcraft-app-owns-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (mine, other) = (dir.join("mine.ecproj"), dir.join("other.ecproj"));
+        std::fs::write(&mine, "{}").unwrap();
+        std::fs::write(&other, "{}").unwrap();
+        let mut link = Link::default();
+        let card = |p: &std::path::Path| {
+            let mut c = EcComp::new("Comp 1", 0.0, 4.0, 25.0);
+            c.project = p.to_string_lossy().into_owned();
+            c
+        };
+        for p in [&mine, &other] {
+            link.stores.insert(StoreKey::of(&card(p), 240), Store::with_revisions(Some(3), None));
+        }
+        let file = |link: &Link, p: &std::path::Path| link.stores.get(&StoreKey::of(&card(p), 240)).unwrap().file;
+        app_owns(&mut link, &key_of(&mine.to_string_lossy()));
+        assert_eq!(file(&link, &mine), None, "the app's frames are asked for");
+        assert_eq!(file(&link, &other), Some(3), "another project's cards keep their file frames");
+        // Asked again (every revision poll): nothing more changes, nothing panics.
+        app_owns(&mut link, &key_of(&mine.to_string_lossy()));
+        app_owns(&mut link, std::path::Path::new(""));
+        assert_eq!(file(&link, &other), Some(3));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

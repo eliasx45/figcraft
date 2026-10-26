@@ -552,8 +552,9 @@ mod mirrored {
         r.h.session_mut().execute("comp.workArea", json!({"start": 0.8, "end": 1.6, "merge": "wa-drag"})).unwrap();
         r.settle();
         assert_eq!(r.app.borrow().session().history.undo.len(), steps + 2);
-        r.app_exec("edit.undo", json!({}));
-        r.app_exec("edit.undo", json!({}));
+        // (The app's own ⌘Z: any author's step, as the user's undo.)
+        r.app_exec("edit.undo", json!({"any": true}));
+        r.app_exec("edit.undo", json!({"any": true}));
         assert!((wa(&r) - start).abs() < 1e-6, "two undos take both gestures back");
         r.settle();
         assert!(r.same());

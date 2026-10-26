@@ -100,6 +100,22 @@ pub enum Reply {
     Down(String),
 }
 
+/// `command` run in the app as the user's own ⌘Z would: EffectCraft refuses a plain `edit.undo`
+/// from the control channel when another client made the last step, and the panel's pushes are
+/// client `figcraft`'s, so ⌘Z in the panel undid nothing of its own edits ("nothing of you to
+/// undo"). `any: true` undoes the last step whoever made it, as ⌘Z in the app does.
+fn as_the_user(command: &str, mut params: Value) -> Value {
+    if command == "edit.undo" {
+        if !params.is_object() {
+            params = json!({});
+        }
+        if let Some(o) = params.as_object_mut() {
+            o.entry("any").or_insert(Value::Bool(true));
+        }
+    }
+    params
+}
+
 /// Run `job` against the app.
 pub fn perform(link: &mut dyn Link, job: Job) -> Reply {
     let (mut pushed, mut ran, mut reset) = (None, None, false);
@@ -113,7 +129,7 @@ pub fn perform(link: &mut dyn Link, job: Job) -> Reply {
             }
         }
         // As the user would: no `client` (⌘Z undoes the app's last step, whoever made it).
-        Job::Run { command, params } => match link.call(&command, params) {
+        Job::Run { command, params } => match link.call(&command, as_the_user(&command, params)) {
             Ok(_) => ran = Some(Ok(())),
             Err(LinkError::Refused(e)) => ran = Some(Err(e)),
             Err(LinkError::Down(e)) => return Reply::Down(e),
@@ -583,5 +599,37 @@ impl Mirror {
         } else {
             self.state = State::Down("the mirror thread stopped".into());
         }
+    }
+}
+
+#[cfg(test)]
+mod as_the_user_tests {
+    use super::{Job, Link, LinkError, perform};
+    use serde_json::{Value, json};
+
+    /// Records what the app was asked.
+    struct Rec(Vec<(String, Value)>);
+    impl Link for Rec {
+        fn call(&mut self, command: &str, params: Value) -> Result<Value, LinkError> {
+            self.0.push((command.to_string(), params));
+            Ok(json!({"revision": 1}))
+        }
+    }
+
+    /// Regression (live test 26 Oct, TESTER): ⌘Z in the mirrored Timeline after an edit made
+    /// there did nothing: the app answered "nothing of you to undo: the last change was made by
+    /// client `figcraft`". The undo goes as the user's, whoever made the step.
+    #[test]
+    fn undo_from_the_panel_undoes_whoever_made_the_last_step() {
+        let mut link = Rec(Vec::new());
+        let _ = perform(&mut link, Job::Run { command: "edit.undo".into(), params: json!({}) });
+        let _ = perform(&mut link, Job::Run { command: "edit.undo".into(), params: Value::Null });
+        let _ = perform(&mut link, Job::Run { command: "edit.redo".into(), params: json!({}) });
+        let _ = perform(&mut link, Job::Run { command: "file.save".into(), params: json!({}) });
+        let sent: Vec<&(String, Value)> = link.0.iter().filter(|(c, _)| c != "project.mirror").collect();
+        assert_eq!(sent[0], &("edit.undo".to_string(), json!({"any": true})));
+        assert_eq!(sent[1], &("edit.undo".to_string(), json!({"any": true})));
+        assert_eq!(sent[2], &("edit.redo".to_string(), json!({})));
+        assert_eq!(sent[3], &("file.save".to_string(), json!({})));
     }
 }
