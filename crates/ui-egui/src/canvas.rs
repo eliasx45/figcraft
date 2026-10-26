@@ -37,7 +37,7 @@ pub struct CanvasState {
     pub preview_latency_ms: Option<f64>,
     pub refine_latency_ms: Option<f64>,
     dragging: bool,
-    space_pan: bool,
+    pub(crate) space_pan: bool,
     middle_pan: Option<(Pos2, f64, f64)>,
     /// The zoom tool (Z held): zooming out (Alt) or in, and where its drag started.
     zoom_tool: Option<bool>,
@@ -653,12 +653,24 @@ fn zoom_tool(app: &mut FigApp, ui: &Ui, resp: &egui::Response, pos: Pos2, mods: 
 /// the pointer (a comment pin, a ruler guide, a gradient or padding handle): the tool's cursor
 /// then doesn't show.
 fn input(app: &mut FigApp, ui: &mut Ui, resp: &egui::Response) -> bool {
-    // Fork: the docked EffectCraft panel owns the pointer over it (a click on a Timeline row
-    // never zooms, plays or selects on the canvas).
+    // Fork: the EffectCraft Timeline on the canvas owns the pointer over it (a click on a
+    // Timeline row never plays or selects on the canvas, a scroll there scrolls its rows); a
+    // pinch or ⌘-scroll still zooms the canvas about the pointer.
     #[cfg(feature = "effectcraft-inproc")]
     if crate::effectcraft_ui::panel_takes_pointer(app, ui.ctx(), app.canvas.dragging) {
         if std::mem::take(&mut app.canvas.hovering) {
             app.session.vector_pointer_left();
+        }
+        let (zoom_delta, at) = ui.ctx().input(|i| (i.zoom_delta(), i.pointer.hover_pos()));
+        if (zoom_delta - 1.0).abs() > 1e-4
+            && let Some(at) = at
+        {
+            let anchor = app.to_page(at);
+            if let Ok(ds) = app.session.ds_mut() {
+                let z = ds.view.zoom * f64::from(zoom_delta);
+                ds.view.set_zoom_at(z, (anchor.x, anchor.y));
+                ds.revision += 1;
+            }
         }
         return true;
     }
@@ -782,7 +794,7 @@ fn input(app: &mut FigApp, ui: &mut Ui, resp: &egui::Response) -> bool {
     if !app.canvas.dragging && crate::video_ui::input(app, &ctx, pos, resp.hovered()) {
         return true;
     }
-    // Fork: the comp's layers on the card the docked EffectCraft panel edits (move, scale).
+    // Fork: the comp's layers on the card the EffectCraft Timeline edits (move, scale).
     #[cfg(feature = "effectcraft-inproc")]
     if !app.canvas.dragging && crate::effectcraft_ui::layer_handles_input(app, &ctx, pos, resp.hovered()) {
         return false;

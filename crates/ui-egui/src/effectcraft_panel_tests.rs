@@ -29,7 +29,7 @@ fn layers(h: &EcHost) -> usize {
 fn frame(ctx: &egui::Context, h: &mut EcHost, input: egui::RawInput) {
     let _ = ctx.run_ui(input, |ui| {
         let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 300.0));
-        h.show(ui, rect);
+        h.show(ui, rect, None);
     });
 }
 
@@ -263,23 +263,28 @@ fn the_timeline_time_follows_the_card() {
     assert_eq!(h.session().revision, rev, "moving the time is no edit (no re-render)");
 }
 
-/// Whose pointer it is: over the docked panel or pressed in it and still held, the panel's;
-/// a press that began on the canvas keeps its release over the panel; no panel, the canvas's.
+/// Whose pointer it is: over the Timeline or its Effect Controls, or pressed in them and still
+/// held, the panel's; a press that began on the canvas keeps its release over the panel; no
+/// panel, the canvas's.
 #[test]
 fn the_panel_owns_the_pointer_over_it() {
     use crate::effectcraft_ui::panel_has_pointer;
-    let panel = Some(egui::Rect::from_min_max(egui::pos2(0.0, 600.0), egui::pos2(1000.0, 900.0)));
+    let timeline = egui::Rect::from_min_max(egui::pos2(0.0, 600.0), egui::pos2(600.0, 900.0));
+    let fx = egui::Rect::from_min_max(egui::pos2(610.0, 600.0), egui::pos2(900.0, 900.0));
+    let panel = [timeline, fx];
     let (inside, canvas) = (Some(egui::pos2(500.0, 800.0)), Some(egui::pos2(500.0, 300.0)));
-    assert!(panel_has_pointer(panel, inside, None, false), "hovering a Timeline row");
-    assert!(panel_has_pointer(panel, canvas, inside, false), "dragged out of the Timeline onto the canvas");
-    assert!(!panel_has_pointer(panel, inside, canvas, true), "a canvas drag over the panel stays the canvas's");
-    assert!(!panel_has_pointer(panel, canvas, None, false), "over the canvas");
-    assert!(!panel_has_pointer(None, inside, inside, false), "no panel drawn this frame");
+    assert!(panel_has_pointer(&panel, inside, None, false), "hovering a Timeline row");
+    assert!(panel_has_pointer(&panel, Some(egui::pos2(700.0, 700.0)), None, false), "hovering Effect Controls");
+    assert!(!panel_has_pointer(&panel, Some(egui::pos2(605.0, 700.0)), None, false), "the gap between them is canvas");
+    assert!(panel_has_pointer(&panel, canvas, inside, false), "dragged out of the Timeline onto the canvas");
+    assert!(!panel_has_pointer(&panel, inside, canvas, true), "a canvas drag over the panel stays the canvas's");
+    assert!(!panel_has_pointer(&panel, canvas, None, false), "over the canvas");
+    assert!(!panel_has_pointer(&[], inside, inside, false), "no panel drawn");
 }
 
-/// Regression: a click on a layer row in the docked Timeline zoomed the canvas out (162 % →
-/// 25 %) and played the card. Clicks, drags, scroll and pinch over the panel reach only the
-/// panel, which takes the keyboard.
+/// Regression: a click on a layer row in the Timeline zoomed the canvas out (162 % → 25 %) and
+/// played the card. Clicks, drags and scroll over the Timeline on the canvas reach only it, which
+/// takes the keyboard; ⌘-scroll and pinch there zoom the canvas (and nothing else).
 #[test]
 fn pointer_input_over_the_panel_never_reaches_the_canvas() {
     use egui::{Event, PointerButton, pos2, vec2};
@@ -295,10 +300,12 @@ fn pointer_input_over_the_panel_never_reaches_the_canvas() {
     assert!(u.app.effectcraft_open_panel(card));
     u.frame(vec![]);
     u.frame(vec![]);
-    let (_, rect) = u.app.effectcraft.panel_rect.expect("the panel drew");
-    assert!(!u.app.canvas.rect.intersects(rect.shrink(1.0)), "the canvas is above the panel");
-    // Click away first: the panel gives up the keyboard.
-    let canvas_spot = pos2(u.app.canvas.rect.center().x, u.app.canvas.rect.max.y - 20.0);
+    let (_, rects) = u.app.effectcraft.panel_rects.clone().expect("the Timeline drew");
+    let rect = rects[0];
+    let card_r = crate::effectcraft_ui::screen_rect(&u.app, u.app.session.doc().unwrap(), card).unwrap();
+    assert!(rect.min.y > card_r.max.y && (rect.min.x - card_r.min.x).abs() < 1.0, "the Timeline hangs under its card");
+    // Click away first (on the canvas beside the card): the panel gives up the keyboard.
+    let canvas_spot = pos2(u.app.canvas.rect.min.x + 5.0, u.app.canvas.rect.min.y + 5.0);
     u.button(canvas_spot, true);
     u.button(canvas_spot, false);
     assert!(!u.app.effectcraft.panel.as_ref().unwrap().focused);
@@ -321,26 +328,24 @@ fn pointer_input_over_the_panel_never_reaches_the_canvas() {
     assert!(u.app.effectcraft.panel.as_ref().unwrap().focused, "the click gave the panel the keyboard");
     u.button(row, true);
     u.button(row, false);
-    // Scroll, ⌘-scroll and a pinch over it.
+    // A scroll over it.
     u.frame(vec![Event::MouseWheel {
         unit: egui::MouseWheelUnit::Point,
         delta: vec2(0.0, -120.0),
         phase: egui::TouchPhase::Move,
         modifiers: Default::default(),
     }]);
-    u.frame_with(
-        vec![Event::MouseWheel {
-            unit: egui::MouseWheelUnit::Point,
-            delta: vec2(0.0, -120.0),
-            phase: egui::TouchPhase::Move,
-            modifiers: egui::Modifiers::COMMAND,
-        }],
-        egui::Modifiers::COMMAND,
-    );
-    u.frame(vec![Event::Zoom(0.5)]);
     // A drag out of the Timeline, let go over the canvas.
     u.drag_to(row, canvas_spot);
     u.button(canvas_spot, false);
     u.frame(vec![]);
     assert_eq!(state(&u), before, "the canvas's view, selection, and card transport are untouched");
+    // A pinch over it zooms the canvas, and the Timeline follows its card.
+    u.frame(vec![Event::PointerMoved(row), Event::Zoom(0.5)]);
+    u.frame(vec![]);
+    u.frame(vec![]);
+    let zoom = u.app.session.ds().unwrap().view.zoom;
+    assert!((zoom - before.0 * 0.5).abs() < 1e-6, "pinch zooms the canvas over the Timeline: {zoom}");
+    let (_, rects) = u.app.effectcraft.panel_rects.clone().expect("still drawn");
+    assert!((rects[0].width() - rect.width() * 0.5).abs() < 2.0 || rects[0].width() < rect.width(), "the Timeline shrinks with the canvas");
 }

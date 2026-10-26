@@ -19,6 +19,9 @@
 //! Those frames render on their own worker (`io::worker`), one at a time, the newest request per
 //! card winning; on EffectCraft's GPU compositor sharing the window's wgpu device when the app
 //! shared it ([`set_native_frames`]), kept as GPU textures egui draws directly, else on the CPU.
+//! Double-clicking a card opens EffectCraft's own Timeline on the canvas right under it, scaling
+//! with the canvas; every other card shows a closed strip there ([`strips`],
+//! [`crate::effectcraft_panel`]).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -31,10 +34,15 @@ use serde_json::{Value, json};
 
 use crate::FigApp;
 
-/// Fork: grab the comp's layers on the card the docked panel edits.
+/// Fork: grab the comp's layers on the card the Timeline edits.
 #[cfg(feature = "effectcraft-inproc")]
 #[path = "effectcraft_handles.rs"]
 pub(crate) mod handles;
+
+/// Fork: the EffectCraft Timelines on the canvas, under their cards.
+#[cfg(feature = "effectcraft-inproc")]
+#[path = "effectcraft_strips.rs"]
+pub(crate) mod strips;
 
 /// Play / explode button radius (screen points).
 const BUTTON: f32 = 10.0;
@@ -180,7 +188,7 @@ pub(crate) struct Store {
     /// Its frames were rendered in-process from the saved project, at this file revision (they
     /// stay fresh whatever the app's revision; a later save replaces them).
     file: Option<u64>,
-    /// The revision of the docked panel's unsaved edits these frames must show: frames of another
+    /// The revision of the Timeline's unsaved edits these frames must show: frames of another
     /// revision are asked for again (each edit re-renders the card; a later reply replaces them).
     want: Option<u64>,
 }
@@ -231,23 +239,34 @@ pub struct Link {
     bytes: usize,
     /// The layers over each card, drawn over its frame ([`crate::card_cover`]).
     covers: std::cell::RefCell<crate::card_cover::Covers>,
-    /// EffectCraft's Timeline docked at the bottom (fork-only; its fonts: `theme::install_fonts`).
+    /// EffectCraft's Timeline on the canvas under the card it edits (fork-only, [`strips`]; its
+    /// fonts: `theme::install_fonts`).
     #[cfg(feature = "effectcraft-inproc")]
     pub(crate) panel: Option<crate::effectcraft_panel::Panel>,
-    /// A docked panel's colour eyedropper is armed: canvas clicks take a colour.
+    /// The Timeline's colour eyedropper is armed: canvas clicks take a colour.
     #[cfg(feature = "effectcraft-inproc")]
     pub(crate) picking: bool,
-    /// Where the docked panel was drawn, and in which pass (the canvas leaves the pointer over
-    /// it alone: [`panel_takes_pointer`]).
+    /// Where the open Timeline and its Effect Controls were drawn on screen, and in which pass (the
+    /// canvas leaves the pointer over them alone: [`panel_takes_pointer`]).
     #[cfg(feature = "effectcraft-inproc")]
-    pub(crate) panel_rect: Option<(u64, Rect)>,
-    /// Layer handles on the card the docked panel edits ([`handles`]).
+    pub(crate) panel_rects: Option<(u64, Vec<Rect>)>,
+    /// The closed strips' layer bars ([`strips::Loader`]).
+    #[cfg(feature = "effectcraft-inproc")]
+    pub(crate) strips: strips::Loader,
+    /// The open Timeline's right edge being dragged ([`strips::widen_input`]).
+    #[cfg(feature = "effectcraft-inproc")]
+    pub(crate) widen: Option<strips::Widen>,
+    /// Space pressed in the Timeline: it plays the card when let go, unless the pointer was pressed
+    /// meanwhile (Space held and a drag pans the canvas). `true`: it was.
+    #[cfg(feature = "effectcraft-inproc")]
+    pub(crate) space_tap: Option<bool>,
+    /// Layer handles on the card the Timeline edits ([`handles`]).
     #[cfg(feature = "effectcraft-inproc")]
     pub(crate) handles: handles::State,
 }
 
 impl Store {
-    /// Its frames show another revision of the docked panel's edits than the one wanted.
+    /// Its frames show another revision of the Timeline's edits than the one wanted.
     pub(crate) fn stale(&self) -> bool {
         self.want.is_some() && self.file != self.want
     }
@@ -438,7 +457,7 @@ fn hover_time(app: &FigApp, doc: &Document, id: NodeId, c: &EcComp, h: Option<Po
 /// The comp time card `id` shows now.
 fn card_time(app: &FigApp, doc: &Document, id: NodeId, c: &EcComp, hover: Option<Pos2>) -> f64 {
     let ec = &app.session.effectcraft;
-    // The card the docked EffectCraft panel edits shows the one playhead they share (no skimming
+    // The card the EffectCraft Timeline edits shows the one playhead they share (no skimming
     // under the pointer, no audio strip's time).
     #[cfg(feature = "effectcraft-inproc")]
     if let Some(p) = app.effectcraft.panel.as_ref().filter(|p| p.open && p.card == id) {
@@ -530,7 +549,7 @@ pub fn overlay(app: &FigApp, painter: &egui::Painter) {
             }
             None => false,
         };
-        // Fork: the selected layers' boxes and handles while the docked panel edits this card.
+        // Fork: the selected layers' boxes and handles while the Timeline edits this card.
         #[cfg(feature = "effectcraft-inproc")]
         handles::draw(app, painter, id, c, pic, hover);
         let hovered = hover.is_some_and(|h| r.contains(h));
@@ -611,6 +630,9 @@ pub fn overlay(app: &FigApp, painter: &egui::Painter) {
             }
         }
     }
+    // Fork: the closed Timeline strips under the cards whose Timeline isn't open.
+    #[cfg(feature = "effectcraft-inproc")]
+    strips::draw_closed(app, painter, doc, ds.page, hover);
 }
 
 pub(crate) fn round_button(painter: &egui::Painter, c: Pos2) {
@@ -634,26 +656,32 @@ fn card_at(app: &FigApp, doc: &Document, page: NodeId, pos: Pos2) -> Option<(Nod
     })
 }
 
-/// Whether the pointer belongs to the docked EffectCraft panel (`panel`, as drawn this frame):
-/// over it, or pressed in it and still held (a drag out of the Timeline). A press that began on
-/// the canvas (`canvas_drag`) keeps its moves and release wherever they are.
+/// Whether the pointer belongs to the open EffectCraft Timeline (`panel`: its rectangles on
+/// screen, Effect Controls included, as last drawn): over it, or pressed in it and still held (a
+/// drag out of the Timeline). A press that began on the canvas (`canvas_drag`) keeps its moves and
+/// release wherever they are.
 #[cfg(feature = "effectcraft-inproc")]
-pub(crate) fn panel_has_pointer(panel: Option<Rect>, hover: Option<Pos2>, held_from: Option<Pos2>, canvas_drag: bool) -> bool {
-    let Some(r) = panel else { return false };
-    !canvas_drag && (hover.is_some_and(|p| r.contains(p)) || held_from.is_some_and(|p| r.contains(p)))
+pub(crate) fn panel_has_pointer(panel: &[Rect], hover: Option<Pos2>, held_from: Option<Pos2>, canvas_drag: bool) -> bool {
+    let over = |p: Pos2| panel.iter().any(|r| r.contains(p));
+    !canvas_drag && (hover.is_some_and(over) || held_from.is_some_and(over))
 }
 
-/// The canvas leaves this frame's pointer (clicks, drags, scroll, pinch) to the docked panel:
-/// only the panel acts on what happens over it.
+/// The canvas leaves this frame's pointer (clicks, drags, scroll) to the open Timeline on it:
+/// only the Timeline acts on what happens over it (the canvas still zooms on ⌘-scroll and
+/// pinch, [`crate::canvas`], and pans with Space held).
 #[cfg(feature = "effectcraft-inproc")]
 pub(crate) fn panel_takes_pointer(app: &FigApp, ctx: &egui::Context, canvas_drag: bool) -> bool {
+    if app.canvas.space_pan || app.effectcraft.panel.as_ref().is_none_or(|p| !p.open) {
+        return false;
+    }
+    // Drawn after the canvas: last pass's rectangles are the ones on screen now.
     let pass = ctx.cumulative_pass_nr();
-    let rect = app.effectcraft.panel_rect.filter(|(p, _)| *p == pass).map(|(_, r)| r);
+    let rects = app.effectcraft.panel_rects.as_ref().filter(|(p, _)| p.saturating_add(1) >= pass).map_or(&[][..], |(_, r)| r.as_slice());
     let (hover, held_from) = ctx.input(|i| (i.pointer.hover_pos(), i.pointer.press_origin().filter(|_| i.pointer.any_down())));
-    panel_has_pointer(rect, hover, held_from, canvas_drag)
+    panel_has_pointer(rects, hover, held_from, canvas_drag)
 }
 
-/// Fork: the pointer on the layers of the card the docked panel edits ([`handles::input`]): a
+/// Fork: the pointer on the layers of the card the Timeline edits ([`handles::input`]): a
 /// press on a layer or handle there (not on the card's buttons or slider) and the drag that
 /// follows. Returns whether it has the pointer (its own cursor shows).
 #[cfg(feature = "effectcraft-inproc")]
@@ -691,7 +719,7 @@ pub fn input(app: &mut FigApp, ctx: &egui::Context, pos: Pos2, hovered: bool, do
     if !hovered {
         return false;
     }
-    // The docked EffectCraft panel's eyedropper takes this click ([`FigApp::effectcraft_panel_ui`]).
+    // The EffectCraft Timeline's eyedropper takes this click ([`FigApp::effectcraft_panel_ui`]).
     #[cfg(feature = "effectcraft-inproc")]
     if app.effectcraft.picking {
         return true;
@@ -702,9 +730,18 @@ pub fn input(app: &mut FigApp, ctx: &egui::Context, pos: Pos2, hovered: bool, do
     }
     let Ok(ds) = app.session.ds() else { return false };
     let (doc, page) = (ds.doc.clone(), ds.page);
+    // Fork: a press on a closed Timeline strip opens that card's Timeline (another one closes).
+    #[cfg(feature = "effectcraft-inproc")]
+    if pressed && let Some(id) = strips::closed_at(app, &doc, page, pos) {
+        if !app.effectcraft_open_panel(id) {
+            let t = doc.node(id).and_then(|n| n.effectcraft.as_deref()).map(|c| app.effectcraft.shown.get(&id).copied().unwrap_or(c.start));
+            app.run("effectcraft.reveal", json!({"id": id, "time": t}));
+        }
+        return true;
+    }
     let Some((id, pic)) = card_at(app, &doc, page, pos) else { return false };
     if double {
-        // Fork: EffectCraft's Timeline docked here, editing the card's comp.
+        // Fork: EffectCraft's Timeline under the card, editing the card's comp.
         #[cfg(feature = "effectcraft-inproc")]
         if app.effectcraft_open_panel(id) {
             return true;
@@ -846,6 +883,12 @@ impl FigApp {
         if ids.is_empty() {
             return;
         }
+        // Fork: the closed strips' layer bars.
+        #[cfg(feature = "effectcraft-inproc")]
+        {
+            let comps: Vec<EcComp> = ids.iter().filter_map(|id| doc.node(*id)?.effectcraft.as_deref().cloned()).collect();
+            self.effectcraft.strips.feed(ctx, &comps, now);
+        }
         let ppp = ctx.pixels_per_point();
         let hover = ctx.input(|i| i.pointer.hover_pos()).filter(|h| self.canvas.rect.contains(*h));
         let mut wanted: Vec<(NodeId, EcComp, u32, i64)> = Vec::new();
@@ -958,41 +1001,8 @@ impl FigApp {
     }
 }
 
-/// The docked EffectCraft panel's least height, and the canvas height it always leaves.
-#[cfg(feature = "effectcraft-inproc")]
-const PANEL_MIN: f32 = 260.0;
-#[cfg(feature = "effectcraft-inproc")]
-const PANEL_CANVAS_MIN: f32 = 160.0;
-
-/// The docked panel's top edge (`panel`: its rectangle, `height` now): dragging it sizes the panel
-/// (the edge stays under the pointer), a double-click puts back the default (40 % of the window).
-/// Returns the height asked for when it changed; infinite for the default.
-#[cfg(feature = "effectcraft-inproc")]
-fn panel_top_edge(ui: &mut egui::Ui, panel: Rect, height: f32) -> Option<f32> {
-    let grab = ui.style().interaction.resize_grab_radius_side.max(4.0);
-    let y = panel.min.y;
-    let rect = Rect::from_x_y_ranges(panel.x_range(), (y - grab)..=(y + grab));
-    let id = egui::Id::new("effectcraft_panel_edge");
-    let resp = ui.interact(rect, id, egui::Sense::click_and_drag());
-    if resp.hovered() || resp.dragged() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
-        ui.painter().hline(panel.x_range(), y, egui::Stroke::new(2.0, crate::theme::ACCENT));
-    }
-    if resp.double_clicked() {
-        // The default: forget the dragged height.
-        return Some(f32::INFINITY);
-    }
-    let at = resp.interact_pointer_pos().filter(|_| resp.dragged())?;
-    if resp.drag_started() {
-        let pressed = ui.input(|i| i.pointer.press_origin()).unwrap_or(at);
-        ui.data_mut(|d| d.insert_temp(id, pressed.y - y));
-    }
-    let grabbed: f32 = ui.data(|d| d.get_temp(id)).unwrap_or(0.0);
-    let h = height - (at.y - grabbed - y);
-    (h != height).then_some(h)
-}
-
-/// Fork-only: EffectCraft's Timeline docked at the bottom ([`crate::effectcraft_panel`]).
+/// Fork-only: EffectCraft's Timeline on the canvas, under the card it edits
+/// ([`crate::effectcraft_panel`], [`strips`]).
 #[cfg(feature = "effectcraft-inproc")]
 impl FigApp {
     /// Open the Timeline on card `id`'s comp. `false` when it can't (no saved project, the comp
@@ -1027,8 +1037,7 @@ impl FigApp {
                 if let Some(old) = self.effectcraft.panel.take() {
                     self.effectcraft_send(io::Job::Override { path: old.path(), snapshot: None });
                 }
-                let height = 280.0;
-                self.effectcraft.panel = Some(crate::effectcraft_panel::Panel { host, card: id, open: true, focused: true, height, synced: None });
+                self.effectcraft.panel = Some(crate::effectcraft_panel::Panel { host, card: id, open: true, focused: true, synced: None });
                 true
             }
             Err(e) => {
@@ -1045,11 +1054,11 @@ impl FigApp {
         &self,
         ctx: &egui::Context,
         p: &crate::effectcraft_panel::Panel,
-        panel: Rect,
+        panel: &[Rect],
     ) -> Option<effectcraft_ui_egui::panels::timeline::PointerColor> {
         use effectcraft_ui_egui::panels::timeline::PointerColor;
         let pos = ctx.input(|i| i.pointer.hover_pos())?;
-        if !self.canvas.rect.contains(pos) || panel.contains(pos) {
+        if !self.canvas.rect.contains(pos) || panel.iter().any(|r| r.contains(pos)) {
             return None;
         }
         let clicked = ctx.input(|i| i.pointer.button_clicked(egui::PointerButton::Primary));
@@ -1083,7 +1092,7 @@ impl FigApp {
         Some(PointerColor { rgb, clicked: true })
     }
 
-    /// One playhead for the card and the docked Timeline: whichever moved since they were last
+    /// One playhead for the card and its Timeline: whichever moved since they were last
     /// made the same drags the other (the Timeline wins a tie: it was scrubbed by hand).
     fn effectcraft_sync_playhead(&mut self, p: &mut crate::effectcraft_panel::Panel) {
         let Some(c) = self.session.doc().ok().and_then(|d| d.node(p.card)?.effectcraft.as_deref().cloned()) else { return };
@@ -1113,60 +1122,142 @@ impl FigApp {
         }
     }
 
-    /// The docked Timeline (before the canvas takes the rest of the window): its header, the
-    /// panel, its keys while it has focus, and the card following its edits.
-    pub(crate) fn effectcraft_panel_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    /// The open Timeline's keys while it has the keyboard (the last click was in it), before the
+    /// canvas and FigCraft's shortcuts see them: a tap of Space plays the card (held with a drag,
+    /// it pans the canvas), ⌘S saves, the rest is EffectCraft's
+    /// ([`crate::effectcraft_panel::EcHost::keys`]).
+    pub(crate) fn effectcraft_panel_keys(&mut self, ctx: &egui::Context) {
         let Some(mut p) = self.effectcraft.panel.take() else { return };
+        if let Some(dragged) = self.effectcraft.space_tap {
+            let (down, held) = ctx.input(|i| (i.key_down(egui::Key::Space), i.pointer.any_down()));
+            if held {
+                self.effectcraft.space_tap = Some(true);
+            } else if !down {
+                self.effectcraft.space_tap = None;
+                if !dragged && p.open {
+                    self.run("effectcraft.togglePlay", json!({"id": p.card}));
+                }
+            }
+        }
+        if p.open && p.focused {
+            let mut save = false;
+            for a in p.host.keys(ctx) {
+                match a {
+                    crate::effectcraft_panel::PanelAction::Play => {
+                        self.effectcraft.space_tap.get_or_insert(false);
+                    }
+                    crate::effectcraft_panel::PanelAction::Save => save = true,
+                    crate::effectcraft_panel::PanelAction::Ran(_) => {}
+                }
+            }
+            if save {
+                self.effectcraft_save(&mut p);
+            }
+        }
+        self.effectcraft.panel = Some(p);
+    }
+
+    /// Save the Timeline's project (asking the app first: it may have opened it since).
+    fn effectcraft_save(&mut self, p: &mut crate::effectcraft_panel::Panel) {
+        let owns = !matches!(io::app_state_now(p.host.path()), io::AppState::Closed | io::AppState::Other);
+        match p.host.save(owns) {
+            Ok(()) => self.toast("Saved the EffectCraft project"),
+            Err(e) => self.toast(e),
+        }
+    }
+
+    /// The open Timeline on the canvas, under its card ([`strips`]); drawn after the canvas, so
+    /// it sits over it where the card is this frame. Its header (comp, "● unsaved" and Save, or
+    /// why it's read-only; ✕ closes it), EffectCraft's Timeline, Effect Controls to its right, the
+    /// right edge that widens it, the keyboard focus, and the card following its edits.
+    pub(crate) fn effectcraft_panel_ui(&mut self, ctx: &egui::Context) {
+        let Some(mut p) = self.effectcraft.panel.take() else {
+            self.effectcraft.panel_rects = None;
+            return;
+        };
         if !p.open {
+            self.effectcraft.panel_rects = None;
             self.effectcraft.panel = Some(p);
             return;
         }
         let t = crate::theme::Tokens::get(ctx);
+        let (geom, comp) = match self.session.doc() {
+            Ok(d) => (
+                strips::geom_of(d, p.card, true, 0),
+                d.node(p.card).and_then(|n| n.effectcraft.as_deref()).map(|c| c.comp.clone()).unwrap_or_default(),
+            ),
+            Err(_) => (None, String::new()),
+        };
         let mut close = false;
         let mut save = false;
-        // Its height: as dragged at its top edge (kept in the preferences), else 40 % of the window
-        // below the tabs; never less than PANEL_MIN, always leaving the canvas PANEL_CANVAS_MIN.
-        let room = ui.available_rect_before_wrap();
-        let max = (room.height() - PANEL_CANVAS_MIN).max(PANEL_MIN);
-        let asked = self.session.prefs.effectcraft_panel_height.filter(|h| h.is_finite()).unwrap_or(room.height() * 0.4);
-        p.height = asked.clamp(PANEL_MIN, max);
-        let shown = egui::Panel::bottom("effectcraft_timeline")
-            .resizable(false)
-            .exact_size(p.height)
-            .frame(egui::Frame::NONE.fill(t.panel).stroke(egui::Stroke::new(1.0, t.border)))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.add_space(8.0);
-                    ui.strong("EffectCraft Timeline");
-                    if let Some(why) = p.host.read_only() {
-                        ui.label(egui::RichText::new(why).color(t.text_secondary));
-                    } else if p.host.is_dirty() {
-                        ui.label("● unsaved");
-                        save = ui.button("Save").clicked();
+        let mut screen: Vec<Rect> = Vec::new();
+        let mut fx_screen: Option<Rect> = None;
+        let mut edge: Option<(egui::Response, Option<f64>)> = None;
+        if let Some((g, xf)) = geom.and_then(|g| Some((g, strips::layer_transform(self, g.k)?))) {
+            // One area in a layer egui scales and moves like the canvas: painting and input.
+            let id = egui::Id::new("effectcraft_canvas_timeline");
+            ctx.set_transform_layer(egui::LayerId::new(egui::Order::Middle, id), xf);
+            let strip = strips::to_panel(g.strip, g.k);
+            let fx = g.fx.map(|f| strips::to_panel(f, g.k));
+            let whole = fx.map_or(strip, |f| strip.union(f));
+            let canvas = self.canvas.rect;
+            let inv = xf.inverse();
+            let clip = Rect::from_two_pos(inv * canvas.min, inv * canvas.max);
+            let visible = |r: Rect| Some((xf * r).intersect(canvas)).filter(|r| r.is_positive());
+            screen = [Some(strip), fx].into_iter().flatten().filter_map(visible).collect();
+            fx_screen = fx.and_then(visible);
+            // Space held pans the canvas and a pinch or ⌘-scroll zooms it: the Timeline sits out.
+            let zooming = ctx.input(|i| (i.zoom_delta() - 1.0).abs() > 1e-4);
+            let interactable = !self.canvas.space_pan && !zooming;
+            egui::Area::new(id).order(egui::Order::Middle).fixed_pos(whole.min).constrain(false).movable(false).interactable(interactable).show(
+                ctx,
+                |ui| {
+                    ui.set_clip_rect(clip);
+                    let painter = ui.painter().clone();
+                    for r in [Some(strip), fx].into_iter().flatten() {
+                        painter.rect_filled(r, CornerRadius::same(4), t.panel);
+                        painter.rect_stroke(r, CornerRadius::same(4), Stroke::new(1.0, t.border), egui::StrokeKind::Outside);
                     }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        close = ui.button("Close").clicked();
+                    let head = Rect::from_min_size(strip.min, vec2(strip.width(), strips::HEADER));
+                    painter.hline(head.x_range(), head.max.y, Stroke::new(1.0, t.border));
+                    let bar = egui::UiBuilder::new().max_rect(head.shrink2(vec2(6.0, 1.0))).layout(egui::Layout::left_to_right(egui::Align::Center));
+                    ui.scope_builder(bar, |ui| {
+                        ui.label("▾");
+                        ui.strong(&comp);
+                        if let Some(why) = p.host.read_only() {
+                            ui.label(egui::RichText::new(why).color(t.text_secondary));
+                        } else if p.host.is_dirty() {
+                            ui.label("● unsaved");
+                            save = ui.button("Save").clicked();
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            close = ui.button("✕").on_hover_text("Close the Timeline").clicked();
+                        });
                     });
-                });
-                let rect = ui.available_rect_before_wrap();
-                let fx = p.host.show(ui, rect);
-                // (the panels paint into the rect: claim it, so the panel keeps its height)
-                ui.allocate_rect(rect, egui::Sense::hover());
-                fx
-            });
-        // The top edge sizes it.
-        if let Some(h) = panel_top_edge(ui, shown.response.rect, p.height) {
-            let (h, kept) = if h.is_infinite() { (room.height() * 0.4, None) } else { (h, Some(h.clamp(PANEL_MIN, max))) };
-            p.height = h.clamp(PANEL_MIN, max);
-            self.session.prefs.effectcraft_panel_height = kept;
-            self.panels_unsaved = true;
+                    let body = Rect::from_min_max(pos2(strip.min.x, head.max.y + 1.0), strip.max);
+                    p.host.show(ui, body, fx);
+                    // The right edge widens it (and pushes what it would cover).
+                    let grab = Rect::from_x_y_ranges((strip.max.x - strips::EDGE / 2.0)..=(strip.max.x + strips::EDGE / 2.0), strip.y_range());
+                    let resp = ui.interact(grab, id.with("right_edge"), egui::Sense::drag());
+                    if resp.hovered() || resp.dragged() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                        painter.vline(strip.max.x, strip.y_range(), Stroke::new(2.0, t.accent));
+                    }
+                    let x = resp.interact_pointer_pos().map(|q| f64::from(q.x) * g.k);
+                    edge = Some((resp, x));
+                    ui.advance_cursor_after_rect(whole);
+                },
+            );
         }
-        self.effectcraft.panel_rect = Some((ctx.cumulative_pass_nr(), shown.response.rect));
-        // The panel has the keyboard from a click in it until a click elsewhere.
-        if let Some(press) = ctx.input(|i| if i.pointer.any_pressed() { i.pointer.interact_pos() } else { None }) {
-            p.focused = shown.response.rect.contains(press);
+        self.effectcraft.panel_rects = (!screen.is_empty()).then(|| (ctx.cumulative_pass_nr(), screen.clone()));
+        // The Timeline has the keyboard from a click in it until a click elsewhere (not one in a
+        // menu it opened).
+        if !egui::Popup::is_any_open(ctx)
+            && let Some(press) = ctx.input(|i| if i.pointer.any_pressed() { i.pointer.interact_pos() } else { None })
+        {
+            p.focused = screen.iter().any(|r| r.contains(press));
             if p.focused {
-                let fx = shown.inner.is_some_and(|r| r.contains(press));
+                let fx = fx_screen.is_some_and(|r| r.contains(press));
                 p.host.set_focus(if fx {
                     effectcraft_ui_egui::dock::PanelKind::EffectControls
                 } else {
@@ -1174,23 +1265,8 @@ impl FigApp {
                 });
             }
         }
-        if p.focused {
-            for a in p.host.keys(ctx) {
-                match a {
-                    crate::effectcraft_panel::PanelAction::Play => {
-                        self.run("effectcraft.togglePlay", json!({"id": p.card}));
-                    }
-                    crate::effectcraft_panel::PanelAction::Save => save = true,
-                    crate::effectcraft_panel::PanelAction::Ran(_) => {}
-                }
-            }
-        }
         if save {
-            let owns = !matches!(io::app_state_now(p.host.path()), io::AppState::Closed | io::AppState::Other);
-            match p.host.save(owns) {
-                Ok(()) => self.toast("Saved the EffectCraft project"),
-                Err(e) => self.toast(e),
-            }
+            self.effectcraft_save(&mut p);
         }
         // Edits re-render the card from this session (pictures, sound and precomps).
         let rev = effectcraft_ui_egui::panels::timeline::TimelineHost::session(&p.host).revision;
@@ -1203,17 +1279,22 @@ impl FigApp {
         }
         self.effectcraft_sync_playhead(&mut p);
         // The colour eyedropper samples FigCraft's canvas under the pointer.
-        let pointer = if p.host.picking() { self.effectcraft_canvas_color(ctx, &p, shown.response.rect) } else { None };
+        let pointer = if p.host.picking() { self.effectcraft_canvas_color(ctx, &p, &screen) } else { None };
         self.effectcraft.picking = p.host.pick(ctx, pointer);
+        let card = p.card;
         if close {
             p.open = false;
+            self.effectcraft.panel_rects = None;
             if !p.host.is_dirty() {
                 self.effectcraft_send(io::Job::Override { path: p.path(), snapshot: None });
                 return;
             }
-            self.toast("The EffectCraft edits are kept: double-click the card to save them");
+            self.toast("The EffectCraft edits are kept: click its strip to save them");
         }
         self.effectcraft.panel = Some(p);
+        if let Some((resp, x)) = edge {
+            strips::widen_input(self, card, &resp, x);
+        }
     }
 }
 

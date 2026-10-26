@@ -1,5 +1,6 @@
-//! Fork-only (`effectcraft-inproc`): EffectCraft's real Timeline panel docked at the bottom of
-//! FigCraft, editing the comp of the EffectCraft card that was double-clicked.
+//! Fork-only (`effectcraft-inproc`): EffectCraft's real Timeline on FigCraft's canvas, right under
+//! the EffectCraft card that was double-clicked (or whose closed strip was clicked), editing its
+//! comp. Where it sits and how it scales with the canvas: `effectcraft_ui::strips`.
 //!
 //! The panel is `effectcraft_ui_egui::panels::timeline::show` drawn against [`EcHost`], a
 //! [`TimelineHost`] over an in-process EffectCraft session of the card's saved `.ecproj`.
@@ -10,6 +11,9 @@
 //!   ⌘S while the panel has focus saves the `.ecproj` with EffectCraft's own (atomic) save. When
 //!   the app has it open, or can't say what it has open, the panel is read-only: it says "open in
 //!   EffectCraft — edit there", and anything that changes the project is undone at once.
+//! - **Pointer.** Clicks, drags and scroll over the Timeline and its Effect Controls are theirs
+//!   (the canvas leaves them alone); ⌘-scroll and pinch still zoom the canvas, and Space held
+//!   pans it.
 //! - **Keys.** While the panel has focus (the last click was in it) its keys go to EffectCraft's
 //!   own shortcut dispatch (`panels::timeline::keys::forward_shortcuts`) with Elias's own
 //!   EffectCraft shortcuts (read from EffectCraft's settings folder, never written; EffectCraft's
@@ -24,7 +28,8 @@
 //!   scrubbing either moves both, and Space plays the card with the Timeline following.
 //! - **Undo.** ⌘Z / ⇧⌘Z (⌘Y) undo and redo EffectCraft's edits while the panel has focus and
 //!   FigCraft's otherwise; neither reaches the other's history.
-//! - Effect Controls (the selected layer's effects) dock left of the Timeline when there is room.
+//! - Effect Controls (the selected layer's effects) sit to the right of the Timeline, on the
+//!   canvas too.
 //! - **Graph Editor and speed curves.** The header's Graph button or Shift+F3 shows EffectCraft's
 //!   Graph Editor in the Timeline's place (F fits its graphs); the footer's ∿ button shows speed
 //!   curves in the property rows (on by default). Both edit through this host like any Timeline
@@ -46,10 +51,6 @@ use figcraft_ec_inproc::effectcraft_engine::Session;
 use figcraft_ec_inproc::effectcraft_engine::project::ItemId;
 use serde_json::{Value, json};
 
-/// Effect Controls' width beside the Timeline, and the panel width it needs to show.
-const EFFECT_CONTROLS_WIDTH: f32 = 300.0;
-const EFFECT_CONTROLS_MIN_ROOM: f32 = 900.0;
-
 /// What read-only panels say.
 pub const READ_ONLY: &str = "Open in EffectCraft — edit there";
 
@@ -64,7 +65,7 @@ pub struct EcHost {
     comp: u64,
     /// The session revision the card's frames were last pointed at.
     pub(crate) shown_revision: u64,
-    /// The docked panel with the keyboard (Timeline or Effect Controls).
+    /// The panel with the keyboard (Timeline or Effect Controls).
     focus: PanelKind,
     /// What FigCraft's canvas shows under the pointer this frame, for an armed eyedropper.
     pub(crate) pointer: Option<PointerColor>,
@@ -157,17 +158,11 @@ impl EcHost {
         r
     }
 
-    /// One frame of the panels in `rect`: Effect Controls on the left (when there is room), the
-    /// Timeline in the rest. Returns the Effect Controls' rectangle. Never panics into FigCraft.
-    pub fn show(&mut self, ui: &mut egui::Ui, rect: egui::Rect) -> Option<egui::Rect> {
+    /// One frame of the panels: the Timeline in `timeline`, Effect Controls in `fx` (when given).
+    /// Never panics into FigCraft.
+    pub fn show(&mut self, ui: &mut egui::Ui, timeline: egui::Rect, fx: Option<egui::Rect>) {
         let before = self.ec.session().revision;
         self.auto.begin_frame();
-        let fx =
-            (rect.width() >= EFFECT_CONTROLS_MIN_ROOM).then(|| egui::Rect::from_min_size(rect.min, egui::vec2(EFFECT_CONTROLS_WIDTH, rect.height())));
-        let timeline = match fx {
-            Some(f) => egui::Rect::from_min_max(egui::pos2(f.max.x + 1.0, rect.min.y), rect.max),
-            None => rect,
-        };
         let drew = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             if let Some(f) = fx {
                 effectcraft_ui_egui::panels::effect_controls::show(self, ui, f);
@@ -179,7 +174,6 @@ impl EcHost {
             self.ui.status = "The EffectCraft Timeline hit an internal error".into();
         }
         self.keep_read_only(before);
-        fx
     }
 
     /// The panel's keys this frame (it has focus): Space plays the card and ⌘S saves (FigCraft
@@ -270,7 +264,7 @@ impl EcHost {
         Some([f32::from(p[0]) / 255.0, f32::from(p[1]) / 255.0, f32::from(p[2]) / 255.0])
     }
 
-    /// Which of the docked panels has the keyboard.
+    /// Which of the panels has the keyboard.
     pub fn set_focus(&mut self, panel: PanelKind) {
         self.focus = panel;
         self.ui.focused = panel;
@@ -349,14 +343,13 @@ impl TimelineHost for EcHost {
     }
 }
 
-/// The docked panel: its host (kept while hidden, unsaved edits and all), the card it edits,
+/// The open Timeline: its host (kept while closed, unsaved edits and all), the card it edits,
 /// whether it is showing and has the keyboard.
 pub struct Panel {
     pub host: EcHost,
     pub card: NodeId,
     pub open: bool,
     pub focused: bool,
-    pub height: f32,
     /// The card's and the Timeline's times as last made the same (comp seconds).
     pub synced: Option<(f64, f64)>,
 }

@@ -1,10 +1,10 @@
 //! Fork-only (`effectcraft-inproc`): grab a layer of the comp right on its EffectCraft card, as
-//! in EffectCraft's Composition viewer, while the docked panel edits that card.
+//! in EffectCraft's Composition viewer, while the Timeline edits that card.
 //!
-//! - **When.** The docked panel is open for the card and may edit (not read-only), the card is
+//! - **When.** The Timeline is open for the card and may edit (not read-only), the card is
 //!   not playing, and the Move tool is on. Otherwise the card behaves as ever.
 //! - **What.** The selected layers show their box and eight handles. A press on a layer selects
-//!   it (⇧ adds or removes it; the docked Timeline follows) and dragging moves the selection
+//!   it (⇧ adds or removes it; the Timeline follows) and dragging moves the selection
 //!   (⇧: along one axis). Dragging a handle scales (corners both axes, edges one; ⇧ on a corner
 //!   keeps the proportions). A layer covering the whole comp (a background) is grabbed by its
 //!   handles only, so a press on it still moves the card. A press on no layer is FigCraft's.
@@ -163,7 +163,7 @@ pub(crate) fn handle_cursor(handle: usize) -> CursorIcon {
     }
 }
 
-/// The docked panel's host, when it edits card `card` and handles apply (see the module doc).
+/// The Timeline's host, when it edits card `card` and handles apply (see the module doc).
 fn editing<'a>(app: &'a FigApp, card: NodeId, c: &EcComp) -> Option<&'a EcHost> {
     let p = app.effectcraft.panel.as_ref().filter(|p| p.open && p.card == card)?;
     let ec = &app.session.effectcraft;

@@ -1756,10 +1756,10 @@ impl FigApp {
                     right::right_panel(self, ui)
                 });
         }
-        // Fork: EffectCraft's Timeline docked under the canvas.
+        // Fork: the keys of the EffectCraft Timeline on the canvas, before the canvas sees them.
         #[cfg(feature = "effectcraft-inproc")]
         if !hidden {
-            self.effectcraft_panel_ui(ui, &ctx);
+            self.effectcraft_panel_keys(&ctx);
         }
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(t.canvas)).show(ui, |ui| {
             let worker = self.worker.take();
@@ -1777,6 +1777,12 @@ impl FigApp {
                 }
             }
         });
+        // Fork: the EffectCraft Timeline on the canvas, under its card (drawn over the canvas, where
+        // the canvas is this frame).
+        #[cfg(feature = "effectcraft-inproc")]
+        if !hidden {
+            self.effectcraft_panel_ui(&ctx);
+        }
         // The panels' edges, over the canvas and the panels (drawn after them: they take the press).
         for (name, x, shown, grows) in edges {
             if let Some(w) = Self::panel_edge(ui, name, x, rows, shown, grows) {
