@@ -196,6 +196,45 @@ fn the_graph_editor_opens_and_draws_in_the_docked_panel() {
     assert!(!ro.is_dirty());
 }
 
+/// EffectCraft's Timeline keys that its app runs itself work in the docked panel too: P reveals
+/// Position (taken from FigCraft's Pen), Collapse All clears.
+#[test]
+fn timeline_reveal_keys_work_in_the_docked_panel() {
+    let (p, c) = sample("reveal");
+    let mut h = EcHost::open(&p, &c, false).unwrap();
+    let ctx = egui::Context::default();
+    let mut press = input();
+    press.events = vec![key(egui::Key::P, egui::Modifiers::NONE)];
+    let mut actions = vec![];
+    let mut left = 1;
+    let _ = ctx.run_ui(press, |_| {
+        actions = h.keys(&ctx);
+        left = ctx.input(|i| i.events.iter().filter(|e| matches!(e, egui::Event::Key { key: egui::Key::P, .. })).count());
+    });
+    assert!(actions.contains(&PanelAction::Ran("timeline.reveal.position".into())), "{actions:?}");
+    assert_eq!(left, 0, "FigCraft's P (Pen) never saw it");
+    assert_eq!(h.ui().timeline.reveal, ["position"]);
+    h.invoke(&ctx, "timeline.collapseAll", json!({})).unwrap();
+    assert!(h.ui().timeline.reveal.is_empty());
+}
+
+/// An edit while a precomp row expanded in the Timeline has the focus never lands in the
+/// parent comp: here the focused instance is gone, so the edit is refused.
+#[test]
+fn edits_of_an_expanded_precomp_never_reach_the_parent() {
+    let (p, c) = sample("inline");
+    let mut h = EcHost::open(&p, &c, false).unwrap();
+    let ctx = egui::Context::default();
+    let n = layers(&h);
+    let rev = h.session().revision;
+    h.ui_mut().timeline.inline_focus = Some(vec![c.comp_id, 987_654]);
+    assert!(h.invoke(&ctx, "layer.newSolid", json!({"color": "#00ff00", "width": 8, "height": 8})).is_err());
+    assert!(h.invoke(&ctx, "keys.easyEase", json!({})).is_err());
+    assert_eq!(layers(&h), n);
+    assert_eq!(h.session().revision, rev, "the parent comp is untouched");
+    assert_eq!(h.session().active_comp_id().map(|i| i.0), Some(c.comp_id));
+}
+
 /// Speed curves in the property rows are on in the docked Timeline (footer ∿).
 #[test]
 fn speed_curves_show_in_the_docked_rows_by_default() {

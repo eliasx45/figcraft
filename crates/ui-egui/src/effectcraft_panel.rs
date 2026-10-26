@@ -11,9 +11,15 @@
 //!   the app has it open, or can't say what it has open, the panel is read-only: it says "open in
 //!   EffectCraft — edit there", and anything that changes the project is undone at once.
 //! - **Keys.** While the panel has focus (the last click was in it) its keys go to EffectCraft's
-//!   own shortcut dispatch (`panels::timeline::keys::forward_shortcuts`); Space plays the card and
-//!   ⌘S saves. They are taken before FigCraft's shortcuts, so P, R, T… work on the canvas again
-//!   as soon as it is clicked.
+//!   own shortcut dispatch (`panels::timeline::keys::forward_shortcuts`) with Elias's own
+//!   EffectCraft shortcuts (read from EffectCraft's settings folder, never written; EffectCraft's
+//!   defaults without them); Space plays the card and ⌘S saves. The Timeline commands EffectCraft's
+//!   app runs itself (reveal keys P S R T…, U, zoom - =, D, B N, [ ], Graph Editor…) run through
+//!   `panels::timeline::hosted`. They are taken before FigCraft's shortcuts, so P, R, T… work on
+//!   the canvas again as soon as it is clicked.
+//! - **Expanded precomps.** With a precomp's row expanded in the Timeline focused, edits go to that
+//!   precomp (`comp.inlineEdit`, as in EffectCraft); edits that can't be redirected are refused
+//!   with a status message, never applied to the card's comp.
 //! - **One playhead.** The card's playhead and the Timeline's current time follow each other:
 //!   scrubbing either moves both, and Space plays the card with the Timeline following.
 //! - **Undo.** ⌘Z / ⇧⌘Z (⌘Y) undo and redo EffectCraft's edits while the panel has focus and
@@ -22,9 +28,7 @@
 //! - **Graph Editor and speed curves.** The header's Graph button or Shift+F3 shows EffectCraft's
 //!   Graph Editor in the Timeline's place (F fits its graphs); the footer's ∿ button shows speed
 //!   curves in the property rows (on by default). Both edit through this host like any Timeline
-//!   edit: same undo, read-only guard and card refresh. Their two UI-only commands
-//!   (`timeline.graphEditor`, `timeline.graph.fit`) run through EffectCraft's
-//!   `panels::timeline::hosted`, which also binds their keys in this session.
+//!   edit: same undo, read-only guard and card refresh.
 //! - What the Timeline still needs EffectCraft's whole app for (suggestions overlay, RAM chip,
 //!   EffectCraft's own dialogs…, `docs/embedding-panels.md` in EffectCraft) is left out by the
 //!   panel itself.
@@ -71,7 +75,7 @@ impl EcHost {
     /// (or can't say), so the panel is read-only.
     pub fn open(path: &Path, comp: &EcComp, app_owns: bool) -> Result<EcHost, String> {
         let mut ec = InProc::open(path)?;
-        hosted::install(ec.session_mut());
+        bind_keys(ec.session_mut());
         let comp_ref = if comp.comp_id > 0 { json!(comp.comp_id) } else { json!(comp.comp) };
         let id = ec.comp_id(&comp_ref)?;
         ec.session_mut().open_comp(ItemId(id));
@@ -129,19 +133,24 @@ impl EcHost {
         if self.ec.session().revision != before && self.ec.session().is_dirty() {
             // Undo couldn't take it back: the project as saved.
             if self.ec.reload().is_ok() {
-                hosted::install(self.ec.session_mut());
+                bind_keys(self.ec.session_mut());
                 self.ec.session_mut().open_comp(ItemId(self.comp));
             }
         }
         self.ui.status = READ_ONLY.to_string();
     }
 
-    /// Run `id` like a menu item would, read-only kept.
+    /// Run engine command `id` like a menu item would, read-only kept. While an edit of a precomp
+    /// expanded in the Timeline runs ([`hosted::inline`]), it goes to that precomp
+    /// (`comp.inlineEdit`, [`hosted::engine_command`]) as in EffectCraft.
     fn guarded_run(&mut self, id: &str, params: Value) -> Result<Value, String> {
         let before = self.ec.session().revision;
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.ec.session_mut().execute(id, params).map_err(|e| e.to_string())))
+        let (cmd, params) = hosted::engine_command(self, id, params);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.ec.session_mut().execute(&cmd, params).map_err(|e| e.to_string())))
             .unwrap_or_else(|_| Err(format!("EffectCraft: {id} failed (an internal error)")));
         self.keep_read_only(before);
+        // U's revealed properties, toasts (the rest of the session's events are app chrome).
+        hosted::handle_events(self);
         if self.read_only.is_some() && self.ec.session().revision != before {
             return Err(READ_ONLY.to_string());
         }
@@ -202,9 +211,9 @@ impl EcHost {
                 }
             }
         }
-        // A session opened again (read-only taken back) needs the Graph Editor's keys again.
+        // A session opened again (read-only taken back) needs the Timeline's keys again.
         if !hosted::installed(self.ec.session()) {
-            hosted::install(self.ec.session_mut());
+            bind_keys(self.ec.session_mut());
         }
         let focus = self.focus;
         let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -268,6 +277,15 @@ impl EcHost {
     }
 }
 
+/// The Timeline's own commands bound in `session`, with Elias's EffectCraft shortcuts (read from
+/// EffectCraft's settings folder, never written) when he has any, else EffectCraft's defaults.
+fn bind_keys(session: &mut Session) {
+    hosted::install(session);
+    if !hosted::use_user_shortcuts(session) {
+        log::info!("EffectCraft Timeline: no EffectCraft shortcuts found, using the default keys");
+    }
+}
+
 /// What a panel key asks FigCraft to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PanelAction {
@@ -305,9 +323,13 @@ impl TimelineHost for EcHost {
     fn id_scope(&self) -> Option<egui::Id> {
         Some(egui::Id::new(("figcraft-effectcraft-timeline", self.ec.path())))
     }
-    /// The Timeline's UI-only commands (Graph Editor switch and fit) change only the panel's
-    /// state; everything else runs on the session, read-only kept.
+    /// As EffectCraft's menus: edits in an expanded precomp go to it ([`hosted::inline`]), the
+    /// Timeline's UI commands (Graph Editor, zoom, reveal keys…) run on the panel
+    /// ([`hosted::run`]), everything else on the session, read-only kept.
     fn invoke(&mut self, ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
+        if let Some(r) = hosted::inline(self, ctx, id, &params) {
+            return r;
+        }
         if let Some(r) = hosted::run(self, ctx, id, &params) {
             return r;
         }
