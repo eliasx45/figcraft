@@ -3,8 +3,9 @@
 //! Timeline uses ([`crate::effectcraft_panel::EcHost`]): same undo, ⌘S save, read-only guard and
 //! live card refresh.
 //!
-//! - **Project tab.** The column right of the open Timeline has two tabs, Effect Controls and
-//!   Project. Project is EffectCraft's real Project panel (`panels::project::show`, hostable since
+//! - **Project tab.** The column right of the open Timeline has tabs Effect Controls, Project,
+//!   Text, Markers and Motion Library (the last three: [`tabs`]). Project is EffectCraft's real
+//!   Project panel (`panels::project::show`, hostable since
 //!   EffectCraft's EMBED9) drawn against [`ProjectHost`], a thin wrapper over the panel's host:
 //!   items, folders, labels, renames, search, Import (double-click the empty list: a file
 //!   dialog), New Folder, and dragging items into the Timeline (EffectCraft's own drag payload) or
@@ -45,6 +46,11 @@ use serde_json::{Map, Value, json};
 use crate::FigApp;
 use crate::effectcraft_panel::EcHost;
 
+/// Fork: EffectCraft's Character / Paragraph, Markers and Motion Library panels as more tabs in
+/// the column.
+#[path = "effectcraft_tabs.rs"]
+pub(crate) mod tabs;
+
 /// The tab row over Effect Controls / Project (panel units).
 pub(crate) const TABS: f32 = 22.0;
 /// Most files one drop imports.
@@ -61,7 +67,21 @@ pub(crate) enum Side {
     #[default]
     EffectControls,
     Project,
+    /// Character over Paragraph ([`tabs::text`]).
+    Text,
+    Markers,
+    /// The Motion Library ([`tabs::library`]).
+    Library,
 }
+
+/// The column's tabs: (tab, label, label when the row is narrow, automation key).
+const SIDES: [(Side, &str, &str, &str); 5] = [
+    (Side::EffectControls, "Effect Controls", "Effects", "effectControls"),
+    (Side::Project, "Project", "Project", "project"),
+    (Side::Text, "Text", "Text", "text"),
+    (Side::Markers, "Markers", "Markers", "markers"),
+    (Side::Library, "Motion Library", "Library", "library"),
+];
 
 fn side_id(host: &EcHost) -> egui::Id {
     egui::Id::new(("figcraft-ec-side", host.path()))
@@ -81,6 +101,9 @@ pub(crate) fn side_panel(ctx: &egui::Context, host: &EcHost) -> PanelKind {
     match side_of(ctx, host) {
         Side::EffectControls => PanelKind::EffectControls,
         Side::Project => PanelKind::Project,
+        Side::Text => PanelKind::Character,
+        Side::Markers => PanelKind::Markers,
+        Side::Library => PanelKind::MotionLibrary,
     }
 }
 
@@ -123,7 +146,11 @@ pub(crate) fn side(host: &mut EcHost, ui: &mut egui::Ui, rect: Rect) {
     painter.hline(tabs.x_range(), tabs.max.y, Stroke::new(1.0, t.separator));
     let mut side = side_of(&ctx, host);
     let mut x = tabs.min.x + 6.0;
-    for (s, label, key) in [(Side::EffectControls, "Effect Controls", "effectControls"), (Side::Project, "Project", "project")] {
+    // Short labels when the long ones don't fit the column.
+    let long: f32 = SIDES.iter().map(|(_, long, ..)| painter.layout_no_wrap(long.to_string(), Tokens::semibold(11.5), t.text).size().x + 18.0).sum();
+    let short = long + 6.0 > tabs.width();
+    for (s, long, brief, key) in SIDES {
+        let label = if short { brief } else { long };
         let on = side == s;
         let font = if on { Tokens::semibold(11.5) } else { Tokens::ui(11.5) };
         let g = painter.layout_no_wrap(label.to_string(), font, if on { t.text } else { t.text_dim });
@@ -154,6 +181,9 @@ pub(crate) fn side(host: &mut EcHost, ui: &mut egui::Ui, rect: Rect) {
             let asked = std::mem::take(&mut h.asked);
             push_asks(&ctx, asked);
         }
+        Side::Text => tabs::text(host, ui, body),
+        Side::Markers => tabs::markers(host, ui, body),
+        Side::Library => tabs::library(host, ui, body),
     }
 }
 
@@ -838,6 +868,8 @@ pub(crate) fn frame(app: &mut FigApp, ctx: &egui::Context) {
     new_comp_dialog(app, ctx);
     // Pre-compose, Interpret Footage, Replace Footage.
     super::dialogs::frame(app, ctx);
+    // The Motion Library plug's requests, EffectCraft's Marker dialog.
+    tabs::frame(app, ctx);
 }
 
 #[cfg(test)]

@@ -452,6 +452,10 @@ impl TimelineHost for EcHost {
         if let Some(r) = crate::effectcraft_ui::dialogs::intercept(self, ctx, id, &params) {
             return r;
         }
+        // The Motion Library's own commands (motionLibrary.*): its panel's code, on this host.
+        if let Some(r) = crate::effectcraft_ui::project::tabs::intercept(self, ctx, id, &params) {
+            return r;
+        }
         if let Some(r) = hosted::run(self, ctx, id, &params) {
             return r;
         }
@@ -461,6 +465,15 @@ impl TimelineHost for EcHost {
     /// each frame while a colour eyedropper is armed).
     fn pointer_color(&mut self, _ctx: &egui::Context) -> Option<PointerColor> {
         self.pointer
+    }
+    /// The Marker dialog (a double-click on a marker) in a FigCraft window
+    /// (`effectcraft_tabs::request_dialog`); the others aren't hosted here.
+    fn request_dialog(&mut self, request: effectcraft_ui_egui::panels::timeline::DialogRequest) -> Result<Value, String> {
+        crate::effectcraft_ui::project::tabs::request_dialog(self, request)
+    }
+    /// The Motion Library plug reaches this session through FigCraft's own local port.
+    fn library_port(&self) -> Option<u16> {
+        crate::effectcraft_ui::project::tabs::bridge_port()
     }
     fn run_engine(&mut self, _ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
         let r = self.guarded_run(id, params);
