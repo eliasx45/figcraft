@@ -60,6 +60,11 @@ pub(crate) mod project;
 #[path = "effectcraft_dialogs.rs"]
 pub(crate) mod dialogs;
 
+/// Fork: the right-click menu of the card the Timeline edits is EffectCraft's viewer menu.
+#[cfg(feature = "effectcraft-inproc")]
+#[path = "effectcraft_menu.rs"]
+pub(crate) mod menu;
+
 /// Play / explode button radius (screen points).
 const BUTTON: f32 = 10.0;
 /// Texture memory kept for card frames (bytes).

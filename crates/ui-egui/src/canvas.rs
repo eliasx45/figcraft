@@ -788,6 +788,12 @@ fn input(app: &mut FigApp, ui: &mut Ui, resp: &egui::Response) -> bool {
         return false;
     }
     if resp.secondary_clicked() {
+        // Fork: on the card the EffectCraft Timeline edits, EffectCraft's own viewer menu
+        // (`effectcraft_ui::menu`; ⌥ keeps FigCraft's).
+        #[cfg(feature = "effectcraft-inproc")]
+        if crate::effectcraft_ui::menu::claims(app, pos, mods) {
+            return true;
+        }
         open_context_menu(app, pos, mods.command);
         return true;
     }

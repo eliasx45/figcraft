@@ -1789,6 +1789,8 @@ impl FigApp {
             self.effectcraft_panel_ui(&ctx);
             // Files dropped on cards, the Project tab's asks, the New Composition dialog.
             crate::effectcraft_ui::project::frame(self, &ctx);
+            // The card's right-click menu (EffectCraft's viewer menu) and its dialogs.
+            crate::effectcraft_ui::menu::frame(self, &ctx);
         }
         // The panels' edges, over the canvas and the panels (drawn after them: they take the press).
         for (name, x, shown, grows) in edges {
