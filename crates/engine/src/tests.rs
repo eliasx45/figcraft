@@ -427,6 +427,10 @@ fn every_command_survives_junk_params() {
         // Rotation origins and placing with a tool as junk.
         json!({"tool": [1], "x": 1e308, "y": "NaN", "reset": "maybe", "on": {"x": 1}}),
         json!({"tool": "frame", "x": -1e308, "y": 1e308, "reset": true, "on": "yes"}),
+        // New EffectCraft comps: projects, settings and places as junk.
+        json!({"project": [1], "name": {"x": 1}, "width": 1e308, "height": "NaN", "frameRate": -1, "duration": 1e308, "background": 7, "cardWidth": -1e308}),
+        json!({"project": "\u{0}", "name": "", "width": 0, "height": 30001, "frameRate": 1000, "duration": 0, "background": "#zz", "x": "NaN"}),
+        json!({"project": "/nope/x.ecproj", "name": "\u{1F4A5}".repeat(300), "width": 64, "height": 36, "frameRate": 25, "duration": 2, "background": "#102030", "x": 1e308}),
     ];
     for spec in all_commands() {
         if matches!(

@@ -1040,6 +1040,11 @@ impl FigApp {
                 }
                 "dialog.preferences" => self.ui.preferences = true,
                 "effectcraft.explode" | "effectcraft.reveal" => self.effectcraft_request_ui(&r.kind, &r.data),
+                // Fork: a new EffectCraft comp as a card (its settings dialog first without a size).
+                #[cfg(feature = "effectcraft-inproc")]
+                "effectcraft.newComp" | "dialog.effectcraftNewComp" => crate::effectcraft_ui::project::request(self, &r.kind, &r.data),
+                #[cfg(not(feature = "effectcraft-inproc"))]
+                "effectcraft.newComp" | "dialog.effectcraftNewComp" => self.toast("New EffectCraft comps need FigCraft's EffectCraft build"),
                 "dialog.missingFonts" => missing_fonts::request(self),
                 "panel.shortcuts" => self.ui.shortcuts_panel = !self.ui.shortcuts_panel,
                 "palette.actions" => menus::toggle_palette(&mut self.ui),
@@ -1782,6 +1787,8 @@ impl FigApp {
         #[cfg(feature = "effectcraft-inproc")]
         if !hidden {
             self.effectcraft_panel_ui(&ctx);
+            // Files dropped on cards, the Project tab's asks, the New Composition dialog.
+            crate::effectcraft_ui::project::frame(self, &ctx);
         }
         // The panels' edges, over the canvas and the panels (drawn after them: they take the press).
         for (name, x, shown, grows) in edges {

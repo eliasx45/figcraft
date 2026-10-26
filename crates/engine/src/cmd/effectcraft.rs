@@ -90,7 +90,73 @@ pub fn specs() -> Vec<CommandSpec> {
                 Ok(json!({"requested": true, "id": id, "time": round6(t)}))
             }
         ),
+        spec!(
+            "effectcraft.newComp",
+            "New EffectCraft comp",
+            "{project? (.ecproj path; default the selected card's project, else a new project saved next to this file), name?, width?, height? (pixels, 1..30000; both skip the dialog), frameRate? (0.01..999), duration? (seconds, up to 3 h), background? (#hex), x?, y?, cardWidth?}  the desktop app (fork, effectcraft-inproc) makes the comp with EffectCraft's own comp.new in the project's in-process session (unsaved until ⌘S in its Timeline; a new project is saved at once), places it as a card (right of the selected card, else at x/y or the view's centre) and opens its Timeline. Without width and height it first shows EffectCraft's New Composition dialog (a dialog request: never from the control channel) → {requested, project, dialog}",
+            false,
+            new_comp
+        ),
     ]
+}
+
+/// The longest new comp (seconds) and its largest side (pixels), as EffectCraft allows.
+const NEW_COMP_MAX_SECONDS: f64 = 3.0 * 3600.0;
+const NEW_COMP_MAX_SIDE: f64 = 30_000.0;
+
+/// Ask the desktop app for a new EffectCraft comp (see the spec). The engine knows no EffectCraft:
+/// it checks the parameters and says where the comp goes; the app makes it.
+fn new_comp(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "effectcraft.newComp";
+    let project = match get(p, "project") {
+        None => None,
+        Some(Value::String(x)) if !x.trim().is_empty() && !x.contains('\0') && x.len() <= 4096 => Some(x.clone()),
+        Some(_) => return Err(bad(cmd, "`project` must be the path of an .ecproj")),
+    };
+    // The selected card: its project by default, and the new card goes to its right.
+    let from = targets_of(cmd, s, &json!({}), false).ok().and_then(|ids| ids.first().copied());
+    let from_project = from.and_then(|id| s.doc().ok()?.node(id)?.effectcraft.as_deref().map(|c| c.project.clone())).filter(|x| !x.trim().is_empty());
+    let project = project.or(from_project);
+    let mut comp = serde_json::Map::new();
+    if let Some(name) = get(p, "name") {
+        match name.as_str().map(str::trim) {
+            Some(n) if !n.is_empty() && n.chars().count() <= 255 => comp.insert("name".into(), json!(n)),
+            _ => return Err(bad(cmd, "`name`: 1 to 255 characters")),
+        };
+    }
+    for (k, lo, hi) in
+        [("width", 1.0, NEW_COMP_MAX_SIDE), ("height", 1.0, NEW_COMP_MAX_SIDE), ("frameRate", 0.01, 999.0), ("duration", 0.001, NEW_COMP_MAX_SECONDS)]
+    {
+        let Some(v) = get(p, k) else { continue };
+        match f64_of(v) {
+            Some(x) if (lo..=hi).contains(&x) => {
+                comp.insert(k.into(), if matches!(k, "width" | "height") { json!(x.round() as u64) } else { json!(x) })
+            }
+            _ => return Err(bad(cmd, format!("`{k}`: {lo}..{hi}"))),
+        };
+    }
+    if let Some(bg) = get(p, "background") {
+        if !bg.is_string() || color_of(bg).is_none() {
+            return Err(bad(cmd, "`background` must be a colour (#rrggbb)"));
+        }
+        comp.insert("background".into(), bg.clone());
+    }
+    let mut place = serde_json::Map::new();
+    for k in ["x", "y", "cardWidth"] {
+        let Some(v) = get(p, k) else { continue };
+        match f64_of(v) {
+            Some(x) if x.abs() <= 1e9 && (k != "cardWidth" || x >= 1.0) => place.insert(k.into(), json!(x)),
+            _ => return Err(bad(cmd, format!("`{k}` must be a finite number"))),
+        };
+    }
+    let next_to = s.ds()?.path.clone().filter(|x| !x.trim().is_empty());
+    if project.is_none() && next_to.is_none() {
+        return Err(EngineError::Disabled(cmd.to_string(), "save this file first: the new EffectCraft project is saved next to it".into()));
+    }
+    let sized = comp.contains_key("width") && comp.contains_key("height");
+    let data = json!({"project": project, "nextTo": next_to, "comp": comp, "place": place, "from": from});
+    s.request_ui(if sized { "effectcraft.newComp" } else { "dialog.effectcraftNewComp" }, data);
+    Ok(json!({"requested": true, "project": project, "dialog": !sized}))
 }
 
 /// Default card width (layer units).

@@ -656,6 +656,12 @@ fn input(app: &mut FigApp, ui: &mut Ui, resp: &egui::Response) -> bool {
     // Fork: the EffectCraft Timeline on the canvas owns the pointer over it (a click on a
     // Timeline row never plays or selects on the canvas, a scroll there scrolls its rows); a
     // pinch or ⌘-scroll still zooms the canvas about the pointer.
+    // Fork: files dropped on an EffectCraft card or its Timeline go into the card's project
+    // ([`crate::effectcraft_ui::project`]), not onto the canvas.
+    #[cfg(feature = "effectcraft-inproc")]
+    let to_cards = crate::effectcraft_ui::project::claim_drops(app, ui.ctx());
+    #[cfg(not(feature = "effectcraft-inproc"))]
+    let to_cards: Vec<std::path::PathBuf> = Vec::new();
     #[cfg(feature = "effectcraft-inproc")]
     if crate::effectcraft_ui::panel_takes_pointer(app, ui.ctx(), app.canvas.dragging) {
         if std::mem::take(&mut app.canvas.hovering) {
@@ -696,6 +702,9 @@ fn input(app: &mut FigApp, ui: &mut Ui, resp: &egui::Response) -> bool {
     let dropped = ctx.input(|i| i.raw.dropped_files.clone());
     for f in dropped {
         let path = f.path().to_path_buf();
+        if to_cards.contains(&path) {
+            continue;
+        }
         let pt = hover_pos.map(|h| app.to_page(h)).unwrap_or_default();
         let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "dropped.png".into());
         let (params, read) = if path.exists() {

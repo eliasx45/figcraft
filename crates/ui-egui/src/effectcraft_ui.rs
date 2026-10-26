@@ -50,6 +50,11 @@ pub(crate) mod viewer;
 #[path = "effectcraft_strips.rs"]
 pub(crate) mod strips;
 
+/// Fork: files dropped on cards, EffectCraft's Project panel beside the Timeline, new comps.
+#[cfg(feature = "effectcraft-inproc")]
+#[path = "effectcraft_project.rs"]
+pub(crate) mod project;
+
 /// Play / explode button radius (screen points).
 const BUTTON: f32 = 10.0;
 /// Texture memory kept for card frames (bytes).
@@ -1371,7 +1376,8 @@ impl FigApp {
             if p.focused {
                 let fx = fx_screen.is_some_and(|r| r.contains(press));
                 p.host.set_focus(if fx {
-                    effectcraft_ui_egui::dock::PanelKind::EffectControls
+                    // Effect Controls or the Project tab beside them.
+                    project::side_panel(ctx, &p.host)
                 } else {
                     effectcraft_ui_egui::dock::PanelKind::Timeline
                 });

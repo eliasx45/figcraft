@@ -78,10 +78,25 @@ pub struct InProc {
     session: Session,
 }
 
-/// A session with what rendering needs: footage decoding and expressions (like
-/// `effectcraft_host::session()` without scripting, plug-ins and export).
+/// Footage import through EffectCraft's media layer (as `effectcraft_host` wires it up), so a
+/// hosted panel's File ▸ Import, a Project panel import and files dropped on a card probe and
+/// add footage exactly as EffectCraft does.
+struct MediaImporter;
+
+impl effectcraft_engine::Importer for MediaImporter {
+    fn probe(&self, path: &str) -> Result<effectcraft_engine::project::Footage, String> {
+        effectcraft_media::probe(path).map_err(|e| e.to_string())
+    }
+    fn hardware_refuses(&self, footage: &effectcraft_engine::project::Footage) -> bool {
+        effectcraft_media::hw::refuses(&footage.codec, footage.width, footage.height)
+    }
+}
+
+/// A session with what rendering and importing need: footage decoding and import, expressions
+/// (like `effectcraft_host::session()` without scripting, plug-ins and export).
 fn new_session() -> Session {
     Session {
+        importer: Some(std::sync::Arc::new(MediaImporter)),
         footage: std::sync::Arc::new(effectcraft_media::MediaPool::new()),
         expr: Some(std::sync::Arc::new(effectcraft_expr::Expressions)),
         expr_check: Some(effectcraft_expr::check_syntax),
@@ -368,6 +383,24 @@ impl Pool {
     pub fn is_empty(&self) -> bool {
         self.sessions.is_empty()
     }
+}
+
+/// Make a new project at `path` (never over an existing file) holding one comp made by
+/// EffectCraft's `comp.new` with `params` (its New Composition settings), saved with EffectCraft's
+/// own save. Returns the comp's id.
+pub fn create_project(path: &Path, params: &Value) -> Result<u64, String> {
+    if path.exists() {
+        return Err(format!("{} already exists", path.display()));
+    }
+    let text = path.to_str().ok_or("not a UTF-8 path")?.to_string();
+    guarded("create", || {
+        let mut s = new_session();
+        let e = |e: effectcraft_engine::EngineError| e.to_string();
+        s.execute("comp.new", params.clone()).map_err(e)?;
+        let cid = s.active_comp_id().ok_or("no comp")?.0;
+        s.execute("file.saveAs", json!({"path": text})).map_err(e)?;
+        Ok(cid)
+    })
 }
 
 /// Save a small project at `path` for tests: a 64×36, 2-second, 25 fps comp `C` holding a red

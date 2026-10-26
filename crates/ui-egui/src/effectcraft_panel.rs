@@ -256,7 +256,8 @@ impl EcHost {
         }
         let drew = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             if let Some(f) = fx {
-                effectcraft_ui_egui::panels::effect_controls::show(self, ui, f);
+                // Effect Controls, or EffectCraft's Project panel on its tab beside them.
+                crate::effectcraft_ui::project::side(self, ui, f);
             }
             effectcraft_ui_egui::panels::timeline::show(self, ui, timeline);
         }));

@@ -188,3 +188,37 @@ fn the_transport_follows_the_work_area() {
     assert!((1.0..2.0).contains(&t), "the new work area at once: {t}");
     assert!(s.effectcraft.playing());
 }
+
+#[test]
+fn a_new_comp_goes_to_the_desktop_app_with_checked_settings() {
+    let mut s = Session::new();
+    // An unsaved file and no card: nowhere to put the new project.
+    assert!(s.execute("effectcraft.newComp", &json!({"width": 64, "height": 36})).is_err());
+    assert!(s.ui_requests.is_empty());
+    // The selected card's project: sized, it is made at once (no dialog), next to that card.
+    let id = card(&mut s, json!({"project": "/tmp/p.ecproj"}));
+    ok(&mut s, "select.set", json!({"ids": [id]}));
+    let r = ok(&mut s, "effectcraft.newComp", json!({"name": "Lower third", "width": 1080, "height": 1920, "frameRate": 30, "duration": 4}));
+    assert_eq!((r["project"].clone(), r["dialog"].clone()), (json!("/tmp/p.ecproj"), json!(false)), "{r}");
+    let req = s.ui_requests.last().unwrap();
+    assert_eq!(req.kind, "effectcraft.newComp");
+    assert_eq!(req.data["comp"], json!({"name": "Lower third", "width": 1080, "height": 1920, "frameRate": 30.0, "duration": 4.0}));
+    assert_eq!(req.data["from"], json!(id));
+    // No size: EffectCraft's New Composition dialog first (a dialog request).
+    let r = ok(&mut s, "effectcraft.newComp", json!({}));
+    assert_eq!(r["dialog"], json!(true));
+    assert_eq!(s.ui_requests.last().unwrap().kind, "dialog.effectcraftNewComp");
+    // Bad settings are refused before anything is asked.
+    let n = s.ui_requests.len();
+    for bad in [
+        json!({"width": 0, "height": 10}),
+        json!({"frameRate": 1e9}),
+        json!({"duration": -1}),
+        json!({"background": "nope"}),
+        json!({"name": ""}),
+        json!({"project": 5}),
+    ] {
+        assert!(s.execute("effectcraft.newComp", &bad).is_err(), "{bad}");
+    }
+    assert_eq!(s.ui_requests.len(), n);
+}
