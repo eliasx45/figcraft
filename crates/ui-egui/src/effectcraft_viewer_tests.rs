@@ -1,6 +1,8 @@
 //! EffectCraft's viewer tools on a card, against FigCraft's own host (`EcHost`, the Timeline's
 //! session): tool keys and the tool row, masks, rotation, the anchor point, the Pen and typed
-//! text landing in the comp, the card's pointer mapping at several canvas zooms, and junk input.
+//! text landing in the comp, the card's pointer mapping at several canvas zooms, and junk input;
+//! (EMBED14) guides and grids drawn only while on and the grid button, motion-path keys and
+//! tangents dragged on the card, the Mask Feather tool.
 #![allow(clippy::unwrap_used)]
 
 use std::path::PathBuf;
@@ -14,7 +16,7 @@ use figcraft_doc::EcComp;
 use figcraft_ec_inproc::effectcraft_engine::project::{LayerId, LayerSource};
 use serde_json::json;
 
-use super::{ROW, Slot, paint_icon, tool_row};
+use super::{ROW, Slot, grid_button, paint_grid_icon, paint_icon, tool_row};
 use crate::effectcraft_panel::EcHost;
 
 /// The sample project (a 64×36 comp "C" with a full-size red solid) plus a 16×16 Box in the
@@ -220,6 +222,109 @@ fn text_typed_on_the_card_lands_in_the_comp() {
     assert_eq!(doc.text, "Hi");
 }
 
+/// Shapes one frame paints over the card at zoom 4 (`with`: the tools run).
+fn painted(ctx: &egui::Context, h: &mut EcHost, with: bool) -> usize {
+    let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))), ..Default::default() };
+    ctx.run_ui(input, |ui| {
+        if with {
+            let _ = vh::tools(h, ui, card(4.0), vh::Options { id: egui::Id::new("card"), space_pan: false });
+        }
+    })
+    .shapes
+    .len()
+}
+
+/// Nothing goes over the card until a guide or grid is turned on: EffectCraft's keys (through
+/// the Timeline's host) and the grid button's menu turn them on and off.
+#[test]
+fn guides_and_grids_show_on_the_card_only_while_on() {
+    let (mut h, _, _) = host("grids");
+    let ctx = egui::Context::default();
+    h.invoke(&ctx, "view.addGuide", json!({"orientation": "vertical", "position": 20})).unwrap();
+    h.ui_mut().viewer.guides = false;
+    let none = painted(&ctx, &mut h, false);
+    assert_eq!(painted(&ctx, &mut h, true), none, "nothing over the picture");
+    for id in ["view.grid", "view.guides", "view.safeMargins"] {
+        h.invoke(&ctx, id, json!({})).unwrap();
+    }
+    assert!(h.ui().viewer.grid && h.ui().viewer.guides && h.ui().viewer.safe_margins);
+    assert!(painted(&ctx, &mut h, true) > none);
+    for id in ["view.grid", "view.guides", "view.safeMargins"] {
+        h.invoke(&ctx, id, json!({"value": false})).unwrap();
+    }
+    assert_eq!(painted(&ctx, &mut h, true), none);
+    // Overlays alone (the tools sitting out) draw the same things.
+    vh::toggle_grid_option(&mut h, 2);
+    let input = egui::RawInput::default();
+    let shapes = ctx.run_ui(input, |ui| vh::view_overlays(&mut h, ui, card(4.0))).shapes.len();
+    assert!(shapes > 0, "the grid while the tools sit out");
+    vh::toggle_grid_option(&mut h, 2);
+    assert!(!vh::grid_options_on(&h));
+    // The grid button and its open menu draw (lit while one is on).
+    egui::Popup::open_id(&ctx, super::grid_popup_id());
+    for _ in 0..2 {
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.horizontal(|ui| grid_button(ui, &mut h));
+        });
+    }
+}
+
+/// A Position keyframe of the selected layer drags on the card at several canvas zooms, one
+/// undo step each; its tangent handle drags the tangent.
+#[test]
+fn a_motion_path_key_drags_on_the_card() {
+    let (mut h, _, bx) = host("motion");
+    let ctx = egui::Context::default();
+    h.invoke(&ctx, "prop.addKey", json!({"layer": bx.0, "path": "transform/position", "time": 0.0, "value": [32.0, 18.0, 0.0]})).unwrap();
+    h.invoke(&ctx, "prop.addKey", json!({"layer": bx.0, "path": "transform/position", "time": 1.0, "value": [48.0, 18.0, 0.0]})).unwrap();
+    h.invoke(&ctx, "layer.select", json!({"layers": [bx.0]})).unwrap();
+    let key0 = |h: &EcHost| {
+        let c = h.session().active_comp().unwrap();
+        c.layer(bx).unwrap().props.prop("transform/position").unwrap().keys[0].clone()
+    };
+    for (k, to) in [(4.0_f32, [36.0, 22.0]), (0.5, [40.0, 26.0])] {
+        let from = key0(&h).value.as_vec3();
+        frame(&ctx, &mut h, card(k), vec![]);
+        drag(&ctx, &mut h, card(k), &[[from[0], from[1]], [from[0] + 1.0, from[1] + 1.0], to]);
+        let v = key0(&h).value.as_vec3();
+        // At 50 % a screen point is two comp pixels: within one of the target.
+        let tol = if k < 1.0 { 1.5 } else { 0.3 };
+        assert!((v[0] - to[0]).abs() < tol && (v[1] - to[1]).abs() < tol, "zoom {k}: {v:?}");
+        h.invoke(&ctx, "edit.undo", json!({})).unwrap();
+        assert_eq!(key0(&h).value.as_vec3(), from, "zoom {k}: one undo step");
+    }
+    // The out tangent handle, where EffectCraft draws it.
+    let keys = h.session().active_comp().unwrap().layer(bx).unwrap().props.prop("transform/position").unwrap().keys.clone();
+    let (_, out) = if keys[0].spatial_auto {
+        figcraft_ec_inproc::effectcraft_engine::keyframe::spatial_handles(&keys, 0)
+    } else {
+        figcraft_ec_inproc::effectcraft_engine::keyframe::spatial_tangents(&keys, 0)
+    };
+    assert!(out[0].abs() > 0.5, "an out handle: {out:?}");
+    let at = [32.0 + out[0], 18.0 + out[1]];
+    drag(&ctx, &mut h, card(4.0), &[at, [at[0], at[1] + 1.0], [at[0], at[1] + 6.0]]);
+    assert!((key0(&h).spatial_out[1] - 6.0).abs() < 0.3, "{:?}", key0(&h).spatial_out);
+}
+
+/// The Mask Feather tool sits in the Pen's slot (lit there) and adds a feather point dragged out
+/// from a mask's edge on the card.
+#[test]
+fn the_mask_feather_tool_works_on_the_card() {
+    let (mut h, plate, _) = host("feather");
+    let ctx = egui::Context::default();
+    h.invoke(&ctx, "mask.new", json!({"layer": plate.0, "vertices": [[8, 8], [40, 8], [40, 28], [8, 28]], "closed": true})).unwrap();
+    h.invoke(&ctx, "layer.select", json!({"layers": [plate.0]})).unwrap();
+    h.ui_mut().tool = Tool::MaskFeather;
+    assert!(Slot::Pen.has(Tool::MaskFeather) && vh::active(&h) == Tool::MaskFeather);
+    drag(&ctx, &mut h, card(4.0), &[[24.0, 8.0], [24.0, 7.0], [24.0, 4.0]]);
+    let c = h.session().active_comp().unwrap();
+    let l = c.layer(plate).unwrap();
+    let g = l.masks().unwrap().groups().next().unwrap();
+    let sp = l.props.find_group(g.uid).unwrap().get("path").unwrap().value_at(l.layer_time(h.session().time())).as_path().cloned().unwrap();
+    assert_eq!(sp.feather.len(), 1);
+    assert!((sp.feather[0].radius - 4.0).abs() < 0.3, "radius {}", sp.feather[0].radius);
+}
+
 /// Junk maps, pointer positions and icon boxes never panic.
 #[test]
 fn junk_never_panics() {
@@ -231,9 +336,14 @@ fn junk_never_panics() {
         ViewerMap { origin: Pos2::ZERO, zoom: 1e-30, comp: [0.0, 0.0], area: Rect::NOTHING },
         card(1e6),
     ];
-    for tool in [Tool::Selection, Tool::Rotate, Tool::PanBehind, Tool::Star, Tool::Pen, Tool::PenAdd, Tool::Type] {
+    h.ui_mut().viewer.grid = true;
+    h.ui_mut().viewer.rulers = true;
+    h.ui_mut().viewer.safe_margins = true;
+    h.ui_mut().viewer.proportional_grid = true;
+    for tool in [Tool::Selection, Tool::Rotate, Tool::PanBehind, Tool::Star, Tool::Pen, Tool::PenAdd, Tool::MaskFeather, Tool::Type] {
         h.ui_mut().tool = tool;
         for m in maps {
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| vh::view_overlays(&mut h, ui, m));
             for at in [pos2(f32::NAN, 0.0), pos2(-1e30, 1e30), pos2(110.0, 60.0)] {
                 frame(&ctx, &mut h, m, vec![Event::PointerMoved(at), button(at, true)]);
                 frame(&ctx, &mut h, m, vec![Event::PointerMoved(at + vec2(30.0, 30.0)), button(at, false)]);
@@ -250,6 +360,7 @@ fn junk_never_panics() {
                 Rect::from_min_size(Pos2::ZERO, vec2(16.0, 16.0)),
             ] {
                 paint_icon(ui.painter(), r, tool, egui::Color32::WHITE);
+                paint_grid_icon(ui.painter(), r, egui::Color32::WHITE);
             }
         }
     });

@@ -19,8 +19,17 @@
 //!   held pans the canvas instead. The keys (EffectCraft's, Elias's own keymap: `tool.*`) pick the
 //!   tool while the Timeline has the keyboard (a click in it or on the card); V returns to the
 //!   Selection tool. The tool row in the Timeline's header shows and picks them too.
-//! - **Nothing over the picture** but the selected layers' paths, vertices and anchor point and
-//!   the tool's own feedback (shape outline, Pen rubber band, text caret and selection).
+//! - **The rest of the viewer** (EMBED14): title/action safe, the grid, the proportional grid,
+//!   the comp's guides and the 3D reference axes, each only while turned on (EffectCraft's keys
+//!   ' ⌘' ⌘; ⌘R in the Timeline, or the grid button at the end of the tool row: EffectCraft's
+//!   "Choose grid and guide options"); the rulers outside the picture's top and left edges, guides
+//!   dragged out of them and along the picture; the selected layer's motion path, its keys and
+//!   tangents dragged (the Motion Path setting decides how many keys show); and the Mask Feather
+//!   tool (the Pen's slot: feather points on masks, their feather boundary while it is on).
+//!   Guides and grids stay on the card while the tools sit out (another FigCraft tool, read-only).
+//! - **Nothing over the picture** but what was turned on (guides, grids), the selected layers'
+//!   paths, motion path, vertices and anchor point, and the tool's own feedback (shape outline,
+//!   Pen rubber band, text caret and selection, feather boundary).
 
 use effectcraft_ui_egui::panels::timeline::TimelineHost;
 use effectcraft_ui_egui::panels::viewer::ViewerMap;
@@ -65,7 +74,7 @@ impl Slot {
             Slot::Rotate => tool == Tool::Rotate,
             Slot::PanBehind => tool == Tool::PanBehind,
             Slot::Shape => tool.is_shape(),
-            Slot::Pen => matches!(tool, Tool::Pen | Tool::PenAdd | Tool::PenDelete | Tool::PenConvert),
+            Slot::Pen => matches!(tool, Tool::Pen | Tool::PenAdd | Tool::PenDelete | Tool::PenConvert | Tool::MaskFeather),
             Slot::Type => matches!(tool, Tool::Type | Tool::TypeVertical),
         }
     }
@@ -86,6 +95,19 @@ pub(crate) fn picture(app: &FigApp, card: NodeId, host: &EcHost) -> Option<(Rect
     Some((pic, map))
 }
 
+/// Whether the card shows the Timeline's comp, still (not playing): guides and grids that are
+/// on show over it.
+fn shows_overlays(app: &FigApp, p: &Panel) -> bool {
+    if !p.open {
+        return false;
+    }
+    let Ok(doc) = app.session.doc() else { return false };
+    let Some(c) = doc.node(p.card).and_then(|n| n.effectcraft.as_deref()) else { return false };
+    let ec = &app.session.effectcraft;
+    let playing = ec.playing() && ec.node == Some(p.card);
+    !playing && super::handles::shows_active_comp(p.host.session(), c)
+}
+
 /// Whether the viewer tools act on card `card` now (see the module doc).
 fn active(app: &FigApp, p: &Panel) -> bool {
     if !p.open || app.effectcraft.picking || app.effectcraft.scrub.is_some() || app.effectcraft.handles.dragging() {
@@ -94,11 +116,7 @@ fn active(app: &FigApp, p: &Panel) -> bool {
     if !matches!(app.session.tool.tool, figcraft_engine::tools::ToolId::Move) {
         return false;
     }
-    let Ok(doc) = app.session.doc() else { return false };
-    let Some(c) = doc.node(p.card).and_then(|n| n.effectcraft.as_deref()) else { return false };
-    let ec = &app.session.effectcraft;
-    let playing = ec.playing() && ec.node == Some(p.card);
-    p.host.read_only().is_none() && !playing && super::handles::shows_active_comp(p.host.session(), c)
+    p.host.read_only().is_none() && shows_overlays(app, p)
 }
 
 /// One frame of the viewer tools on the card the Timeline edits (`p`, taken out of the app while
@@ -108,12 +126,27 @@ pub(crate) fn card_tools(app: &mut FigApp, ctx: &egui::Context, p: &mut Panel) {
     if !p.focused && p.host.session().state.text_edit.is_some() && p.host.read_only().is_none() {
         let _ = p.host.run_engine(ctx, "text.endEdit", json!({}));
     }
-    if !active(app, p) {
+    let tools_on = active(app, p);
+    if !tools_on && !shows_overlays(app, p) {
         return;
     }
     let Some((pic, map)) = picture(app, p.card, &p.host) else { return };
-    let clip = app.canvas.rect.intersect(pic.expand(12.0));
+    // Room for the rulers above and left of the picture (they never cover it).
+    let room = if p.host.ui().viewer.rulers { vh::RULER + 2.0 } else { 0.0 };
+    let clip = app.canvas.rect.intersect(Rect::from_min_max(pic.min - vec2(room, room), pic.max).expand(12.0));
     if !clip.is_positive() {
+        return;
+    }
+    if !tools_on {
+        // The tools sit out: only what was turned on (guides, grids) stays on the card.
+        let id = egui::Id::new("effectcraft_card_overlays");
+        egui::Area::new(id).order(egui::Order::Middle).fixed_pos(pic.min).constrain(false).movable(false).interactable(false).show(ctx, |ui| {
+            ui.set_clip_rect(clip);
+            let host = &mut p.host;
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vh::view_overlays(host, ui, map))).is_err() {
+                log::warn!("EffectCraft card guides: an internal error");
+            }
+        });
         return;
     }
     let opts = vh::Options { id: egui::Id::new(("effectcraft-card-tools", p.card)), space_pan: app.canvas.space_pan };
@@ -184,6 +217,87 @@ pub(crate) fn tool_row(ui: &mut egui::Ui, host: &mut EcHost) {
         {
             host.ui_mut().status = e;
         }
+    }
+    ui.add_space(4.0);
+    grid_button(ui, host);
+}
+
+fn grid_popup_id() -> egui::Id {
+    egui::Id::new("effectcraft_card_grid_options")
+}
+
+/// EffectCraft's "Choose grid and guide options" button (lit while one of them shows): a menu of
+/// Title/Action Safe, Proportional Grid, Grid, Guides, Rulers and 3D Reference Axes, ticked when
+/// on; picking one turns it on or off as in EffectCraft's viewer.
+pub(crate) fn grid_button(ui: &mut egui::Ui, host: &mut EcHost) {
+    let side = 18.0;
+    let accent = crate::theme::canvas_accent(ui.ctx());
+    let t = crate::theme::Tokens::get(ui.ctx());
+    let (r, resp) = ui.allocate_exact_size(vec2(side, side), egui::Sense::click());
+    let on = vh::grid_options_on(host);
+    let id = grid_popup_id();
+    let open = egui::Popup::is_id_open(ui.ctx(), id);
+    let p = ui.painter();
+    if on || open {
+        p.rect_filled(r, CornerRadius::same(3), accent.gamma_multiply(0.35));
+    } else if resp.hovered() {
+        p.rect_filled(r, CornerRadius::same(3), t.hover);
+    }
+    paint_grid_icon(p, r.shrink(3.0), if on { Color32::WHITE } else { t.icon });
+    if resp.on_hover_text("Choose grid and guide options").clicked() {
+        if open {
+            egui::Popup::close_id(ui.ctx(), id);
+        } else {
+            egui::Popup::open_id(ui.ctx(), id);
+        }
+    }
+    if !egui::Popup::is_id_open(ui.ctx(), id) {
+        return;
+    }
+    // Under the button, in window coordinates (the Timeline's layer is scaled with the canvas).
+    let to_window = ui.ctx().layer_transform_to_global(ui.layer_id()).unwrap_or_default();
+    let at = to_window * r.left_bottom();
+    if !at.x.is_finite() || !at.y.is_finite() {
+        egui::Popup::close_id(ui.ctx(), id);
+        return;
+    }
+    let items = vh::grid_options(host);
+    let mut picked = None;
+    egui::Popup::new(id, ui.ctx().clone(), egui::PopupAnchor::Position(at), egui::LayerId::new(egui::Order::Foreground, id))
+        .kind(egui::PopupKind::Menu)
+        .layout(egui::Layout::top_down_justified(egui::Align::Min))
+        .style(crate::right::menu_style)
+        .open_memory(None)
+        .show(|ui| {
+            for (i, (name, ticked)) in items.iter().enumerate() {
+                if name == "-" {
+                    ui.separator();
+                    continue;
+                }
+                let mut v = *ticked;
+                if ui.checkbox(&mut v, name.as_str()).clicked() {
+                    picked = Some(i);
+                }
+            }
+        });
+    if let Some(i) = picked {
+        vh::toggle_grid_option(host, i);
+        egui::Popup::close_id(ui.ctx(), id);
+    }
+}
+
+/// The grid button's icon: a square cut in three by two lines each way (original, drawn in code).
+pub(crate) fn paint_grid_icon(p: &egui::Painter, r: Rect, col: Color32) {
+    if !r.is_finite() || r.width() <= 0.0 || r.height() <= 0.0 {
+        return;
+    }
+    let k = r.width().min(r.height()) / 16.0;
+    let at = |x: f32, y: f32| pos2(r.min.x + x * k, r.min.y + y * k);
+    let s = Stroke::new((1.1 * k).max(0.7), col);
+    p.rect_stroke(Rect::from_min_max(at(2.0, 2.0), at(14.0, 14.0)), CornerRadius::ZERO, s, StrokeKind::Middle);
+    for v in [6.0, 10.0] {
+        p.line_segment([at(v, 2.0), at(v, 14.0)], s);
+        p.line_segment([at(2.0, v), at(14.0, v)], s);
     }
 }
 
@@ -282,6 +396,16 @@ pub(crate) fn paint_icon(p: &egui::Painter, r: Rect, tool: Tool, col: Color32) {
                 }
                 Tool::PenConvert => {
                     p.add(egui::Shape::line(vec![at(10.5, 2.5), at(14.0, 6.0), at(10.5, 9.5)], s));
+                }
+                Tool::MaskFeather => {
+                    // A soft edge: a dashed arc beside the nib.
+                    let c = at(11.0, 9.0);
+                    for i in 0..4 {
+                        let a0 = (-80.0 + 40.0 * i as f32).to_radians();
+                        let a1 = a0 + 22.0f32.to_radians();
+                        let rad = 4.0 * k;
+                        p.line_segment([c + vec2(a0.cos(), a0.sin()) * rad, c + vec2(a1.cos(), a1.sin()) * rad], s);
+                    }
                 }
                 _ => {}
             }
