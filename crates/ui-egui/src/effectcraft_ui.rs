@@ -55,6 +55,11 @@ pub(crate) mod strips;
 #[path = "effectcraft_project.rs"]
 pub(crate) mod project;
 
+/// Fork: EffectCraft's Pre-compose, Interpret Footage and Replace Footage dialogs for a card.
+#[cfg(feature = "effectcraft-inproc")]
+#[path = "effectcraft_dialogs.rs"]
+pub(crate) mod dialogs;
+
 /// Play / explode button radius (screen points).
 const BUTTON: f32 = 10.0;
 /// Texture memory kept for card frames (bytes).
