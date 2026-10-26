@@ -235,15 +235,17 @@ impl TimelineHost for ProjectHost<'_> {
     fn pointer_color(&mut self, ctx: &egui::Context) -> Option<PointerColor> {
         self.host.pointer_color(ctx)
     }
-    /// The footage commands FigCraft can run (Interpret / Replace Footage need EffectCraft's
-    /// dialogs).
+    /// The footage commands FigCraft can run (Interpret / Replace Footage: EffectCraft's dialogs,
+    /// `effectcraft_dialogs`).
     fn menu_entry(&self, ui: &mut egui::Ui, command: &str, clicked: &mut Option<(String, Value)>) {
-        let label = match command {
-            "file.reloadFootage" => "Reload Footage",
-            "file.revealInFinder" => "Reveal in Finder",
+        let (label, keys) = match command {
+            "file.interpretFootage" => ("Interpret Footage…", "⌥⌘G"),
+            "file.replaceFootage" => ("Replace Footage…", "⌘H"),
+            "file.reloadFootage" => ("Reload Footage", ""),
+            "file.revealInFinder" => ("Reveal in Finder", ""),
             _ => return,
         };
-        if ui.button(label).clicked() {
+        if ui.add(egui::Button::new(label).shortcut_text(keys)).clicked() {
             *clicked = Some((command.to_string(), json!({})));
             ui.close();
         }
@@ -794,6 +796,8 @@ pub(crate) fn frame(app: &mut FigApp, ctx: &egui::Context) {
         app.toast(e);
     }
     new_comp_dialog(app, ctx);
+    // Pre-compose, Interpret Footage, Replace Footage.
+    super::dialogs::frame(app, ctx);
 }
 
 #[cfg(test)]
