@@ -8,7 +8,7 @@
 //! crate::effectcraft_ui::dialogs::request(app: &mut FigApp, card: Option<NodeId>, which: Which)
 //!     -> Result<(), String>
 //! // Which::{Precompose, InterpretFootage, ReplaceFootage, Solid, Light, Camera, LayerSettings,
-//! //        TimeStretch, LayerStyleOptions}
+//! //        TimeStretch, LayerStyleOptions, KeyVelocity, KeyInterpolation}
 //! ```
 //!
 //! `card`: the card the menu was opened on; its Timeline opens first when it isn't the open one
@@ -46,7 +46,11 @@
 //! Timeline's menu run the same commands. OK runs EffectCraft's command through the Timeline's
 //! host: one undo step, ⌘S, the app mirror. The Layer Style dialog edits live (one undo step per
 //! control, as in EffectCraft) and its Cancel puts the layer's styles back. A new solid's colour
-//! is the next New Solid's, as in EffectCraft.
+//! is the next New Solid's, as in EffectCraft. The keyframe dialogs the Timeline and Graph Editor
+//! open come the same way: Keyframe Velocity… (`keys.velocity`, ⇧⌘K, a double-click on a speed
+//! graph key), Keyframe Interpolation… (`keys.interpolation`, ⌥⌘K), from their keys and the
+//! keyframe context menus (`Which::{KeyVelocity, KeyInterpolation}`), and Edit Value… (`keys.set`
+//! / `prop.set` without a value) and Sequence Layers… (EffectCraft's forms).
 
 use std::path::{Path, PathBuf};
 
@@ -91,6 +95,10 @@ pub(crate) enum Which {
     TimeStretch,
     /// Layer ▸ Layer Styles ▸ Layer Style Options….
     LayerStyleOptions,
+    /// Animation ▸ Keyframe Velocity… (⇧⌘K) on the selected keyframes.
+    KeyVelocity,
+    /// Animation ▸ Keyframe Interpolation… (⌥⌘K) on the selected keyframes.
+    KeyInterpolation,
 }
 
 impl Which {
@@ -104,6 +112,8 @@ impl Which {
             "layer.settings" => Which::LayerSettings,
             "layer.timeStretch" => Which::TimeStretch,
             "layer.style.options" => Which::LayerStyleOptions,
+            "keys.velocity" => Which::KeyVelocity,
+            "keys.interpolation" => Which::KeyInterpolation,
             _ => return None,
         })
     }
@@ -120,6 +130,8 @@ impl Which {
             Which::LayerSettings => "layer.settings",
             Which::TimeStretch => "layer.timeStretch",
             Which::LayerStyleOptions => "layer.style.options",
+            Which::KeyVelocity => "keys.velocity",
+            Which::KeyInterpolation => "keys.interpolation",
         }
     }
 }
@@ -269,6 +281,11 @@ fn layer_dialog_command(id: &str) -> bool {
             | "layer.lightSettings"
             | "layer.timeStretch"
             | "layer.style.options"
+            | "keys.velocity"
+            | "keys.interpolation"
+            | "keys.set"
+            | "prop.set"
+            | "layer.sequence"
     ) || id.starts_with("layer.style.")
 }
 
@@ -500,6 +517,9 @@ fn finish_layer(app: &mut FigApp, ctx: &egui::Context, path: &Path, h: &Hosted) 
 
 #[cfg(test)]
 impl Shown {
+    pub(crate) fn layer_for_tests(path: &Path, h: Hosted) -> Shown {
+        Shown { path: path.to_path_buf(), kind: Kind::Layer(Box::new(h)) }
+    }
     pub(crate) fn precompose_draft(&mut self) -> Option<&mut PrecomposeDraft> {
         match &mut self.kind {
             Kind::Precompose(d) => Some(d),

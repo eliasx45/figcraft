@@ -625,3 +625,141 @@ fn layer_dialog_junk_never_panics() {
     assert!(shown(&u.ctx).is_none());
     let _ = std::fs::remove_dir_all(dir);
 }
+
+// ---- Keyframe dialogs (Keyframe Velocity, Keyframe Interpolation, Edit Value).
+
+/// Two opacity keys on the sample's solid, the first selected. Returns (layer, prop uid).
+fn two_keys(u: &mut Ui) -> (u64, u64) {
+    let l = host(u).session().active_comp().unwrap().layers[0].id.0;
+    let uid = host(u).session().active_comp().unwrap().layer(LayerId(l)).unwrap().props.prop("transform/opacity").unwrap().uid;
+    for (t, v) in [(0.0, 0.0), (1.0, 100.0)] {
+        invoke(u, "prop.addKey", json!({"layer": l, "prop": uid, "time": t, "value": v})).unwrap();
+    }
+    invoke(u, "keys.select", json!({"keys": [{"layer": l, "prop": uid, "time": 0.0}]})).unwrap();
+    (l, uid)
+}
+
+fn first_key_info(u: &mut Ui) -> Value {
+    host(u).session_mut().execute("keys.info", json!({})).unwrap()[0].clone()
+}
+
+#[test]
+fn keyframe_velocity_opens_from_the_keyframe_menu_and_ok_sets_it_in_one_undo_step() {
+    let (dir, p, cid) = sample("velocity");
+    let (mut u, _) = app_with_timeline(&p, cid);
+    two_keys(&mut u);
+    let rev = host(&mut u).session().revision;
+    // The keyframe menu's Keyframe Velocity… runs keys.velocity without settings: the dialog.
+    let r = invoke(&mut u, "keys.velocity", json!({})).unwrap();
+    assert_eq!(r["dialog"], json!("keys.velocity"));
+    assert_eq!(host(&mut u).session().revision, rev, "nothing changes until OK");
+    u.frame(vec![]);
+    let Hosted::Velocity(mut d) = layer_dialog(&u) else { panic!("Keyframe Velocity") };
+    assert!(d.has_out && !d.has_in, "the first key has only an outgoing side");
+    d.out_inf = vec![75.0];
+    let steps = undo_steps(&mut u);
+    ok_with(&mut u, Hosted::Velocity(d));
+    assert_eq!(undo_steps(&mut u), steps + 1, "one undo step");
+    let k = first_key_info(&mut u);
+    assert!((k["outEase"][0]["influence"].as_f64().unwrap() - 75.0).abs() < 1e-6, "{k}");
+    // Cancel changes nothing.
+    invoke(&mut u, "keys.velocity", json!({})).unwrap();
+    let rev = host(&mut u).session().revision;
+    u.frame(vec![]);
+    escape(&mut u);
+    u.frame(vec![]);
+    assert!(shown(&u.ctx).is_none());
+    assert_eq!(host(&mut u).session().revision, rev);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn keyframe_interpolation_opens_from_its_key_and_ok_changes_the_keys() {
+    let (dir, p, cid) = sample("interp");
+    let (mut u, _) = app_with_timeline(&p, cid);
+    two_keys(&mut u);
+    let mut tried = 0;
+    for id in ["keys.interpolation", "keys.velocity"] {
+        // ⌥⌘K / ⇧⌘K, or Elias's own keys for them.
+        let Some((mods, key)) = host(&mut u).session().shortcuts().shortcut_of(id, &json!({})).and_then(effectcraft_ui_egui::menus::parse_shortcut)
+        else {
+            continue;
+        };
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            events: vec![egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: mods }],
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input, |ui| {
+            let _ = host(&mut u).keys(ui.ctx());
+        });
+        assert!(shown(&ctx).is_some(), "{id}: its dialog");
+        tried += 1;
+    }
+    assert!(tried > 0, "no key bound at all");
+    // From the card's entry point: Hold for the selected key, one undo step.
+    super::request(&mut u.app, None, Which::KeyInterpolation).unwrap();
+    let Hosted::Interpolation(mut d) = layer_dialog(&u) else { panic!("Keyframe Interpolation") };
+    assert_eq!(d.count, 1);
+    d.temporal = 5;
+    let steps = undo_steps(&mut u);
+    ok_with(&mut u, Hosted::Interpolation(d));
+    assert_eq!(undo_steps(&mut u), steps + 1);
+    let k = first_key_info(&mut u);
+    assert!(k.to_string().contains("hold"), "{k}");
+    // Current Settings everywhere: OK changes nothing.
+    super::request(&mut u.app, None, Which::KeyInterpolation).unwrap();
+    let rev = host(&mut u).session().revision;
+    let Hosted::Interpolation(d) = layer_dialog(&u) else { panic!() };
+    ok_with(&mut u, Hosted::Interpolation(d));
+    assert_eq!(host(&mut u).session().revision, rev);
+    // No keys selected: an error, no dialog.
+    host(&mut u).session_mut().state.selected_keys.clear();
+    assert!(super::request(&mut u.app, None, Which::KeyVelocity).is_err());
+    assert!(shown(&u.ctx).is_none());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn edit_value_on_a_keyframe_is_effectcrafts_form_and_with_a_value_runs_at_once() {
+    let (dir, p, cid) = sample("edit-value");
+    let (mut u, _) = app_with_timeline(&p, cid);
+    let (l, uid) = two_keys(&mut u);
+    invoke(&mut u, "keys.set", json!({"layer": l, "prop": uid, "time": 1.0})).unwrap();
+    assert!(matches!(layer_dialog(&u), Hosted::Form(_)), "the value form");
+    super::set_shown(&u.ctx, None);
+    // With a value (the graph's drags, scripts): no dialog.
+    invoke(&mut u, "keys.set", json!({"layer": l, "prop": uid, "time": 1.0, "value": 40.0})).unwrap();
+    let _ = invoke(&mut u, "keys.velocity", json!({"outInfluence": [50.0]}));
+    assert!(shown(&u.ctx).is_none());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn keyframe_dialog_junk_never_panics() {
+    let (dir, p, cid) = sample("key-junk");
+    let (mut u, card) = app_with_timeline(&p, cid);
+    let ctx = u.ctx.clone();
+    for id in ["keys.velocity", "keys.interpolation", "keys.set", "prop.set", "layer.sequence"] {
+        for params in [json!(null), json!([1]), json!({"layer": "x", "prop": -1, "time": f64::MAX}), json!({"layer": 999_999, "prop": 1, "time": 0})]
+        {
+            let _ = super::intercept(host(&mut u), &ctx, id, &params);
+            u.frame(vec![]);
+            escape(&mut u);
+            u.frame(vec![]);
+        }
+    }
+    two_keys(&mut u);
+    for which in [Which::KeyVelocity, Which::KeyInterpolation] {
+        let _ = super::request(&mut u.app, Some(NodeId(999_999)), which);
+        let _ = super::request(&mut u.app, Some(card), which);
+        u.frame(vec![]);
+        escape(&mut u);
+    }
+    // A draft with lists shorter than its dimensions draws without indexing past them.
+    let d = effectcraft_ui_egui::panels::key_dialogs::VelocityDraft { dims: 3, in_speed: vec![1.0], ..Default::default() };
+    super::set_shown(&ctx, Some(super::Shown::layer_for_tests(host(&mut u).path(), Hosted::Velocity(d))));
+    u.frame(vec![]);
+    escape(&mut u);
+    let _ = std::fs::remove_dir_all(dir);
+}
