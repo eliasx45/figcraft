@@ -253,7 +253,7 @@ pub struct Link {
     /// The closed strips' layer bars ([`strips::Loader`]).
     #[cfg(feature = "effectcraft-inproc")]
     pub(crate) strips: strips::Loader,
-    /// The open Timeline's right edge being dragged ([`strips::widen_input`]).
+    /// An edge of the open Timeline being dragged ([`strips::resize_input`]).
     #[cfg(feature = "effectcraft-inproc")]
     pub(crate) widen: Option<strips::Widen>,
     /// Space pressed in the Timeline: it plays the card when let go, unless the pointer was pressed
@@ -1169,7 +1169,7 @@ impl FigApp {
     /// The open Timeline on the canvas, under its card ([`strips`]); drawn after the canvas, so
     /// it sits over it where the card is this frame. Its header (comp, "● unsaved" and Save, or
     /// why it's read-only; ✕ closes it), EffectCraft's Timeline, Effect Controls to its right, the
-    /// right edge that widens it, the keyboard focus, and the card following its edits.
+    /// right and bottom edges (their corner, Effect Controls' right edge) that size them, the keyboard focus, and the card following its edits.
     pub(crate) fn effectcraft_panel_ui(&mut self, ctx: &egui::Context) {
         let Some(mut p) = self.effectcraft.panel.take() else {
             self.effectcraft.panel_rects = None;
@@ -1192,7 +1192,7 @@ impl FigApp {
         let mut save = false;
         let mut screen: Vec<Rect> = Vec::new();
         let mut fx_screen: Option<Rect> = None;
-        let mut edge: Option<(egui::Response, Option<f64>)> = None;
+        let mut edges: Vec<(egui::Response, strips::Edge, Option<(f64, f64)>)> = Vec::new();
         if let Some((g, xf)) = geom.and_then(|g| Some((g, strips::layer_transform(self, g.k)?))) {
             // One area in a layer egui scales and moves like the canvas: painting and input.
             let id = egui::Id::new("effectcraft_canvas_timeline");
@@ -1236,15 +1236,46 @@ impl FigApp {
                     });
                     let body = Rect::from_min_max(pos2(strip.min.x, head.max.y + 1.0), strip.max);
                     p.host.show(ui, body, fx);
-                    // The right edge widens it (and pushes what it would cover).
-                    let grab = Rect::from_x_y_ranges((strip.max.x - strips::EDGE / 2.0)..=(strip.max.x + strips::EDGE / 2.0), strip.y_range());
-                    let resp = ui.interact(grab, id.with("right_edge"), egui::Sense::drag());
-                    if resp.hovered() || resp.dragged() {
-                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
-                        painter.vline(strip.max.x, strip.y_range(), Stroke::new(2.0, t.accent));
+                    // The right edge widens it, the bottom edge (under it and Effect Controls)
+                    // makes it taller, their corner does both, Effect Controls' right edge widens
+                    // them; each pushes what it would cover.
+                    let e = strips::EDGE / 2.0;
+                    let right = fx.map_or(strip.max.x, |f| f.max.x);
+                    for edge in strips::Edge::ALL {
+                        let grab = match edge {
+                            strips::Edge::Right => Rect::from_x_y_ranges((strip.max.x - e)..=(strip.max.x + e), strip.min.y..=(strip.max.y - e)),
+                            strips::Edge::Bottom => Rect::from_x_y_ranges(strip.min.x..=right, (strip.max.y - e)..=(strip.max.y + e)),
+                            strips::Edge::Corner => Rect::from_center_size(strip.max, vec2(strips::EDGE * 2.0, strips::EDGE * 2.0)),
+                            strips::Edge::FxRight => match fx {
+                                Some(f) => Rect::from_x_y_ranges((f.max.x - e)..=(f.max.x + e), f.min.y..=(f.max.y - e)),
+                                None => continue,
+                            },
+                        };
+                        let resp = ui.interact(grab, id.with(("edge", edge as u8)), egui::Sense::drag());
+                        if resp.hovered() || resp.dragged() {
+                            ui.ctx().set_cursor_icon(edge.cursor());
+                            let line = Stroke::new(2.0, t.accent);
+                            match edge {
+                                strips::Edge::Right => {
+                                    painter.vline(strip.max.x, strip.y_range(), line);
+                                }
+                                strips::Edge::Bottom => {
+                                    painter.hline(strip.min.x..=right, strip.max.y, line);
+                                }
+                                strips::Edge::Corner => {
+                                    painter.vline(strip.max.x, strip.y_range(), line);
+                                    painter.hline(strip.x_range(), strip.max.y, line);
+                                }
+                                strips::Edge::FxRight => {
+                                    if let Some(f) = fx {
+                                        painter.vline(f.max.x, f.y_range(), line);
+                                    }
+                                }
+                            }
+                        }
+                        let at = resp.interact_pointer_pos().map(|q| (f64::from(q.x) * g.k, f64::from(q.y) * g.k));
+                        edges.push((resp, edge, at));
                     }
-                    let x = resp.interact_pointer_pos().map(|q| f64::from(q.x) * g.k);
-                    edge = Some((resp, x));
                     ui.advance_cursor_after_rect(whole);
                 },
             );
@@ -1292,8 +1323,8 @@ impl FigApp {
             self.toast("The EffectCraft edits are kept: click its strip to save them");
         }
         self.effectcraft.panel = Some(p);
-        if let Some((resp, x)) = edge {
-            strips::widen_input(self, card, &resp, x);
+        for (resp, edge, at) in edges {
+            strips::resize_input(self, card, &resp, edge, at);
         }
     }
 }

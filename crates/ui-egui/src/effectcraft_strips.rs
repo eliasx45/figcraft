@@ -3,10 +3,10 @@
 //!
 //! - **Where.** A card's Timeline hangs under it (a small gap), from the card's left edge. It is
 //!   part of the canvas: everything is sized in page units and scales and moves with the canvas's
-//!   zoom and pan, text and all; no minimum size. Its height is 0.6× the card's longest side, its
-//!   width its own: at least the card's width and 1.6× its height (a 9:16 card still gets a wide,
-//!   horizontal Timeline), the card's longest side by default, wider as dragged at its right edge
-//!   (kept on the card, plugin data [`WIDTH_KEY`]).
+//!   zoom and pan, text and all; no minimum size on screen. Its height is 0.6× the card's longest
+//!   side by default, its width its own: at least the card's width and 1.6× that default height (a
+//!   9:16 card still gets a wide, horizontal Timeline), the card's longest side by default; both
+//!   as dragged at its edges.
 //! - **One open.** The card being edited ([`crate::effectcraft_panel::Panel`]) shows EffectCraft's
 //!   real Timeline there, Effect Controls to its right; it is drawn in an egui area whose layer
 //!   egui transforms like the canvas ([`layer_transform`]), so its input lands right too
@@ -14,10 +14,16 @@
 //!   thin closed strip: a header (▸ comp · N layers) and a bar per layer over the comp's duration
 //!   ([`Loader`] reads them from the saved project on a thread); a click opens that card's
 //!   Timeline.
-//! - **Wider pushes.** Dragging the open Timeline's right edge widens it; what the wider Timeline
-//!   (and its Effect Controls) would cover to its right, in the card-and-Timeline column's
-//!   vertical band, moves right to keep a small gap: real node moves, one undo step with the new
-//!   width for the whole drag ([`widen`]). Narrowing again leaves them where they went.
+//! - **Bigger pushes.** Dragging the open Timeline's right edge widens it, its bottom edge makes it
+//!   (and Effect Controls) taller, its bottom-right corner does both. What the bigger Timeline and
+//!   its Effect Controls would cover moves away to keep a small gap: to the right of the
+//!   card-and-Timeline column in its vertical band moves right, below it in its x-range moves
+//!   down, and what they push pushes what is behind it. Real node moves, one undo step with the
+//!   new size for the whole drag ([`resize`]); shrinking again leaves them where they went. The
+//!   size is kept on the card (plugin data [`WIDTH_KEY`], [`HEIGHT_KEY`]); the height is at least
+//!   the header, ruler and a few rows. Effect Controls' right edge widens them the same way (wide
+//!   enough by default for names, values, checkbox labels and pop-ups; plugin data
+//!   [`FX_WIDTH_KEY`]); their height follows the Timeline's.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -33,6 +39,10 @@ use crate::FigApp;
 
 /// The card's plugin data holding its Timeline's width (page units).
 pub(crate) const WIDTH_KEY: &str = "effectcraft.timelineWidth";
+/// The card's plugin data holding its Timeline's height (page units).
+pub(crate) const HEIGHT_KEY: &str = "effectcraft.timelineHeight";
+/// The card's plugin data holding its Effect Controls' width (page units).
+pub(crate) const FX_WIDTH_KEY: &str = "effectcraft.effectControlsWidth";
 /// The card size everything below is designed for (its longest side, page units): a bigger card
 /// gets a proportionally bigger Timeline.
 const REF_SIDE: f64 = 480.0;
@@ -43,10 +53,17 @@ const GAP: f64 = 8.0;
 const HEIGHT_SHARE: f64 = 0.6;
 /// The open Timeline is never narrower than this many times its height.
 const MIN_ASPECT: f64 = 1.6;
-/// Effect Controls' width, as a share of the card's longest side.
-const FX_SHARE: f64 = 0.46;
+/// Effect Controls' width by default, the least and the most (panel units: names, values,
+/// checkbox labels and pop-ups fit at the default).
+const FX_WIDTH: f64 = 360.0;
+const FX_MIN: f64 = 200.0;
+const FX_MAX: f64 = 2000.0;
 /// The widest a Timeline gets (times the card's longest side).
 const MAX_WIDTH: f64 = 12.0;
+/// The shortest a Timeline gets (panel units: its header, the ruler and a few rows), and the
+/// tallest (times the card's longest side).
+const MIN_HEIGHT: f64 = 150.0;
+const MAX_HEIGHT: f64 = 8.0;
 /// The open Timeline's header (the panel's own units: page units at [`REF_SIDE`]).
 pub(crate) const HEADER: f32 = 22.0;
 /// The closed strip's header and layer bars (page units at [`REF_SIDE`]).
@@ -65,21 +82,34 @@ pub(crate) fn card_scale(w: f64, h: f64) -> f64 {
     if k.is_finite() { k.clamp(0.05, 50.0) } else { 1.0 }
 }
 
-/// The open Timeline's page size for a card of page size `w`×`h` and the width asked for.
-pub(crate) fn open_size(w: f64, h: f64, asked: Option<f64>) -> (f64, f64) {
+/// The open Timeline's page size for a card of page size `w`×`h` and the width and height asked
+/// for (dragged at its edges).
+pub(crate) fn open_size(w: f64, h: f64, asked: Option<f64>, asked_h: Option<f64>) -> (f64, f64) {
     let side = w.max(h).max(1.0);
-    let height = side * HEIGHT_SHARE;
-    let least = w.max(height * MIN_ASPECT);
+    let least = least_width(w, h);
     let width = match asked.filter(|a| a.is_finite() && *a > 0.0) {
         Some(a) => a.clamp(least, least.max(side * MAX_WIDTH)),
         None => least.max(side),
     };
+    let (lo, hi) = height_range(w, h);
+    let height = match asked_h.filter(|a| a.is_finite() && *a > 0.0) {
+        Some(a) => a.clamp(lo, hi),
+        None => side * HEIGHT_SHARE,
+    };
     (width, height)
 }
 
-/// The least width a card's Timeline may be dragged to (page units).
+/// The least width a card's Timeline may be dragged to (page units): the card's width, and 1.6×
+/// its default height.
 pub(crate) fn least_width(w: f64, h: f64) -> f64 {
-    w.max(w.max(h) * HEIGHT_SHARE * MIN_ASPECT)
+    w.max(w.max(h).max(1.0) * HEIGHT_SHARE * MIN_ASPECT)
+}
+
+/// The heights a card's Timeline may be dragged to (page units).
+pub(crate) fn height_range(w: f64, h: f64) -> (f64, f64) {
+    let side = w.max(h).max(1.0);
+    let lo = (MIN_HEIGHT * card_scale(w, h)).min(side * HEIGHT_SHARE);
+    (lo, lo.max(side * MAX_HEIGHT))
 }
 
 /// Where a card's strip sits on the page.
@@ -101,17 +131,38 @@ impl Geom {
     }
 }
 
+/// The sizes dragged for a card's Timeline (page units; `None`: the default, or unchanged).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct Size {
+    pub width: Option<f64>,
+    pub height: Option<f64>,
+    /// Effect Controls' width.
+    pub fx: Option<f64>,
+}
+
+/// Effect Controls' widths for a card of page size `w`×`h`: (least, default, most).
+pub(crate) fn fx_range(w: f64, h: f64) -> (f64, f64, f64) {
+    let k = card_scale(w, h);
+    (FX_MIN * k, FX_WIDTH * k, FX_MAX * k)
+}
+
+/// Effect Controls' page width for the width asked for.
+pub(crate) fn fx_width(w: f64, h: f64, asked: Option<f64>) -> f64 {
+    let (lo, def, hi) = fx_range(w, h);
+    asked.filter(|a| a.is_finite() && *a > 0.0).map_or(def, |a| a.clamp(lo, hi))
+}
+
 /// The strip of a card at page box `card`: the open Timeline (`open`) or a closed strip with
-/// `bars` layer bars; `asked`, the width dragged.
-pub(crate) fn geom(card: PRect, asked: Option<f64>, open: bool, bars: usize) -> Geom {
+/// `bars` layer bars; `asked`, the sizes dragged (the closed strip takes the Timeline's width).
+pub(crate) fn geom(card: PRect, asked: Size, open: bool, bars: usize) -> Geom {
     let (w, h) = (card.width(), card.height());
     let k = card_scale(w, h);
-    let (tw, th) = open_size(w, h, asked);
+    let (tw, th) = open_size(w, h, asked.width, asked.height);
     let y0 = card.y1 + GAP * k;
     if open {
         let strip = PRect::new(card.x0, y0, card.x0 + tw, y0 + th);
         let fx0 = strip.x1 + GAP * k;
-        let fx = PRect::new(fx0, y0, fx0 + w.max(h) * FX_SHARE, y0 + th);
+        let fx = PRect::new(fx0, y0, fx0 + fx_width(w, h, asked.fx), y0 + th);
         Geom { k, card, strip, fx: Some(fx) }
     } else {
         let sh = (CLOSED_HEADER + bars.min(MAX_BARS) as f64 * BAR + 2.0) * k;
@@ -121,13 +172,27 @@ pub(crate) fn geom(card: PRect, asked: Option<f64>, open: bool, bars: usize) -> 
 
 /// The width dragged for card `id` (its plugin data).
 pub(crate) fn asked_width(doc: &Document, id: NodeId) -> Option<f64> {
-    doc.node(id)?.plugin_data.get(WIDTH_KEY)?.parse::<f64>().ok().filter(|w| w.is_finite() && *w > 0.0)
+    asked(doc, id, WIDTH_KEY)
+}
+
+/// The height dragged for card `id` (its plugin data).
+pub(crate) fn asked_height(doc: &Document, id: NodeId) -> Option<f64> {
+    asked(doc, id, HEIGHT_KEY)
+}
+
+/// Everything dragged for card `id`.
+pub(crate) fn asked_size(doc: &Document, id: NodeId) -> Size {
+    Size { width: asked_width(doc, id), height: asked_height(doc, id), fx: asked(doc, id, FX_WIDTH_KEY) }
+}
+
+fn asked(doc: &Document, id: NodeId, key: &str) -> Option<f64> {
+    doc.node(id)?.plugin_data.get(key)?.parse::<f64>().ok().filter(|w| w.is_finite() && *w > 0.0)
 }
 
 /// Card `id`'s strip as it stands (`open`: its Timeline is open; `bars`: its closed strip's).
 pub(crate) fn geom_of(doc: &Document, id: NodeId, open: bool, bars: usize) -> Option<Geom> {
     let b = doc.world_bounds(id)?;
-    (b.width() > 0.0 && b.height() > 0.0 && b.x0.is_finite() && b.y0.is_finite()).then(|| geom(b, asked_width(doc, id), open, bars))
+    (b.width() > 0.0 && b.height() > 0.0 && b.x0.is_finite() && b.y0.is_finite()).then(|| geom(b, asked_size(doc, id), open, bars))
 }
 
 /// A page box on screen.
@@ -330,10 +395,58 @@ pub(crate) fn draw_closed(app: &FigApp, painter: &egui::Painter, doc: &Document,
     }
 }
 
-/// The right edge drag that widens the open Timeline: the card, the nodes it pushed and how far.
+/// An edge that sizes the open Timeline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Edge {
+    /// The Timeline's right edge: its width.
+    Right,
+    /// The bottom edge (Timeline and Effect Controls): their height.
+    Bottom,
+    /// The Timeline's bottom-right corner: both.
+    Corner,
+    /// Effect Controls' right edge: its width.
+    FxRight,
+}
+
+impl Edge {
+    pub(crate) const ALL: [Edge; 4] = [Edge::Right, Edge::Bottom, Edge::FxRight, Edge::Corner];
+
+    fn label(self) -> &'static str {
+        match self {
+            Edge::Right => "Widen Timeline",
+            Edge::Bottom => "Heighten Timeline",
+            Edge::Corner => "Resize Timeline",
+            Edge::FxRight => "Widen Effect Controls",
+        }
+    }
+
+    pub(crate) fn cursor(self) -> egui::CursorIcon {
+        match self {
+            Edge::Right | Edge::FxRight => egui::CursorIcon::ResizeHorizontal,
+            Edge::Bottom => egui::CursorIcon::ResizeVertical,
+            Edge::Corner => egui::CursorIcon::ResizeNwSe,
+        }
+    }
+
+    /// The sizes a drag to page point (`x`, `y`) asks for, for a Timeline at `g`.
+    pub(crate) fn size(self, g: &Geom, x: f64, y: f64) -> Size {
+        let width = Some(x - g.strip.x0);
+        let height = Some(y - g.strip.y0);
+        match self {
+            Edge::Right => Size { width, ..Size::default() },
+            Edge::Bottom => Size { height, ..Size::default() },
+            Edge::Corner => Size { width, height, fx: None },
+            Edge::FxRight => Size { fx: g.fx.map(|f| x - f.x0), ..Size::default() },
+        }
+    }
+}
+
+/// An edge of the open Timeline being dragged: the card, the edge, and the nodes it pushed and
+/// how far (x, y).
 pub(crate) struct Widen {
     pub card: NodeId,
-    pub pushed: HashMap<NodeId, f64>,
+    pub edge: Edge,
+    pub pushed: HashMap<NodeId, (f64, f64)>,
 }
 
 /// The top-level node (a child of `page`) holding `id`.
@@ -348,76 +461,133 @@ fn top_of(doc: &Document, page: NodeId, id: NodeId) -> NodeId {
     at
 }
 
-/// Widen card `card`'s open Timeline to `width` (page units) in `doc` (the gesture's snapshot):
-/// its plugin data, and the page's top-level nodes that the Timeline and its Effect Controls would
-/// now cover moved right, each at least as far as before in this drag (`pushed`). `strips`: the
-/// other cards and their closed strips' bar counts; a strip counts as part of the node holding it.
-pub(crate) fn widen(
+/// Resize card `card`'s open Timeline in `doc` (the gesture's snapshot) to `size` (page units;
+/// `None`: as it is; `fx`: Effect Controls' width): its plugin data, and the page's top-level nodes the
+/// Timeline and its Effect Controls would now cover moved away, each at least as far as before in
+/// this drag (`pushed`, x and y). Wider pushes what is to the right in the card-and-Timeline
+/// band right; taller pushes what is below in its columns down; pushed nodes push the ones behind
+/// them, a small gap kept. `strips`: the other cards and their closed strips' bar counts; a strip
+/// counts as part of the node holding it.
+pub(crate) fn resize(
     doc: &mut Document,
     page: NodeId,
     card: NodeId,
-    width: f64,
+    size: Size,
     strips: &[(NodeId, usize)],
-    pushed: &mut HashMap<NodeId, f64>,
+    pushed: &mut HashMap<NodeId, (f64, f64)>,
 ) -> Option<()> {
     let b = doc.world_bounds(card)?;
     let least = least_width(b.width(), b.height());
-    if !least.is_finite() || doc.node(card)?.effectcraft.is_none() {
+    let (lo, hi) = height_range(b.width(), b.height());
+    if !least.is_finite() || !lo.is_finite() || doc.node(card)?.effectcraft.is_none() {
         return None;
     }
-    let width = if width.is_finite() { width.clamp(least, least.max(b.width().max(b.height()) * MAX_WIDTH)) } else { least };
-    doc.get_mut(card).ok()?.plugin_data.insert(WIDTH_KEY.into(), format!("{width:.1}"));
-    let strips: Vec<(NodeId, PRect)> = strips.iter().filter_map(|(id, bars)| Some((*id, geom_of(doc, *id, false, *bars)?.strip))).collect();
-    let g = geom(b, Some(width), true, 0);
+    let side = b.width().max(b.height());
+    let width = size.width.map(|w| if w.is_finite() { w.clamp(least, least.max(side * MAX_WIDTH)) } else { least });
+    let height = size.height.map(|h| if h.is_finite() { h.clamp(lo, hi) } else { lo });
+    let (fx_lo, _, fx_hi) = fx_range(b.width(), b.height());
+    let fx = size.fx.map(|w| if w.is_finite() { w.clamp(fx_lo, fx_hi) } else { fx_lo });
+    {
+        let data = &mut doc.get_mut(card).ok()?.plugin_data;
+        for (key, v) in [(WIDTH_KEY, width), (HEIGHT_KEY, height), (FX_WIDTH_KEY, fx)] {
+            if let Some(v) = v {
+                data.insert(key.into(), format!("{v:.1}"));
+            }
+        }
+    }
+    let g = geom_of(doc, card, true, 0)?;
     let column = PRect::new(b.x0, b.y0, g.whole().x1, g.whole().y1);
     let gap = GAP * g.k;
     let own = top_of(doc, page, card);
-    // The page's other top-level nodes to the column's right in its band, left to right.
-    let mut others: Vec<(NodeId, PRect)> = doc
-        .node(page)?
-        .children
-        .clone()
-        .into_iter()
-        .filter(|id| *id != own)
-        .filter_map(|id| {
-            let n = doc.node(id)?;
-            if !n.visible {
-                return None;
-            }
-            let mut r = doc.world_bounds(id)?;
-            for (sc, sr) in &strips {
-                if top_of(doc, page, *sc) == id {
-                    r = r.union(*sr);
+    // The page's other top-level nodes and what each covers (its cards' strips included).
+    let boxes = |doc: &Document| -> Vec<(NodeId, PRect)> {
+        let Some(n) = doc.node(page) else { return Vec::new() };
+        n.children
+            .iter()
+            .copied()
+            .filter(|id| *id != own)
+            .filter_map(|id| {
+                if !doc.node(id)?.visible {
+                    return None;
                 }
+                let mut r = doc.world_bounds(id)?;
+                for (sc, bars) in strips {
+                    if top_of(doc, page, *sc) == id
+                        && let Some(sg) = geom_of(doc, *sc, false, *bars)
+                    {
+                        r = r.union(sg.strip);
+                    }
+                }
+                (r.x0.is_finite() && r.y0.is_finite()).then_some((id, r))
+            })
+            .collect()
+    };
+    let mut moves: Vec<(NodeId, f64, f64)> = Vec::new();
+    if width.is_some() || fx.is_some() {
+        // To the column's right in its band, left to right.
+        let mut others: Vec<(NodeId, PRect)> =
+            boxes(doc).into_iter().filter(|(_, r)| r.y0 < column.y1 && r.y1 > column.y0 && r.x0 >= b.x0 + 1e-6).collect();
+        others.sort_by(|a, b| a.1.x0.total_cmp(&b.1.x0));
+        let mut frontier = column.x1 + gap;
+        for (id, r) in others {
+            let (before, _) = pushed_by(pushed, id);
+            let dx = before.max(frontier - r.x0).max(0.0);
+            if dx > 0.0 {
+                moves.push((id, dx, 0.0));
+                frontier = frontier.max(r.x1 + dx + gap);
             }
-            (r.y0 < column.y1 && r.y1 > column.y0 && r.x0 >= b.x0 + 1e-6 && r.x0.is_finite()).then_some((id, r))
-        })
-        .collect();
-    others.sort_by(|a, b| a.1.x0.total_cmp(&b.1.x0));
-    let mut frontier = column.x1 + gap;
-    for (id, r) in others {
-        let before = pushed.get(&id).copied().unwrap_or(0.0);
-        let dx = before.max(frontier - r.x0).max(0.0);
-        if dx > 0.0 {
-            let w = doc.world_transform(id);
-            let _ = doc.set_world_transform(id, figcraft_geom::Affine::translate((dx, 0.0)) * w);
-            pushed.insert(id, dx);
-            frontier = frontier.max(r.x1 + dx + gap);
         }
+    }
+    apply(doc, pushed, &moves);
+    if height.is_some() {
+        // Below the card in the column's x-range, top to bottom.
+        let mut moves: Vec<(NodeId, f64, f64)> = Vec::new();
+        let mut others: Vec<(NodeId, PRect)> =
+            boxes(doc).into_iter().filter(|(_, r)| r.x0 < column.x1 && r.x1 > column.x0 && r.y0 >= b.y1 - 1e-6).collect();
+        others.sort_by(|a, b| a.1.y0.total_cmp(&b.1.y0));
+        let mut frontier = column.y1 + gap;
+        for (id, r) in others {
+            let (_, before) = pushed_by(pushed, id);
+            let dy = before.max(frontier - r.y0).max(0.0);
+            if dy > 0.0 {
+                moves.push((id, 0.0, dy));
+                frontier = frontier.max(r.y1 + dy + gap);
+            }
+        }
+        apply(doc, pushed, &moves);
     }
     Some(())
 }
 
-/// Start, follow or end the right-edge drag of card `card`'s Timeline (`edge`: its response;
-/// `x`: the pointer's page x).
-pub(crate) fn widen_input(app: &mut FigApp, card: NodeId, edge: &egui::Response, x: Option<f64>) {
-    if edge.drag_started() {
-        let _ = app.session.begin_interaction("Widen Timeline");
-        app.effectcraft.widen = Some(Widen { card, pushed: HashMap::new() });
+fn pushed_by(pushed: &HashMap<NodeId, (f64, f64)>, id: NodeId) -> (f64, f64) {
+    pushed.get(&id).copied().unwrap_or((0.0, 0.0))
+}
+
+/// Move each node by its (dx, dy) and remember how far it went on each axis.
+fn apply(doc: &mut Document, pushed: &mut HashMap<NodeId, (f64, f64)>, moves: &[(NodeId, f64, f64)]) {
+    for (id, dx, dy) in moves {
+        let w = doc.world_transform(*id);
+        let _ = doc.set_world_transform(*id, figcraft_geom::Affine::translate((*dx, *dy)) * w);
+        let e = pushed.entry(*id).or_insert((0.0, 0.0));
+        if *dx > 0.0 {
+            e.0 = *dx;
+        }
+        if *dy > 0.0 {
+            e.1 = *dy;
+        }
     }
-    if edge.dragged()
-        && let Some(x) = x
-        && let Some(w) = app.effectcraft.widen.as_mut().filter(|w| w.card == card)
+}
+
+/// Start, follow or end a drag of edge `edge` of card `card`'s Timeline (`resp`: the edge's
+/// response; `at`: the pointer's page point).
+pub(crate) fn resize_input(app: &mut FigApp, card: NodeId, resp: &egui::Response, edge: Edge, at: Option<(f64, f64)>) {
+    if resp.drag_started() {
+        let _ = app.session.begin_interaction(edge.label());
+        app.effectcraft.widen = Some(Widen { card, edge, pushed: HashMap::new() });
+    }
+    if resp.dragged()
+        && let Some((x, y)) = at
+        && let Some(w) = app.effectcraft.widen.as_mut().filter(|w| w.card == card && w.edge == edge)
     {
         let mut pushed = std::mem::take(&mut w.pushed);
         let (doc, page) = match app.session.ds() {
@@ -428,17 +598,18 @@ pub(crate) fn widen_input(app: &mut FigApp, card: NodeId, edge: &egui::Response,
             .into_iter()
             .filter_map(|(id, _)| Some((id, app.effectcraft.strips.peek(doc.node(id)?.effectcraft.as_deref()?).map_or(1, |b| b.bars.len().max(1)))))
             .collect();
-        let Some(b) = doc.world_bounds(card) else { return };
-        let width = x - b.x0;
+        let Some(g) = geom_of(&doc, card, true, 0) else { return };
+        let size = edge.size(&g, x, y);
         let _ = app.session.preview(|d, _| {
-            widen(d, page, card, width, &strips, &mut pushed);
+            resize(d, page, card, size, &strips, &mut pushed);
             Ok(())
         });
         if let Some(w) = app.effectcraft.widen.as_mut() {
             w.pushed = pushed;
         }
     }
-    if edge.drag_stopped() && app.effectcraft.widen.take().is_some() {
+    if resp.drag_stopped() && app.effectcraft.widen.as_ref().is_some_and(|w| w.edge == edge) {
+        app.effectcraft.widen = None;
         let _ = app.session.commit_interaction();
     }
 }
