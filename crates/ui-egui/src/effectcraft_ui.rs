@@ -355,7 +355,14 @@ impl Link {
 
     /// The texture of comp frame `f` of `c`, or the nearest one there is within the card's
     /// stretch and `NEAR` of `f` (else the card shows its poster, not some other moment).
-    fn texture_near(&self, c: &EcComp, f: i64) -> Option<&FrameTex> {
+    fn texture_near(&self, c: &EcComp, f: i64, prefer: Option<u32>) -> Option<&FrameTex> {
+        // The size the card asks for (a preview resolution) when it has this frame: a larger
+        // one held from before would hide the choice.
+        if let Some(side) = prefer
+            && let Some(slot) = self.stores.get(&StoreKey::of(c, side)).and_then(|s| s.frames.get(&f))
+        {
+            return Some(&slot.tex);
+        }
         let mut best: Option<(i64, u32, &FrameTex)> = None;
         let r = c.frames();
         let reach = (c.fps * NEAR).round().max(1.0) as i64;
@@ -655,7 +662,11 @@ pub fn overlay(app: &FigApp, painter: &egui::Painter) {
         let pic = fit(r, c.width, c.height);
         let t = card_time(app, doc, id, c, hover);
         let f = frame_at(c, t);
-        let drawn = match app.effectcraft.texture_near(c, f) {
+        #[cfg(feature = "effectcraft-inproc")]
+        let prefer = cards::chosen_side(app, id, c);
+        #[cfg(not(feature = "effectcraft-inproc"))]
+        let prefer = None;
+        let drawn = match app.effectcraft.texture_near(c, f, prefer) {
             Some(tex) => {
                 painter.rect_filled(r, CornerRadius::ZERO, Color32::from_rgb(0x0C, 0x0C, 0x0E));
                 painter.image(tex.id(), pic, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
@@ -1151,6 +1162,20 @@ impl FigApp {
             && p.card == id
             && !p.host.stale()
         {
+            p.open = true;
+            p.focused = true;
+            return true;
+        }
+        // Another card of the same project: the Timeline switches to its comp in the same
+        // session (unsaved edits and all), as EffectCraft switches comps.
+        if let Some(p) = self.effectcraft.panel.as_mut()
+            && p.host.path() == key
+            && !p.host.stale()
+            && let Some(comp) = p.host.comp_of(&c)
+        {
+            p.host.set_comp(comp);
+            p.card = id;
+            p.synced = None;
             p.open = true;
             p.focused = true;
             return true;

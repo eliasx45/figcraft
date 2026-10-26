@@ -338,6 +338,12 @@ impl EcHost {
         }
     }
 
+    /// The id of card comp `comp` in this session's project (`None`: not in it).
+    pub fn comp_of(&self, comp: &EcComp) -> Option<u64> {
+        let comp_ref = if comp.comp_id > 0 { json!(comp.comp_id) } else { json!(comp.comp) };
+        self.ec.comp_id(&comp_ref).ok()
+    }
+
     /// The Timeline's current time (comp seconds).
     pub fn time(&self) -> f64 {
         self.ec.session().time().seconds()

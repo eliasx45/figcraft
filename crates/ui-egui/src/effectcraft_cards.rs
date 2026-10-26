@@ -452,7 +452,9 @@ fn viewer_factor(app: &FigApp, c: &EcComp) -> Option<u32> {
     }
     let key = figcraft_ec_inproc::key(Path::new(&c.project));
     if let Some(p) = app.effectcraft.panel.as_ref().filter(|p| p.host.path() == key) {
-        let comp = TimelineHost::session(&p.host).project.comp(ItemId(c.comp_id))?;
+        // (By name when the card has no id: cards placed from the app before ids.)
+        let id = p.host.comp_of(c)?;
+        let comp = TimelineHost::session(&p.host).project.comp(ItemId(id))?;
         return comp.resolution.factor().map(u32::from);
     }
     app.effectcraft.strips.peek(c).and_then(|b| b.resolution).map(u32::from)
@@ -464,14 +466,19 @@ pub(crate) fn side_at(c: &EcComp, k: u32) -> u32 {
     (c.width.max(c.height) / k).clamp(16, 8192)
 }
 
-/// The frame size for card `id` (`auto`: what its size on screen needs; `previewing`: it plays or
-/// caches, so the Space preset's resolution, Auto meaning the viewer's).
+/// The frame size for card `id` (`auto`: what its size on screen needs).
 fn side_of(app: &FigApp, id: NodeId, c: &EcComp, auto: u32) -> u32 {
+    chosen_side(app, id, c).unwrap_or(auto)
+}
+
+/// The frame size card `id` shows when a preview resolution decides it (`None`: Auto, the
+/// sharpest frame held). Playing or caching, the Space preset's resolution (Auto: the viewer's).
+pub(crate) fn chosen_side(app: &FigApp, id: NodeId, c: &EcComp) -> Option<u32> {
     let st = &app.effectcraft.cards;
     let t = &app.session.effectcraft;
     let previewing = (t.playing() && t.node == Some(id)) || st.cache.as_ref().is_some_and(|k| k.card == id);
     let factor = if previewing { st.preview_factor.or_else(|| viewer_factor(app, c)) } else { viewer_factor(app, c) };
-    factor.map_or(auto, |k| side_at(c, k))
+    factor.map(|k| side_at(c, k))
 }
 
 /// The frames of `c` held at frame size `side`, of `frames`.

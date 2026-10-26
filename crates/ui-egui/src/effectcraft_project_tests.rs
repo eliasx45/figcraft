@@ -270,3 +270,26 @@ fn a_new_card_lands_in_a_free_spot() {
     let clear = super::free_x(doc, card, None, 5000.0, 0.0, 400.0, 225.0, 40.0);
     assert_eq!(clear, 5000.0, "a free spot is kept");
 }
+
+#[test]
+fn another_card_of_the_project_takes_the_timeline_with_its_unsaved_edits() {
+    let (dir, p, cid) = sample("switch-cards");
+    let (mut u, card) = app_with_card(&p, cid, 0.0);
+    assert!(u.app.effectcraft_open_panel(card));
+    u.frame(vec![]);
+    u.app.run("select.set", json!({"ids": [card]}));
+    u.app.run("effectcraft.newComp", json!({"name": "Second", "width": 64, "height": 36, "frameRate": 25, "duration": 2})).unwrap();
+    u.frame(vec![]);
+    u.frame(vec![]);
+    let second = u.app.effectcraft.panel.as_ref().unwrap().card;
+    assert_ne!(second, card);
+    assert!(u.app.effectcraft.panel.as_ref().unwrap().host.is_dirty());
+    // Back to the first card: no "save first".
+    assert!(u.app.effectcraft_open_panel(card));
+    let panel = u.app.effectcraft.panel.as_ref().unwrap();
+    assert_eq!(panel.card, card, "the Timeline moved back");
+    assert_eq!(panel.host.comp(), cid);
+    assert!(panel.host.is_dirty(), "the new comp is still there, unsaved");
+    assert!(panel.host.session().project.items.values().any(|i| i.name == "Second"));
+    let _ = std::fs::remove_dir_all(dir);
+}

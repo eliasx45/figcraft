@@ -359,3 +359,19 @@ fn junk_never_panics() {
     }
     let _ = std::fs::remove_dir_all(d);
 }
+
+#[test]
+fn a_card_placed_by_comp_name_follows_the_viewer_resolution_too() {
+    let (d, p, cid) = sample("resolution-by-name");
+    let (mut u, card) = app_with_card(&p, cid, 640.0);
+    assert!(u.app.effectcraft_open_panel(card));
+    u.frame(vec![]);
+    // Cards placed from the app before comp ids carry the name only (compId 0).
+    let mut c = comp(cid, &p);
+    c.comp_id = 0;
+    assert_eq!(super::chosen_side(&u.app, card, &c), None, "Auto");
+    let h = &mut u.app.effectcraft.panel.as_mut().unwrap().host;
+    TimelineHost::session_mut(h).set_resolution(ItemId(cid), Resolution::Quarter).unwrap();
+    assert_eq!(super::chosen_side(&u.app, card, &c), Some(480), "the viewer's Quarter of 1920");
+    let _ = std::fs::remove_dir_all(d);
+}
