@@ -1089,6 +1089,7 @@ impl FigApp {
         if let Some(p) = self.effectcraft.panel.as_mut()
             && p.host.path() == key
             && p.card == id
+            && !p.host.stale()
         {
             p.open = true;
             p.focused = true;
@@ -1103,8 +1104,12 @@ impl FigApp {
             }
             return true;
         }
-        let owns = !matches!(io::app_state_now(&key), io::AppState::Closed | io::AppState::Other);
-        match crate::effectcraft_panel::EcHost::open(&key, &c, owns) {
+        // The app has the project open: the panel mirrors its project (edits land there).
+        let opened = match io::app_state_now(&key) {
+            io::AppState::Owns => crate::effectcraft_panel::EcHost::open_mirror_tcp(&key, &c, self.ui_context.clone()),
+            state => crate::effectcraft_panel::EcHost::open(&key, &c, state == io::AppState::Unknown),
+        };
+        match opened {
             Ok(host) => {
                 if let Some(old) = self.effectcraft.panel.take() {
                     self.effectcraft_send(io::Job::Override { path: old.path(), snapshot: None });
@@ -1231,6 +1236,13 @@ impl FigApp {
 
     /// Save the Timeline's project (asking the app first: it may have opened it since).
     fn effectcraft_save(&mut self, p: &mut crate::effectcraft_panel::Panel) {
+        if p.host.mirrored() {
+            match p.host.save(true) {
+                Ok(()) => self.toast("Saving in EffectCraft"),
+                Err(e) => self.toast(e),
+            }
+            return;
+        }
         let owns = !matches!(io::app_state_now(p.host.path()), io::AppState::Closed | io::AppState::Other);
         match p.host.save(owns) {
             Ok(()) => self.toast("Saved the EffectCraft project"),
@@ -1247,6 +1259,16 @@ impl FigApp {
             self.effectcraft.panel_rects = None;
             return;
         };
+        // A mirror of the app's project: its edits out, the app's in. The card's frames come from
+        // the app: ask for its revision now.
+        if p.host.mirrored() {
+            if p.host.sync() {
+                self.effectcraft.revision_asked = f64::NEG_INFINITY;
+            }
+            if p.open {
+                ctx.request_repaint_after(crate::effectcraft_panel::mirror::PULL_EVERY);
+            }
+        }
         if !p.open {
             self.effectcraft.panel_rects = None;
             self.effectcraft.panel = Some(p);
@@ -1306,6 +1328,9 @@ impl FigApp {
                         } else if p.host.is_dirty() {
                             ui.label("● unsaved");
                             save = ui.button("Save").clicked();
+                        } else if p.host.mirrored() {
+                            ui.label(egui::RichText::new("⇄ live in EffectCraft").color(t.text_secondary))
+                                .on_hover_text("Edits here are EffectCraft's: its undo, its unsaved changes, its ⌘S");
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             close = ui.button("✕").on_hover_text("Close the Timeline").clicked();
@@ -1348,7 +1373,7 @@ impl FigApp {
         }
         // Edits re-render the card from this session (pictures, sound and precomps).
         let rev = effectcraft_ui_egui::panels::timeline::TimelineHost::session(&p.host).revision;
-        if p.host.read_only().is_none() && rev != p.host.shown_revision {
+        if p.host.renders_here() && rev != p.host.shown_revision {
             p.host.shown_revision = rev;
             let snapshot = p.host.snapshot();
             self.effectcraft_want(&p.path(), Some(snapshot.revision));

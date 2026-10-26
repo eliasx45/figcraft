@@ -5,12 +5,21 @@
 //! The panel is `effectcraft_ui_egui::panels::timeline::show` drawn against [`EcHost`], a
 //! [`TimelineHost`] over an in-process EffectCraft session of the card's saved `.ecproj`.
 //!
-//! - **Who edits.** The session may edit only when the EffectCraft app doesn't have that project
-//!   open (asked once, when the panel opens). Then edits mark the project unsaved, the card
-//!   re-renders live (its frames render from this session's snapshot, `io::Job::Override`), and
-//!   ⌘S while the panel has focus saves the `.ecproj` with EffectCraft's own (atomic) save. When
-//!   the app has it open, or can't say what it has open, the panel is read-only: it says "open in
-//!   EffectCraft — edit there", and anything that changes the project is undone at once.
+//! - **Who edits.** Asked once, when the panel opens:
+//!   - The EffectCraft app doesn't have the project open: the session edits the file's project.
+//!     Edits mark it unsaved, the card re-renders live (its frames render from this session's
+//!     snapshot, `io::Job::Override`), and ⌘S while the panel has focus saves the `.ecproj` with
+//!     EffectCraft's own (atomic) save.
+//!   - The app has it open: the session is a **mirror** of the app's project
+//!     ([`mirror`], decision and protocol there). Every edit here lands in the app as an undo
+//!     step of its own (unsaved there, drawn there at once), the app's edits show here live,
+//!     ⌘Z / ⇧⌘Z undo and redo in the app's history and ⌘S saves in the app. The app wins any
+//!     disagreement: the mirror takes the app's project again. Until it is in step with the app,
+//!     while the app doesn't answer, or when it has another project open, the panel is
+//!     read-only (it says why).
+//!   - The app can't say what it has open, or can't mirror (an older EffectCraft): read-only,
+//!     "open in EffectCraft — edit there". Read-only means anything that changes the project is
+//!     undone at once.
 //! - **Pointer.** Clicks, drags and scroll over the Timeline and its Effect Controls are theirs
 //!   (the canvas leaves them alone); ⌘-scroll and pinch still zoom the canvas, and Space held
 //!   pans it.
@@ -26,8 +35,10 @@
 //!   with a status message, never applied to the card's comp.
 //! - **One playhead.** The card's playhead and the Timeline's current time follow each other:
 //!   scrubbing either moves both, and Space plays the card with the Timeline following.
-//! - **Undo.** ⌘Z / ⇧⌘Z (⌘Y) undo and redo EffectCraft's edits while the panel has focus and
-//!   FigCraft's otherwise; neither reaches the other's history.
+//! - **Undo.** ⌘Z / ⇧⌘Z (⌘Y) undo and redo EffectCraft's edits while the panel has focus (the
+//!   app's history when it has the project open) and FigCraft's otherwise; neither reaches the
+//!   other's history. Each press on the panel starts a new undo step (a drag is one step), as in
+//!   EffectCraft.
 //! - Effect Controls (the selected layer's effects) sit to the right of the Timeline, on the
 //!   canvas too.
 //! - **Graph Editor and speed curves.** The header's Graph button or Shift+F3 shows EffectCraft's
@@ -39,6 +50,10 @@
 //!   panel itself.
 
 use std::path::{Path, PathBuf};
+
+/// Fork: the panel's session as a mirror of the EffectCraft app's project.
+#[path = "effectcraft_mirror.rs"]
+pub(crate) mod mirror;
 
 use effectcraft_ui_egui::automation::Registry;
 use effectcraft_ui_egui::dock::PanelKind;
@@ -69,6 +84,8 @@ pub struct EcHost {
     focus: PanelKind,
     /// What FigCraft's canvas shows under the pointer this frame, for an armed eyedropper.
     pub(crate) pointer: Option<PointerColor>,
+    /// The app has the project open: the session mirrors it ([`mirror`]).
+    pub(crate) mirror: Option<mirror::Mirror>,
 }
 
 impl EcHost {
@@ -92,7 +109,56 @@ impl EcHost {
             shown_revision,
             focus: PanelKind::Timeline,
             pointer: None,
+            mirror: None,
         })
+    }
+
+    /// Open the card's comp as a mirror of the EffectCraft app's open project, reached through
+    /// `transport` ([`mirror::Threaded`] over [`mirror::Tcp`] in the app). Read-only until the
+    /// first pull arrives ([`EcHost::sync`]).
+    pub fn open_mirror(path: &Path, comp: &EcComp, transport: Box<dyn mirror::Transport>) -> Result<EcHost, String> {
+        let mut h = EcHost::open(path, comp, false)?;
+        let m = mirror::Mirror::new(h.ec.path(), transport);
+        h.read_only = m.read_only();
+        h.mirror = Some(m);
+        Ok(h)
+    }
+
+    /// [`EcHost::open_mirror`] over the app's control channel, its requests on a thread of their own.
+    pub fn open_mirror_tcp(path: &Path, comp: &EcComp, ctx: Option<egui::Context>) -> Result<EcHost, String> {
+        let t = mirror::Threaded::start(Box::new(mirror::Tcp::new()), ctx).ok_or("EffectCraft mirror: couldn't start its thread")?;
+        EcHost::open_mirror(path, comp, Box::new(t))
+    }
+
+    /// Mirroring the app's project: one step of it, each frame (see [`mirror::Mirror::sync`]).
+    /// `true`: the app's project changed (its frames are new). Standalone: nothing.
+    pub fn sync(&mut self) -> bool {
+        let Some(m) = self.mirror.as_mut() else { return false };
+        let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| m.sync(self.ec.session_mut()))).unwrap_or_else(|_| {
+            log::warn!("EffectCraft mirror: an internal error");
+            mirror::Outcome::default()
+        });
+        self.read_only = m.read_only();
+        if let Some(st) = out.status {
+            self.ui.status = st;
+        }
+        out.app_changed
+    }
+
+    /// The session mirrors the app's project.
+    pub fn mirrored(&self) -> bool {
+        self.mirror.is_some()
+    }
+
+    /// A mirror that lost its app (it answers no more, or has another project open): opening
+    /// the Timeline again starts afresh.
+    pub fn stale(&self) -> bool {
+        self.mirror.as_ref().is_some_and(|m| matches!(m.state, mirror::State::Down(_) | mirror::State::Elsewhere))
+    }
+
+    /// The card's frames render from this session (its own edits); a mirror's come from the app.
+    pub fn renders_here(&self) -> bool {
+        self.read_only.is_none() && self.mirror.is_none()
     }
 
     pub fn read_only(&self) -> Option<&str> {
@@ -103,8 +169,9 @@ impl EcHost {
         self.ec.path()
     }
 
+    /// Unsaved edits only this panel has (a mirror's are the app's to save).
     pub fn is_dirty(&self) -> bool {
-        self.read_only.is_none() && self.ec.is_dirty()
+        self.read_only.is_none() && self.mirror.is_none() && self.ec.is_dirty()
     }
 
     /// What the card's frames render from while this host has edits.
@@ -115,6 +182,10 @@ impl EcHost {
     /// Save over the `.ecproj`. `app_owns_now`: asked again just before (the app may have opened it
     /// since the panel did).
     pub fn save(&mut self, app_owns_now: bool) -> Result<(), String> {
+        // A mirror: the app saves its project.
+        if let Some(m) = self.mirror.as_mut() {
+            return m.forward("file.save", json!({}));
+        }
         if let Some(why) = &self.read_only {
             return Err(why.clone());
         }
@@ -128,6 +199,13 @@ impl EcHost {
     /// Read-only: undo whatever changed the project (it stays as saved).
     fn keep_read_only(&mut self, before: u64) {
         if self.read_only.is_none() || self.ec.session().revision == before {
+            return;
+        }
+        // A mirror: the app's project as last seen.
+        if let Some(m) = self.mirror.as_mut()
+            && m.revert(self.ec.session_mut())
+        {
+            self.ui.status = self.read_only.clone().unwrap_or_default();
             return;
         }
         let _ = self.ec.session_mut().execute("edit.undo", json!({}));
@@ -145,6 +223,12 @@ impl EcHost {
     /// expanded in the Timeline runs ([`hosted::inline`]), it goes to that precomp
     /// (`comp.inlineEdit`, [`hosted::engine_command`]) as in EffectCraft.
     fn guarded_run(&mut self, id: &str, params: Value) -> Result<Value, String> {
+        // A mirror: undo, redo and save run in the app (its history, its file).
+        if let Some(m) = self.mirror.as_mut()
+            && mirror::FORWARDED.contains(&id)
+        {
+            return m.forward(id, params).map(|()| json!({"forwarded": true}));
+        }
         let before = self.ec.session().revision;
         let (cmd, params) = hosted::engine_command(self, id, params);
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.ec.session_mut().execute(&cmd, params).map_err(|e| e.to_string())))
@@ -163,6 +247,13 @@ impl EcHost {
     pub fn show(&mut self, ui: &mut egui::Ui, timeline: egui::Rect, fx: Option<egui::Rect>) {
         let before = self.ec.session().revision;
         self.auto.begin_frame();
+        // A press starts a new undo step (EffectCraft's app does the same with each press), so
+        // two drags of one property are two steps, here and in the app a mirror pushes to.
+        if ui.input(|i| i.pointer.any_pressed())
+            && ui.input(|i| i.pointer.interact_pos()).is_some_and(|p| timeline.contains(p) || fx.is_some_and(|f| f.contains(p)))
+        {
+            self.ec.session_mut().history.merge_key = None;
+        }
         let drew = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             if let Some(f) = fx {
                 effectcraft_ui_egui::panels::effect_controls::show(self, ui, f);
@@ -222,6 +313,20 @@ impl EcHost {
     pub fn work_area(&self) -> Option<((f64, f64), f64)> {
         let c = self.ec.session().project.comp(ItemId(self.comp))?;
         Some(((c.work_area.0.seconds(), c.work_area.1.seconds()), c.duration.seconds()))
+    }
+
+    /// The comp the Timeline edits (its id in the project).
+    pub fn comp(&self) -> u64 {
+        self.comp
+    }
+
+    /// Edit comp `id` of this project from now on (a comp made or opened from the Project tab
+    /// becomes a card): same session, unsaved edits and all.
+    pub fn set_comp(&mut self, id: u64) {
+        if self.ec.session().project.comp(ItemId(id)).is_some() {
+            self.ec.session_mut().open_comp(ItemId(id));
+            self.comp = id;
+        }
     }
 
     /// The Timeline's current time (comp seconds).

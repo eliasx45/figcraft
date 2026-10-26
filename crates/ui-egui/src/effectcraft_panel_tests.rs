@@ -376,3 +376,299 @@ fn a_press_on_the_card_keeps_undo_in_effectcraft() {
     u.button(card_r.center(), false);
     assert!(u.app.effectcraft.panel.as_ref().unwrap().focused, "a press on the card gives the panel the keyboard");
 }
+
+// The panel as a mirror of the EffectCraft app's project (`mirror`). The app is an in-process
+// EffectCraft session on the same file, reached synchronously (`mirror::Direct`).
+
+mod mirrored {
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+
+    use effectcraft_ui_egui::panels::timeline::TimelineHost;
+    use figcraft_doc::EcComp;
+    use figcraft_ec_inproc::InProc;
+    use figcraft_ec_inproc::effectcraft_engine::project::ItemId;
+    use serde_json::{Value, json};
+
+    use super::super::mirror::{self, DOWN, DROPPED, Direct, ELSEWHERE, Link, LinkError};
+    use super::super::{EcHost, READ_ONLY};
+    use super::{input, key, layers, sample};
+
+    /// The EffectCraft app: its engine on the project, reachable unless `down`; `mirrors`: it has
+    /// `project.mirror` (an older one doesn't).
+    struct App {
+        app: Rc<RefCell<InProc>>,
+        down: Rc<Cell<bool>>,
+        mirrors: bool,
+    }
+
+    impl Link for App {
+        fn call(&mut self, command: &str, params: Value) -> Result<Value, LinkError> {
+            if self.down.get() {
+                return Err(LinkError::Down("EffectCraft isn't open".into()));
+            }
+            if !self.mirrors && command.starts_with("project.") {
+                return Err(LinkError::Refused(format!("unknown command `{command}`")));
+            }
+            self.app.borrow_mut().session_mut().execute(command, params).map_err(|e| LinkError::Refused(e.to_string()))
+        }
+    }
+
+    struct Rig {
+        h: EcHost,
+        app: Rc<RefCell<InProc>>,
+        down: Rc<Cell<bool>>,
+        c: EcComp,
+    }
+
+    /// The app has `app_path` open (the card's project unless given); the panel mirrors it.
+    fn rig(name: &str, mirrors: bool, app_path: Option<&std::path::Path>) -> Rig {
+        let (p, c) = sample(name);
+        let app = Rc::new(RefCell::new(InProc::open(app_path.unwrap_or(&p)).unwrap()));
+        if let Ok(id) = app.borrow().comp_id(&json!(c.comp)) {
+            app.borrow_mut().session_mut().open_comp(ItemId(id));
+        }
+        let down = Rc::new(Cell::new(false));
+        let link = App { app: app.clone(), down: down.clone(), mirrors };
+        let mut h = EcHost::open_mirror(&p, &c, Box::new(Direct::new(Box::new(link)))).unwrap();
+        if let Some(m) = h.mirror.as_mut() {
+            m.pull_every = std::time::Duration::ZERO;
+            m.retry_every = std::time::Duration::ZERO;
+        }
+        let mut r = Rig { h, app, down, c };
+        r.settle();
+        r
+    }
+
+    impl Rig {
+        /// A few frames: what's out comes back, what's next goes out.
+        fn settle(&mut self) {
+            for _ in 0..6 {
+                self.h.sync();
+            }
+        }
+        fn app_layers(&self) -> usize {
+            self.app.borrow().session().project.comp(ItemId(self.c.comp_id)).map_or(0, |c| c.layers.len())
+        }
+        fn app_exec(&self, id: &str, params: Value) -> Value {
+            self.app.borrow_mut().session_mut().execute(id, params).unwrap()
+        }
+        fn same(&self) -> bool {
+            self.h.session().project.same_content(&self.app.borrow().session().project)
+        }
+    }
+
+    fn solid() -> Value {
+        json!({"color": "#00ff00", "width": 8, "height": 8})
+    }
+
+    /// An edit in the panel lands in the app: one undo step there, labelled, unsaved there (never
+    /// here), and both hold the same project.
+    #[test]
+    fn panel_edits_land_in_the_app() {
+        let mut r = rig("m-push", true, None);
+        assert!(r.h.mirrored());
+        assert_eq!(r.h.read_only(), None, "in step with the app: editable");
+        let n = layers(&r.h);
+        let steps = r.app.borrow().session().history.undo.len();
+        let ctx = egui::Context::default();
+        r.h.invoke(&ctx, "layer.newSolid", solid()).unwrap();
+        r.settle();
+        assert_eq!(r.app_layers(), n + 1, "the app has the panel's layer");
+        assert_eq!(layers(&r.h), n + 1);
+        assert!(r.same(), "one project");
+        assert!(r.app.borrow().session().is_dirty(), "unsaved in the app");
+        assert!(!r.h.is_dirty(), "the panel has nothing of its own to save");
+        let app = r.app.borrow();
+        assert_eq!(app.session().history.undo.len(), steps + 1);
+        let label = app.session().history.undo.last().map(|(l, _)| l.clone()).unwrap_or_default();
+        assert!(!label.is_empty() && label != "Edit in FigCraft", "the panel's own undo label: {label}");
+    }
+
+    /// The app's edits show in the panel (pulled), and nothing goes back the other way.
+    #[test]
+    fn app_edits_show_in_the_panel() {
+        let mut r = rig("m-pull", true, None);
+        let n = layers(&r.h);
+        r.app_exec("layer.newSolid", solid());
+        r.app_exec("layer.newSolid", solid());
+        let rev = r.app.borrow().session().revision;
+        r.settle();
+        assert_eq!(layers(&r.h), n + 2);
+        assert!(r.same());
+        assert_eq!(r.app.borrow().session().revision, rev, "pulling changed nothing in the app");
+    }
+
+    /// ⌘Z / ⇧⌘Z in the panel undo and redo in the app's history.
+    #[test]
+    fn undo_in_the_panel_is_the_apps() {
+        let mut r = rig("m-undo", true, None);
+        let ctx = egui::Context::default();
+        let n = layers(&r.h);
+        r.h.invoke(&ctx, "layer.newSolid", solid()).unwrap();
+        r.settle();
+        assert_eq!(r.app_layers(), n + 1);
+        let mut undo = input();
+        undo.events = vec![key(egui::Key::Z, egui::Modifiers::COMMAND)];
+        let _ = ctx.run_ui(undo, |_| {
+            let _ = r.h.keys(&ctx);
+        });
+        r.settle();
+        assert_eq!(r.app_layers(), n, "undone in the app");
+        assert_eq!(layers(&r.h), n, "and shown here");
+        let mut redo = input();
+        redo.events = vec![key(egui::Key::Z, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT)];
+        let _ = ctx.run_ui(redo, |_| {
+            let _ = r.h.keys(&ctx);
+        });
+        r.settle();
+        assert_eq!(r.app_layers(), n + 1, "redone in the app");
+        assert!(r.same());
+        // An undo of the app's own edit, from the panel: one history.
+        r.app_exec("layer.newSolid", solid());
+        r.settle();
+        assert!(r.h.invoke(&ctx, "edit.undo", json!({})).is_ok());
+        r.settle();
+        assert_eq!(r.app_layers(), n + 1);
+        assert_eq!(layers(&r.h), n + 1);
+    }
+
+    /// A drag (consecutive edits merged by the panel) is one undo step in the app, however many
+    /// pushes it took; a new press starts another.
+    #[test]
+    fn a_drag_is_one_undo_step_in_the_app() {
+        let mut r = rig("m-drag", true, None);
+        let steps = r.app.borrow().session().history.undo.len();
+        let wa = |r: &Rig| r.app.borrow().session().project.comp(ItemId(r.c.comp_id)).map(|c| c.work_area.0.seconds()).unwrap_or(-1.0);
+        let start = wa(&r);
+        for s in [0.2, 0.4, 0.6] {
+            r.h.session_mut().execute("comp.workArea", json!({"start": s, "end": 1.6, "merge": "wa-drag"})).unwrap();
+            r.settle();
+        }
+        assert!((wa(&r) - 0.6).abs() < 1e-6, "the drag's end is in the app: {}", wa(&r));
+        assert_eq!(r.app.borrow().session().history.undo.len(), steps + 1, "one step");
+        // The next gesture (a press resets the merge key) is a step of its own.
+        r.h.session_mut().history.merge_key = None;
+        r.h.session_mut().execute("comp.workArea", json!({"start": 0.8, "end": 1.6, "merge": "wa-drag"})).unwrap();
+        r.settle();
+        assert_eq!(r.app.borrow().session().history.undo.len(), steps + 2);
+        r.app_exec("edit.undo", json!({}));
+        r.app_exec("edit.undo", json!({}));
+        assert!((wa(&r) - start).abs() < 1e-6, "two undos take both gestures back");
+        r.settle();
+        assert!(r.same());
+    }
+
+    /// Both edit at once: the app wins, the panel's edit is dropped (said so) and the panel shows
+    /// the app's project; nothing forks.
+    #[test]
+    fn the_app_wins_when_both_edit() {
+        let mut r = rig("m-race", true, None);
+        let ctx = egui::Context::default();
+        let n = layers(&r.h);
+        // The panel's edit, not sent yet, and two of the app's.
+        r.h.invoke(&ctx, "prop.set", json!({"layer": "#1", "path": "transform/opacity", "value": 20})).unwrap();
+        r.app_exec("layer.newSolid", solid());
+        r.app_exec("layer.newSolid", solid());
+        r.settle();
+        assert_eq!(r.app_layers(), n + 2);
+        assert_eq!(layers(&r.h), n + 2, "the app's project");
+        assert!(r.same(), "one project, the app's");
+        assert_eq!(r.h.ui().status, DROPPED);
+        // Editing goes on from there.
+        r.h.invoke(&ctx, "layer.newSolid", solid()).unwrap();
+        r.settle();
+        assert_eq!(r.app_layers(), n + 3);
+        assert!(r.same());
+    }
+
+    /// The app stops answering: read-only (edits taken back, the app untouched), until it
+    /// answers again; then edits land again.
+    #[test]
+    fn an_unreachable_app_makes_the_panel_read_only_until_it_answers() {
+        let mut r = rig("m-down", true, None);
+        let ctx = egui::Context::default();
+        let n = layers(&r.h);
+        r.down.set(true);
+        r.settle();
+        assert_eq!(r.h.read_only(), Some(DOWN));
+        assert!(r.h.stale(), "opening the Timeline again starts afresh");
+        assert!(r.h.invoke(&ctx, "layer.newSolid", solid()).is_err());
+        assert_eq!(layers(&r.h), n, "taken back");
+        assert!(r.h.save(false).is_err(), "nothing to save it with");
+        // The app edits meanwhile (e.g. it was busy), then answers again.
+        r.down.set(false);
+        r.app_exec("layer.newSolid", solid());
+        r.settle();
+        assert_eq!(r.h.read_only(), None);
+        assert_eq!(layers(&r.h), n + 1, "the app's project");
+        r.h.invoke(&ctx, "layer.newSolid", solid()).unwrap();
+        r.settle();
+        assert_eq!(r.app_layers(), n + 2);
+        assert!(r.same());
+    }
+
+    /// An EffectCraft without `project.mirror`, or with another project open: read-only, the app
+    /// untouched.
+    #[test]
+    fn an_older_app_or_another_project_stays_read_only() {
+        let ctx = egui::Context::default();
+        let mut old = rig("m-old", false, None);
+        assert_eq!(old.h.read_only(), Some(READ_ONLY));
+        assert!(old.h.invoke(&ctx, "layer.newSolid", solid()).is_err());
+        let (other, _) = sample("m-other-file");
+        let mut r = rig("m-other", true, Some(&other));
+        assert_eq!(r.h.read_only(), Some(ELSEWHERE));
+        assert!(r.h.stale());
+        let n = r.app_layers();
+        assert!(r.h.invoke(&ctx, "layer.newSolid", solid()).is_err());
+        r.settle();
+        assert_eq!(r.app_layers(), n, "the other project is untouched");
+    }
+
+    /// ⌘S in a mirror saves in the app (its file, its unsaved mark); the panel never writes the
+    /// file itself.
+    #[test]
+    fn save_is_the_apps() {
+        let mut r = rig("m-save", true, None);
+        let ctx = egui::Context::default();
+        r.h.invoke(&ctx, "layer.newSolid", solid()).unwrap();
+        r.settle();
+        assert!(r.app.borrow().session().is_dirty());
+        r.h.save(false).unwrap();
+        r.settle();
+        assert!(!r.app.borrow().session().is_dirty(), "saved by the app");
+        let again = InProc::open(r.h.path()).unwrap();
+        assert_eq!(again.session().project.comp(ItemId(r.c.comp_id)).map(|c| c.layers.len()), Some(r.app_layers()));
+    }
+
+    /// Junk from the app never panics and never edits: the panel asks for the whole project again.
+    #[test]
+    fn junk_from_the_app_never_panics() {
+        struct Junk(u32);
+        impl Link for Junk {
+            fn call(&mut self, _: &str, _: Value) -> Result<Value, LinkError> {
+                self.0 += 1;
+                Ok(match self.0 % 5 {
+                    0 => json!(null),
+                    1 => json!({"revision": 3, "patch": {"fromRev": 1, "toRev": 3, "ops": [{"op": "remove", "id": 99}]}}),
+                    2 => json!({"revision": 4, "project": "{ nope"}),
+                    3 => json!({"revision": "x"}),
+                    _ => json!({"revision": 5, "unchanged": true}),
+                })
+            }
+        }
+        let (p, c) = sample("m-junk");
+        let mut h = EcHost::open_mirror(&p, &c, Box::new(Direct::new(Box::new(Junk(0))))).unwrap();
+        if let Some(m) = h.mirror.as_mut() {
+            m.pull_every = std::time::Duration::ZERO;
+        }
+        let n = layers(&h);
+        for _ in 0..40 {
+            h.sync();
+        }
+        assert!(h.read_only().is_some(), "never in step with junk");
+        assert_eq!(layers(&h), n);
+        let _ = mirror::CLIENT;
+    }
+}
