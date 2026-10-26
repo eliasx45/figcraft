@@ -218,12 +218,33 @@ pub(crate) fn to_panel(r: PRect, k: f64) -> Rect {
     Rect::from_min_max(pos2((r.x0 / k) as f32, (r.y0 / k) as f32), pos2((r.x1 / k) as f32, (r.y1 / k) as f32))
 }
 
-/// A comp's layers as bars: when each starts and ends (comp seconds) and its label colour.
+/// A comp's layers as bars: when each starts and ends (comp seconds) and its label colour; and
+/// its work area (comp seconds), for the card's preview rules.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Bars {
     pub duration: f64,
     pub count: usize,
     pub bars: Vec<(f64, f64, Color32)>,
+    pub work: (f64, f64),
+}
+
+type Preset = figcraft_ec_inproc::effectcraft_engine::preview::PreviewPreset;
+
+/// FigCraft's preview rules for a card ([`figcraft_engine::effectcraft::Preview`]) from
+/// EffectCraft's Space preview options `p` and the comp's work area and duration (comp seconds).
+/// Applied: range (work area, extended by the current time, entire duration, around the current
+/// time), play from, loop, frame rate and skip. Not: resolution, cache before playback, full
+/// screen, audio/video only, moving the current time to the preview time.
+pub(crate) fn preview_of(p: &Preset, work: (f64, f64), duration: f64) -> figcraft_engine::effectcraft::Preview {
+    use figcraft_ec_inproc::effectcraft_engine::preview::{PlayFrom, PreviewRange as R};
+    use figcraft_engine::effectcraft::{Preview, PreviewRange};
+    let range = match p.range {
+        R::WorkArea => PreviewRange::WorkArea,
+        R::WorkAreaExtended => PreviewRange::WorkAreaExtended,
+        R::EntireDuration => PreviewRange::Entire,
+        R::AroundCurrentTime => PreviewRange::Around { pre: p.pre_roll, post: p.post_roll },
+    };
+    Preview { work, duration, range, looping: p.loop_, from_start: p.play_from == PlayFrom::RangeStart, fps: p.frame_rate, skip: p.skip }
 }
 
 type BarsKey = (PathBuf, String);
@@ -252,10 +273,25 @@ pub(crate) struct Loader {
     stamps: HashMap<PathBuf, u64>,
     asked: HashSet<BarsKey>,
     checked: f64,
+    /// Elias's EffectCraft Space preview options (re-read every [`RECHECK`]).
+    preset: Option<(f64, Preset)>,
     chan: Option<(Sender<Job>, Receiver<Done>)>,
 }
 
 impl Loader {
+    /// EffectCraft's Space preview options: the person's own (EffectCraft's settings folder, read
+    /// again every [`RECHECK`] seconds), else EffectCraft's defaults.
+    pub(crate) fn space_preset(&mut self, now: f64) -> Preset {
+        match &self.preset {
+            Some((at, p)) if now - at <= RECHECK => p.clone(),
+            _ => {
+                let p = effectcraft_ui_egui::panels::timeline::hosted::user_preview().unwrap_or_default().spacebar;
+                self.preset = Some((now, p.clone()));
+                p
+            }
+        }
+    }
+
     /// The bars of card comp `c`, when read.
     pub(crate) fn peek(&self, c: &EcComp) -> Option<&Bars> {
         self.got.get(&bars_key(c)?)?.as_deref()
@@ -332,7 +368,7 @@ fn read_bars(ec: &figcraft_ec_inproc::InProc, c: &EcComp) -> Option<Bars> {
     let comp = ec.session().project.comp(ItemId(id))?;
     let tokens = effectcraft_ui_egui::theme::Tokens::for_kind(effectcraft_ui_egui::theme::ThemeKind::Dark);
     let bars = comp.layers.iter().take(MAX_BARS).map(|l| (l.in_point.seconds(), l.out_point.seconds(), tokens.label(l.label))).collect();
-    Some(Bars { duration: comp.duration.seconds(), count: comp.layers.len(), bars })
+    Some(Bars { duration: comp.duration.seconds(), count: comp.layers.len(), bars, work: (comp.work_area.0.seconds(), comp.work_area.1.seconds()) })
 }
 
 /// The cards with a closed strip on the current page (every card but the one whose Timeline is

@@ -886,8 +886,18 @@ impl FigApp {
         // Fork: the closed strips' layer bars.
         #[cfg(feature = "effectcraft-inproc")]
         {
-            let comps: Vec<EcComp> = ids.iter().filter_map(|id| doc.node(*id)?.effectcraft.as_deref().cloned()).collect();
+            let cards: Vec<(NodeId, EcComp)> = ids.iter().filter_map(|id| Some((*id, doc.node(*id)?.effectcraft.as_deref().cloned()?))).collect();
+            let comps: Vec<EcComp> = cards.iter().map(|(_, c)| c.clone()).collect();
             self.effectcraft.strips.feed(ctx, &comps, now);
+            // Cards play by EffectCraft's preview rules: the comp's work area (live from the open
+            // Timeline, else the saved project) and the Space preview options.
+            let preset = self.effectcraft.strips.space_preset(now);
+            for (id, c) in &cards {
+                let open = self.effectcraft.panel.as_ref().filter(|p| p.card == *id).and_then(|p| p.host.work_area());
+                let wa = open.or_else(|| self.effectcraft.strips.peek(c).map(|b| (b.work, b.duration)));
+                let pv = wa.map(|(w, d)| strips::preview_of(&preset, w, d));
+                self.session.effectcraft.set_preview(*id, pv);
+            }
         }
         let ppp = ctx.pixels_per_point();
         let hover = ctx.input(|i| i.pointer.hover_pos()).filter(|h| self.canvas.rect.contains(*h));

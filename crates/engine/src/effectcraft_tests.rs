@@ -133,3 +133,58 @@ fn explode_again_closes_the_cards_it_opened() {
     ok(&mut s, "effectcraft.explode", json!({"id": main, "open": true}));
     assert_eq!(s.ui_requests.len(), 1);
 }
+
+/// Regression (Elias, 26 Oct): a card played past its comp's work area (0–2.9 s) instead of
+/// looping in it. The loop range is the preview range within the card's stretch; play starts at
+/// the current time when it is inside it, else at its start; a card that plays once stops.
+#[test]
+fn cards_loop_by_effectcrafts_preview_rules() {
+    use crate::effectcraft::{Preview, PreviewRange, play_from, play_range, wrap};
+    let card = (0.0, 7.0);
+    let work = Preview { work: (0.0, 2.9), duration: 7.0, range: PreviewRange::WorkArea, ..Preview::default() };
+    // Work area ∩ card.
+    assert_eq!(play_range(card, Some(&work), 1.0), (0.0, 2.9));
+    assert_eq!(play_range((1.4, 5.1), Some(&work), 2.0), (1.4, 2.9), "the card's stretch cuts the work area");
+    assert_eq!(play_range((3.0, 5.0), Some(&work), 3.5), (3.0, 5.0), "no overlap: the card's stretch");
+    assert_eq!(play_range(card, None, 1.0), card, "no rules: the card's stretch");
+    // Extended by the current time (EffectCraft's default), whole comp, around the current time.
+    let ext = Preview { range: PreviewRange::WorkAreaExtended, ..work };
+    assert_eq!(play_range(card, Some(&ext), 4.0), (0.0, 4.0));
+    assert_eq!(play_range(card, Some(&Preview { range: PreviewRange::Entire, ..work }), 4.0), (0.0, 7.0));
+    assert_eq!(play_range(card, Some(&Preview { range: PreviewRange::Around { pre: 1.0, post: 2.0 }, ..work }), 4.0), (3.0, 6.0));
+    // Starts: inside the range from the current time; outside it (the playhead at 3:13) from
+    // its start; always from the start when the options say so.
+    assert_eq!(play_from((0.0, 2.9), Some(&work), Some(1.5)), 1.5);
+    assert_eq!(play_from((0.0, 2.9), Some(&work), Some(3.43)), 0.0);
+    assert_eq!(play_from((0.0, 2.9), Some(&Preview { from_start: true, ..work }), Some(1.5)), 0.0);
+    // Loops in the range; plays once and stops.
+    assert_eq!(wrap(2.0, (0.0, 2.9), true), Some(2.0));
+    assert!((wrap(3.4, (0.0, 2.9), true).unwrap() - 0.5).abs() < 1e-9);
+    assert!((wrap(6.3, (0.5, 2.5), true).unwrap() - 0.5 - (6.3 - 0.5) % 2.0).abs() < 1e-9);
+    assert_eq!(wrap(3.4, (0.0, 2.9), false), None);
+    // Junk never panics.
+    for t in [f64::NAN, f64::INFINITY, -1.0] {
+        let r = play_range(card, Some(&Preview { work: (f64::NAN, f64::INFINITY), duration: f64::NAN, ..work }), t);
+        assert!(r.0 <= r.1);
+        let _ = play_from(r, Some(&work), Some(t));
+        let _ = wrap(t, r, true);
+    }
+}
+
+/// The transport plays the card by its rules: from the work-area start when the playhead is
+/// past it, and a work area changed mid-play is the loop's at once.
+#[test]
+fn the_transport_follows_the_work_area() {
+    use crate::effectcraft::{Preview, PreviewRange};
+    let mut s = Session::new();
+    let id = card(&mut s, json!({"start": 0, "end": 7}));
+    let c = s.doc().unwrap().node(id).unwrap().effectcraft.as_deref().cloned().unwrap();
+    let rules = Preview { work: (0.0, 2.9), duration: 7.0, range: PreviewRange::WorkArea, ..Preview::default() };
+    s.effectcraft.set_preview(id, Some(rules));
+    s.effectcraft.play(id, &c, Some(3.43));
+    assert!(s.effectcraft.time() < 0.5, "started at the work area: {}", s.effectcraft.time());
+    s.effectcraft.set_preview(id, Some(Preview { work: (1.0, 2.0), ..rules }));
+    let t = s.effectcraft.time();
+    assert!((1.0..2.0).contains(&t), "the new work area at once: {t}");
+    assert!(s.effectcraft.playing());
+}

@@ -218,6 +218,12 @@ impl EcHost {
         out
     }
 
+    /// The comp's work area and duration (comp seconds), as edited here (B/N, the work-area bar).
+    pub fn work_area(&self) -> Option<((f64, f64), f64)> {
+        let c = self.ec.session().project.comp(ItemId(self.comp))?;
+        Some(((c.work_area.0.seconds(), c.work_area.1.seconds()), c.duration.seconds()))
+    }
+
     /// The Timeline's current time (comp seconds).
     pub fn time(&self) -> f64 {
         self.ec.session().time().seconds()
