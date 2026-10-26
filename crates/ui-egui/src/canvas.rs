@@ -782,6 +782,11 @@ fn input(app: &mut FigApp, ui: &mut Ui, resp: &egui::Response) -> bool {
     if !app.canvas.dragging && crate::video_ui::input(app, &ctx, pos, resp.hovered()) {
         return true;
     }
+    // Fork: the comp's layers on the card the docked EffectCraft panel edits (move, scale).
+    #[cfg(feature = "effectcraft-inproc")]
+    if !app.canvas.dragging && crate::effectcraft_ui::layer_handles_input(app, &ctx, pos, resp.hovered()) {
+        return false;
+    }
     if !app.canvas.dragging && crate::effectcraft_ui::input(app, &ctx, pos, resp.hovered(), resp.double_clicked() && !keep_drilling) {
         return true;
     }

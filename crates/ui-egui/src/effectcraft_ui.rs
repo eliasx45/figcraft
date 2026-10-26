@@ -31,6 +31,11 @@ use serde_json::{Value, json};
 
 use crate::FigApp;
 
+/// Fork: grab the comp's layers on the card the docked panel edits.
+#[cfg(feature = "effectcraft-inproc")]
+#[path = "effectcraft_handles.rs"]
+pub(crate) mod handles;
+
 /// Play / explode button radius (screen points).
 const BUTTON: f32 = 10.0;
 /// Texture memory kept for card frames (bytes).
@@ -233,6 +238,9 @@ pub struct Link {
     /// it alone: [`panel_takes_pointer`]).
     #[cfg(feature = "effectcraft-inproc")]
     pub(crate) panel_rect: Option<(u64, Rect)>,
+    /// Layer handles on the card the docked panel edits ([`handles`]).
+    #[cfg(feature = "effectcraft-inproc")]
+    pub(crate) handles: handles::State,
 }
 
 impl Store {
@@ -508,6 +516,9 @@ pub fn overlay(app: &FigApp, painter: &egui::Painter) {
             }
             None => false,
         };
+        // Fork: the selected layers' boxes and handles while the docked panel edits this card.
+        #[cfg(feature = "effectcraft-inproc")]
+        handles::draw(app, painter, id, c, pic, hover);
         let hovered = hover.is_some_and(|h| r.contains(h));
         let playing = ec.playing() && ec.node == Some(id);
         let scrubbing = app.effectcraft.scrub == Some(id);
@@ -626,6 +637,29 @@ pub(crate) fn panel_takes_pointer(app: &FigApp, ctx: &egui::Context, canvas_drag
     let rect = app.effectcraft.panel_rect.filter(|(p, _)| *p == pass).map(|(_, r)| r);
     let (hover, held_from) = ctx.input(|i| (i.pointer.hover_pos(), i.pointer.press_origin().filter(|_| i.pointer.any_down())));
     panel_has_pointer(rect, hover, held_from, canvas_drag)
+}
+
+/// Fork: the pointer on the layers of the card the docked panel edits ([`handles::input`]): a
+/// press on a layer or handle there (not on the card's buttons or slider) and the drag that
+/// follows. Returns whether it has the pointer (its own cursor shows).
+#[cfg(feature = "effectcraft-inproc")]
+pub fn layer_handles_input(app: &mut FigApp, ctx: &egui::Context, pos: Pos2, hovered: bool) -> bool {
+    if app.effectcraft.picking || app.effectcraft.scrub.is_some() {
+        return false;
+    }
+    let target = if app.effectcraft.handles.dragging() {
+        None
+    } else {
+        let Some(card) = app.effectcraft.panel.as_ref().filter(|p| p.open).map(|p| p.card) else { return false };
+        let Ok(ds) = app.session.ds() else { return false };
+        let (doc, page) = (ds.doc.clone(), ds.page);
+        let free = |pic: Rect| {
+            let on_button = buttons(pic).is_some_and(|(play, explode)| play.distance(pos) <= BUTTON + 2.0 || explode.distance(pos) <= BUTTON + 2.0);
+            !on_button && !on_slider(pic, pos)
+        };
+        card_at(app, &doc, page, pos).filter(|(id, pic)| *id == card && free(*pic))
+    };
+    handles::input(app, ctx, target, pos, hovered)
 }
 
 /// A press on a card's play or explode button or its slider (dragged, it scrubs), or a
