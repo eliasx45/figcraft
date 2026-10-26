@@ -18,11 +18,10 @@ use figcraft_doc::{Document, NodeId, VideoClip};
 use serde_json::json;
 
 use crate::FigApp;
-use crate::effectcraft_ui::{chip, fit, pointer, round_button, screen_rect};
+use crate::effectcraft_ui::{card_bar, chip, draw_track, fit, on_button, on_slider, pointer, readout, round_button, screen_rect};
 
-/// Button radius and slider grip height (screen points).
+/// Button radius (screen points).
 const BUTTON: f32 = 10.0;
-const SLIDER: f32 = 12.0;
 /// Frame sizes decoded (longest side, pixels): the smallest at least as big as the card on screen.
 const SIDES: [u32; 3] = [240, 480, 960];
 /// Most cards playing at once, and frames each decodes ahead.
@@ -150,9 +149,9 @@ pub(crate) fn side_for(px: f32, v: &VideoClip) -> u32 {
     fits().find(|s| *s as f32 >= px).unwrap_or_else(|| fits().next_back().unwrap_or(SIDES[0]))
 }
 
-/// The media second at screen x `x` on a card showing in `pic`.
-pub(crate) fn slider_time(v: &VideoClip, pic: Rect, x: f32) -> f64 {
-    let u = if pic.width() > 0.0 { f64::from(((x - pic.min.x) / pic.width()).clamp(0.0, 1.0)) } else { 0.0 };
+/// The media second at screen x `x` on a scrub track running along `track`.
+pub(crate) fn slider_time(v: &VideoClip, track: Rect, x: f32) -> f64 {
+    let u = if track.width() > 0.0 { f64::from(((x - track.min.x) / track.width()).clamp(0.0, 1.0)) } else { 0.0 };
     v.start + u * v.span()
 }
 
@@ -174,17 +173,6 @@ pub(crate) fn clock(v: &VideoClip, from: f64, run: f64) -> (f64, u64) {
 /// The poster's media second: a little way in (first frames are often black).
 pub(crate) fn poster_time(v: &VideoClip) -> f64 {
     v.start + (v.span() * 0.1).min(1.0)
-}
-
-/// The play button's centre (bottom-left, above the slider) and the play-all button's (top-right),
-/// when the card is big enough to hold them.
-fn buttons(pic: Rect) -> Option<(Pos2, Pos2)> {
-    (pic.width() > BUTTON * 6.0 && pic.height() > BUTTON * 5.0)
-        .then(|| (pos2(pic.min.x + BUTTON + 6.0, pic.max.y - BUTTON - SLIDER - 4.0), pos2(pic.max.x - BUTTON - 6.0, pic.min.y + BUTTON + 6.0)))
-}
-
-fn on_slider(pic: Rect, p: Pos2) -> bool {
-    pic.width() > 40.0 && (pic.min.x..=pic.max.x).contains(&p.x) && (pic.max.y - SLIDER..=pic.max.y + 3.0).contains(&p.y)
 }
 
 /// The media second card `id` shows now (the playing picture's, else the transport's, else the
@@ -239,33 +227,27 @@ pub fn overlay(app: &FigApp, painter: &egui::Painter) {
                 Color32::from_black_alpha(190),
             );
         }
-        let hovered = hover.is_some_and(|h| r.contains(h));
+        // The controls sit in a strip above the card (`card_bar`), so nothing covers the picture.
+        let bar = card_bar(pic);
+        let hovered = hover.is_some_and(|h| r.contains(h) || bar.is_some_and(|b| b.zone.contains(h)));
         let playing = tr.playing() && tr.node == Some(id);
         let scrubbing = app.videos.scrub == Some(id);
         if !(hovered || playing || scrubbing) {
             continue;
         }
+        let Some(bar) = bar else { continue };
         let t = shown_time(app, id, v);
-        // The slider: where the picture is in the stretch.
-        if pic.width() > 40.0 && v.span() > 0.0 {
-            let grip = scrubbing || hover.is_some_and(|h| on_slider(pic, h));
-            let th = if grip { 5.0 } else { 3.0 };
-            let track = Rect::from_min_max(pos2(pic.min.x, pic.max.y - th), pic.max);
-            painter.rect_filled(track, CornerRadius::ZERO, Color32::from_black_alpha(140));
-            let u = ((t - v.start) / v.span()).clamp(0.0, 1.0) as f32;
-            let x = pic.min.x + pic.width() * u;
-            painter.rect_filled(Rect::from_min_max(track.min, pos2(x, track.max.y)), CornerRadius::ZERO, Color32::from_white_alpha(90));
-            painter.circle_filled(pos2(x, track.center().y), if grip { 6.0 } else { 4.0 }, Color32::WHITE);
+        // The scrub track: where the picture is in the stretch.
+        if let Some(track) = bar.track
+            && v.span() > 0.0
+        {
+            let grip = scrubbing || hover.is_some_and(|h| track.contains(h));
+            draw_track(painter, track, None, Some(((t - v.start) / v.span()) as f32), grip, true);
         }
         let sound = if playing && v.sound { "  🔊" } else { "" };
-        chip(
-            painter,
-            pic.min + vec2(6.0, 6.0),
-            format!("{}  {}{sound}", v.file_name(), crate::audio_ui::timecode(t)),
-            font.clone(),
-            Color32::from_black_alpha(170),
-        );
-        if let Some((play, all)) = buttons(pic) {
+        readout(painter, bar.readout_right, bar.play.y, format!("{}{sound}", crate::audio_ui::timecode(t)), font.clone());
+        {
+            let (play, all) = (bar.play, bar.second);
             let fg = Color32::WHITE;
             round_button(painter, play);
             if playing {
@@ -294,15 +276,6 @@ pub fn overlay(app: &FigApp, painter: &egui::Painter) {
     }
 }
 
-/// The topmost video card under screen point `pos` and its picture's box.
-fn card_at(app: &FigApp, doc: &Document, page: NodeId, pos: Pos2) -> Option<(NodeId, VideoClip, Rect)> {
-    cards(doc, page).into_iter().rev().find_map(|id| {
-        let v = doc.node(id)?.video.as_deref()?;
-        let r = screen_rect(app, doc, id)?;
-        r.contains(pos).then(|| (id, v.clone(), fit(r, v.width, v.height)))
-    })
-}
-
 /// A press on a card's play or play-all button or its slider (dragged, it scrubs). Returns
 /// whether the pointer was used.
 pub fn input(app: &mut FigApp, ctx: &egui::Context, pos: Pos2, hovered: bool) -> bool {
@@ -319,21 +292,25 @@ pub fn input(app: &mut FigApp, ctx: &egui::Context, pos: Pos2, hovered: bool) ->
     }
     let Ok(ds) = app.session.ds() else { return false };
     let (doc, page) = (ds.doc.clone(), ds.page);
-    let Some((id, _, pic)) = card_at(app, &doc, page, pos) else { return false };
-    if let Some((play, all)) = buttons(pic) {
-        if play.distance(pos) <= BUTTON + 2.0 {
+    // The controls are above the cards (`card_bar`): the topmost card whose strip is hit.
+    for id in cards(&doc, page).into_iter().rev() {
+        let Some(pic) = doc.node(id).and_then(|n| n.video.as_deref()).and_then(|v| Some(fit(screen_rect(app, &doc, id)?, v.width, v.height))) else {
+            continue;
+        };
+        let Some(bar) = card_bar(pic) else { continue };
+        if on_button(bar.play, pos) {
             app.run("video.togglePlay", json!({"id": id}));
             return true;
         }
-        if all.distance(pos) <= BUTTON + 2.0 {
+        if on_button(bar.second, pos) {
             app.run("video.playAll", json!({}));
             return true;
         }
-    }
-    if on_slider(pic, pos) {
-        app.videos.scrub = Some(id);
-        scrub_to(app, id, pos);
-        return true;
+        if on_slider(pic, pos) {
+            app.videos.scrub = Some(id);
+            scrub_to(app, id, pos);
+            return true;
+        }
     }
     false
 }
@@ -375,7 +352,8 @@ fn scrub_to(app: &mut FigApp, id: NodeId, pos: Pos2) {
     let Ok(doc) = app.session.doc() else { return };
     let Some(v) = doc.node(id).and_then(|n| n.video.as_deref()) else { return };
     let Some(r) = screen_rect(app, doc, id) else { return };
-    let t = slider_time(v, fit(r, v.width, v.height), pos.x);
+    let Some(track) = card_bar(fit(r, v.width, v.height)).and_then(|b| b.track) else { return };
+    let t = slider_time(v, track, pos.x);
     app.run("video.seek", json!({"id": id, "time": t}));
 }
 

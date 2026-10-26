@@ -483,24 +483,90 @@ fn frame_at(c: &EcComp, t: f64) -> i64 {
     c.frame_of(t).clamp(*r.start(), *r.end())
 }
 
-/// The play button's centre (bottom-left of the picture, above the slider) and the explode
-/// button's (top-right), when the card shows big enough to hold them.
-fn buttons(pic: Rect) -> Option<(Pos2, Pos2)> {
-    (pic.width() > BUTTON * 6.0 && pic.height() > BUTTON * 5.0)
-        .then(|| (pos2(pic.min.x + BUTTON + 6.0, pic.max.y - BUTTON - SLIDER - 4.0), pos2(pic.max.x - BUTTON - 6.0, pic.min.y + BUTTON + 6.0)))
+/// Height kept free above a card for its title (the frame's name label).
+const TITLE: f32 = 20.0;
+/// Width kept for the frame readout left of a card's buttons.
+const READOUT: f32 = 96.0;
+
+/// A card's controls, in a strip above its title so nothing covers the picture (EffectCraft and
+/// video cards share it): the scrub track along the left, the readout, then the play button and
+/// the second button (explode, play all) at the right end.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct CardBar {
+    /// The strip, and the stretch hovering counts as the card's (the strip and the title).
+    pub row: Rect,
+    pub zone: Rect,
+    /// Where the scrub track runs (its whole height grabs it); `None` on a narrow card.
+    pub track: Option<Rect>,
+    /// The readout's right edge, and the buttons' centres.
+    pub readout_right: f32,
+    pub play: Pos2,
+    pub second: Pos2,
 }
 
-/// Height of the slider's grip zone along the bottom of the picture (screen pixels).
-const SLIDER: f32 = 12.0;
-
-/// Whether screen point `p` is on the slider of a card showing in `pic`.
-fn on_slider(pic: Rect, p: Pos2) -> bool {
-    pic.width() > 40.0 && (pic.min.x..=pic.max.x).contains(&p.x) && (pic.max.y - SLIDER..=pic.max.y + 3.0).contains(&p.y)
+/// The controls of a card whose picture shows in `pic` (`None` when it shows too small).
+pub(crate) fn card_bar(pic: Rect) -> Option<CardBar> {
+    if !(pic.width() > BUTTON * 6.0 && pic.height() > BUTTON * 3.0) {
+        return None;
+    }
+    let cy = pic.min.y - TITLE - BUTTON - 2.0;
+    let row = Rect::from_min_max(pos2(pic.min.x, cy - BUTTON - 2.0), pos2(pic.max.x, cy + BUTTON + 2.0));
+    let second = pos2(pic.max.x - BUTTON, cy);
+    let play = pos2(second.x - BUTTON * 2.0 - 4.0, cy);
+    let readout_right = play.x - BUTTON - 6.0;
+    let track_end = readout_right - READOUT - 8.0;
+    let track = (track_end - pic.min.x >= 40.0).then(|| Rect::from_min_max(pos2(pic.min.x, row.min.y), pos2(track_end, row.max.y)));
+    Some(CardBar { row, zone: Rect::from_min_max(row.min, pos2(pic.max.x, pic.min.y)), track, readout_right, play, second })
 }
 
-/// The comp time at screen x `x` on a card showing in `pic`.
-pub(crate) fn slider_time(c: &EcComp, pic: Rect, x: f32) -> f64 {
-    let u = if pic.width() > 0.0 { f64::from(((x - pic.min.x) / pic.width()).clamp(0.0, 1.0)) } else { 0.0 };
+/// Whether screen point `p` is on a card bar's button centred at `b`.
+pub(crate) fn on_button(b: Pos2, p: Pos2) -> bool {
+    b.distance(p) <= BUTTON + 3.0
+}
+
+/// Whether screen point `p` is on the scrub track of a card showing in `pic`.
+pub(crate) fn on_slider(pic: Rect, p: Pos2) -> bool {
+    card_bar(pic).and_then(|b| b.track).is_some_and(|t| t.contains(p))
+}
+
+/// Draw a card bar's scrub track: `cached` of it held (a fraction; EffectCraft's cache bar) and
+/// the playhead at fraction `at` (`grip`: grabbed or hovered, drawn thicker).
+pub(crate) fn draw_track(painter: &egui::Painter, track: Rect, cached: Option<f32>, at: Option<f32>, grip: bool, active: bool) {
+    let th = if grip {
+        5.0
+    } else if active {
+        3.0
+    } else {
+        2.0
+    };
+    let bar = Rect::from_center_size(track.center(), vec2(track.width(), th));
+    painter.rect_filled(bar, CornerRadius::same(1), Color32::from_white_alpha(28));
+    if let Some(u) = cached {
+        let x = bar.min.x + bar.width() * u.clamp(0.0, 1.0);
+        painter.rect_filled(
+            Rect::from_min_max(bar.min, pos2(x, bar.max.y)),
+            CornerRadius::same(1),
+            Color32::from_rgba_unmultiplied(0x2F, 0xB3, 0x6F, 170),
+        );
+    }
+    if let Some(u) = at {
+        let x = bar.min.x + bar.width() * u.clamp(0.0, 1.0);
+        painter.rect_filled(Rect::from_min_max(bar.min, pos2(x, bar.max.y)), CornerRadius::same(1), Color32::from_white_alpha(70));
+        painter.circle_filled(pos2(x, bar.center().y), if grip { 6.0 } else { 4.0 }, Color32::WHITE);
+    }
+}
+
+/// Draw `text` as a readout chip ending at `right`, centred on `cy`.
+pub(crate) fn readout(painter: &egui::Painter, right: f32, cy: f32, text: String, font: egui::FontId) {
+    let g = painter.layout_no_wrap(text, font, Color32::WHITE);
+    let bg = Rect::from_min_size(pos2(right - g.size().x - 8.0, cy - (g.size().y + 4.0) / 2.0), g.size() + vec2(8.0, 4.0));
+    painter.rect_filled(bg, CornerRadius::same(3), Color32::from_black_alpha(170));
+    painter.galley(bg.min + vec2(4.0, 2.0), g, Color32::WHITE);
+}
+
+/// The comp time at screen x `x` on a scrub track running along `track`.
+pub(crate) fn slider_time(c: &EcComp, track: Rect, x: f32) -> f64 {
+    let u = if track.width() > 0.0 { f64::from(((x - track.min.x) / track.width()).clamp(0.0, 1.0)) } else { 0.0 };
     c.start + u * c.span()
 }
 
@@ -552,37 +618,21 @@ pub fn overlay(app: &FigApp, painter: &egui::Painter) {
         // Fork: the selected layers' boxes and handles while the Timeline edits this card.
         #[cfg(feature = "effectcraft-inproc")]
         handles::draw(app, painter, id, c, pic, hover);
-        let hovered = hover.is_some_and(|h| r.contains(h));
+        let bar = card_bar(pic);
+        let hovered = hover.is_some_and(|h| r.contains(h) || bar.is_some_and(|b| b.zone.contains(h)));
         let playing = ec.playing() && ec.node == Some(id);
         let scrubbing = app.effectcraft.scrub == Some(id);
-        // The slider: the frames held (EffectCraft's cache bar) and, on hover, the playhead knob.
+        // The scrub track above the card: the frames held (EffectCraft's cache bar) and, on
+        // hover, the playhead knob.
         let (have, total) = app.effectcraft.coverage(c);
         let active = hovered || playing || scrubbing;
-        if pic.width() > 40.0 && (active || (total > 0 && have < total)) {
-            let grip = scrubbing || hover.is_some_and(|h| on_slider(pic, h));
-            let th = if grip {
-                5.0
-            } else if active {
-                3.0
-            } else {
-                2.0
-            };
-            let track = Rect::from_min_max(pos2(pic.min.x, pic.max.y - th), pic.max);
-            painter.rect_filled(track, CornerRadius::ZERO, Color32::from_black_alpha(140));
-            if total > 0 {
-                let x = pic.min.x + pic.width() * have as f32 / total as f32;
-                painter.rect_filled(
-                    Rect::from_min_max(track.min, pos2(x, track.max.y)),
-                    CornerRadius::ZERO,
-                    Color32::from_rgba_unmultiplied(0x2F, 0xB3, 0x6F, 170),
-                );
-            }
-            if active && c.span() > 0.0 {
-                let u = ((t - c.start) / c.span()).clamp(0.0, 1.0) as f32;
-                let x = pic.min.x + pic.width() * u;
-                painter.rect_filled(Rect::from_min_max(track.min, pos2(x, track.max.y)), CornerRadius::ZERO, Color32::from_white_alpha(70));
-                painter.circle_filled(pos2(x, track.center().y), if grip { 6.0 } else { 4.0 }, Color32::WHITE);
-            }
+        if let Some(track) = bar.and_then(|b| b.track)
+            && (active || (total > 0 && have < total))
+        {
+            let grip = scrubbing || hover.is_some_and(|h| track.contains(h));
+            let cached = (total > 0).then(|| have as f32 / total as f32);
+            let at = (active && c.span() > 0.0).then(|| ((t - c.start) / c.span()) as f32);
+            draw_track(painter, track, cached, at, grip, active);
         }
         if !drawn && let Some(why) = app.effectcraft.down() {
             let project = std::path::Path::new(&c.project).file_name().map(|f| f.to_string_lossy().into_owned()).filter(|f| !f.is_empty());
@@ -594,9 +644,11 @@ pub fn overlay(app: &FigApp, painter: &egui::Painter) {
         }
         if hovered || playing {
             let from = if app.effectcraft.headless && app.effectcraft.down().is_some() { "  · saved file" } else { "" };
-            let label = format!("{}  f{}  {}{from}", c.comp, f, crate::audio_ui::timecode(c.timeline_of(t)));
-            chip(painter, pic.min + vec2(6.0, 6.0), label, font.clone(), Color32::from_black_alpha(170));
-            if let Some((play, explode)) = buttons(pic) {
+            if let Some(bar) = bar {
+                let label = format!("f{}  {}{from}", f, crate::audio_ui::timecode(c.timeline_of(t)));
+                readout(painter, bar.readout_right, bar.play.y, label, font.clone());
+            }
+            if let Some((play, explode)) = bar.map(|b| (b.play, b.second)) {
                 round_button(painter, play);
                 let fg = Color32::WHITE;
                 if playing {
@@ -656,6 +708,24 @@ fn card_at(app: &FigApp, doc: &Document, page: NodeId, pos: Pos2) -> Option<(Nod
     })
 }
 
+/// The play (`true`) or explode button of the topmost card under screen point `pos` (the buttons
+/// sit above their card).
+fn button_at(app: &FigApp, doc: &Document, page: NodeId, pos: Pos2) -> Option<(NodeId, bool)> {
+    cards(doc, page).into_iter().rev().find_map(|id| {
+        let c = doc.node(id)?.effectcraft.as_deref()?;
+        let bar = card_bar(fit(screen_rect(app, doc, id)?, c.width, c.height))?;
+        if on_button(bar.play, pos) { Some((id, true)) } else { on_button(bar.second, pos).then_some((id, false)) }
+    })
+}
+
+/// The topmost card whose scrub track (above it) is under screen point `pos`.
+fn track_at(app: &FigApp, doc: &Document, page: NodeId, pos: Pos2) -> Option<NodeId> {
+    cards(doc, page).into_iter().rev().find(|id| {
+        let pic = doc.node(*id).and_then(|n| n.effectcraft.as_deref()).and_then(|c| Some(fit(screen_rect(app, doc, *id)?, c.width, c.height)));
+        pic.is_some_and(|pic| on_slider(pic, pos))
+    })
+}
+
 /// Whether the pointer belongs to the open EffectCraft Timeline (`panel`: its rectangles on
 /// screen, Effect Controls included, as last drawn): over it, or pressed in it and still held (a
 /// drag out of the Timeline). A press that began on the canvas (`canvas_drag`) keeps its moves and
@@ -695,10 +765,7 @@ pub fn layer_handles_input(app: &mut FigApp, ctx: &egui::Context, pos: Pos2, hov
         let Some(card) = app.effectcraft.panel.as_ref().filter(|p| p.open).map(|p| p.card) else { return false };
         let Ok(ds) = app.session.ds() else { return false };
         let (doc, page) = (ds.doc.clone(), ds.page);
-        let free = |pic: Rect| {
-            let on_button = buttons(pic).is_some_and(|(play, explode)| play.distance(pos) <= BUTTON + 2.0 || explode.distance(pos) <= BUTTON + 2.0);
-            !on_button && !on_slider(pic, pos)
-        };
+        let free = |pic: Rect| !card_bar(pic).is_some_and(|b| b.zone.contains(pos));
         card_at(app, &doc, page, pos).filter(|(id, pic)| *id == card && free(*pic))
     };
     handles::input(app, ctx, target, pos, hovered)
@@ -739,7 +806,16 @@ pub fn input(app: &mut FigApp, ctx: &egui::Context, pos: Pos2, hovered: bool, do
         }
         return true;
     }
-    let Some((id, pic)) = card_at(app, &doc, page, pos) else { return false };
+    if pressed && let Some((id, play)) = button_at(app, &doc, page, pos) {
+        app.run(if play { "effectcraft.togglePlay" } else { "effectcraft.explode" }, json!({"id": id}));
+        return true;
+    }
+    if pressed && let Some(id) = track_at(app, &doc, page, pos) {
+        app.effectcraft.scrub = Some(id);
+        scrub_to(app, id, pos);
+        return true;
+    }
+    let Some((id, _)) = card_at(app, &doc, page, pos) else { return false };
     if double {
         // Fork: EffectCraft's Timeline under the card, editing the card's comp.
         #[cfg(feature = "effectcraft-inproc")]
@@ -750,31 +826,17 @@ pub fn input(app: &mut FigApp, ctx: &egui::Context, pos: Pos2, hovered: bool, do
         app.run("effectcraft.reveal", json!({"id": id, "time": t}));
         return true;
     }
-    if let Some((play, explode)) = buttons(pic) {
-        if play.distance(pos) <= BUTTON + 2.0 {
-            app.run("effectcraft.togglePlay", json!({"id": id}));
-            return true;
-        }
-        if explode.distance(pos) <= BUTTON + 2.0 {
-            app.run("effectcraft.explode", json!({"id": id}));
-            return true;
-        }
-    }
-    if pressed && on_slider(pic, pos) {
-        app.effectcraft.scrub = Some(id);
-        scrub_to(app, id, pos);
-        return true;
-    }
     false
 }
 
-/// Put card `id`'s playhead at the slider point under `pos` (it plays on from there when it was
+/// Put card `id`'s playhead at the scrub-track point under `pos` (it plays on from there when it was
 /// playing).
 fn scrub_to(app: &mut FigApp, id: NodeId, pos: Pos2) {
     let Ok(doc) = app.session.doc() else { return };
     let Some(c) = doc.node(id).and_then(|n| n.effectcraft.as_deref()) else { return };
     let Some(r) = screen_rect(app, doc, id) else { return };
-    let t = slider_time(c, fit(r, c.width, c.height), pos.x);
+    let Some(track) = card_bar(fit(r, c.width, c.height)).and_then(|b| b.track) else { return };
+    let t = slider_time(c, track, pos.x);
     app.effectcraft.shown.insert(id, t);
     app.run("effectcraft.seek", json!({"id": id, "time": t}));
 }

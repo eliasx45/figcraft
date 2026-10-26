@@ -6,7 +6,7 @@ use egui::{Rect, pos2};
 use figcraft_doc::{EcComp, NodeId};
 use serde_json::json;
 
-use crate::effectcraft_ui::{explode_steps, fit, order, side_for, slider_time};
+use crate::effectcraft_ui::{card_bar, explode_steps, fit, on_button, on_slider, order, side_for, slider_time};
 
 fn main_card() -> EcComp {
     EcComp::new("MAIN", 1.4, 5.1, 29.97)
@@ -109,4 +109,24 @@ fn frames_of_an_older_panel_edit_are_asked_again() {
     assert!(!Store::with_revisions(Some(1), None).stale(), "no panel edits: the file's frames stay");
     assert!(Store::with_revisions(Some(1), Some(2)).stale(), "an edit makes them stale");
     assert!(!Store::with_revisions(Some(2), Some(2)).stale(), "frames of the edit are fresh");
+}
+
+#[test]
+fn nothing_of_the_card_bar_covers_the_picture() {
+    // EffectCraft and video cards share the bar: buttons, readout and scrub track sit above the
+    // card's title, so the picture stays as clean as EffectCraft's Composition panel.
+    for pic in [Rect::from_min_size(pos2(100.0, 200.0), egui::vec2(480.0, 270.0)), Rect::from_min_size(pos2(-50.0, 0.0), egui::vec2(160.0, 284.0))] {
+        let bar = card_bar(pic).unwrap();
+        assert!(bar.zone.max.y <= pic.min.y && bar.row.max.y < pic.min.y - 16.0, "the strip clears the picture and its title");
+        for b in [bar.play, bar.second] {
+            assert!(b.y + 10.0 < pic.min.y, "{b:?} covers the comp");
+            assert!(on_button(b, b + egui::vec2(12.0, 0.0)), "a generous hit zone");
+        }
+        assert!(bar.play.x < bar.second.x && bar.readout_right < bar.play.x);
+        if let Some(track) = bar.track {
+            assert!(track.max.y < pic.min.y && track.max.x < bar.readout_right);
+            assert!(on_slider(pic, track.center()) && !on_slider(pic, pic.center()), "scrubbed above the card, not on it");
+        }
+    }
+    assert!(card_bar(Rect::from_min_size(pos2(0.0, 0.0), egui::vec2(40.0, 30.0))).is_none(), "too small: no bar");
 }
