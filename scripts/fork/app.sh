@@ -37,7 +37,8 @@ running() { pgrep -f "^$bin( |$)" >/dev/null 2>&1; }
 # costs one no-op cargo run, then the stamp moves on).
 stale() {
     [ -x "$bin" ] && [ -f "$stamp" ] || return 0
-    [ -n "$(find "$root/apps" "$root/crates" "$root/assets" "$root/third_party" "$root/Cargo.toml" "$root/Cargo.lock" -newer "$stamp" -type f -print 2>/dev/null | head -n 1)" ]
+    # EffectCraft's crates too: the effectcraft-inproc build compiles them from ../effectcraft.
+    [ -n "$(find "$root/apps" "$root/crates" "$root/assets" "$root/third_party" "$root/Cargo.toml" "$root/Cargo.lock" "$root/../effectcraft/crates" -newer "$stamp" -type f -name '*' ! -path '*/target/*' -print 2>/dev/null | head -n 1)" ]
 }
 
 case "${1:-}" in

@@ -88,12 +88,21 @@ pub(crate) fn text(host: &mut EcHost, ui: &mut egui::Ui, rect: Rect) {
     }
     let line = if resp.hovered() || resp.dragged() { Stroke::new(2.0, t.accent) } else { Stroke::new(1.0, t.separator) };
     ui.painter().hline(divider.x_range(), divider.center().y, line);
+    // Each in its own clipped child, as EffectCraft docks them: their rows scroll and must not
+    // spill over the other panel.
     if character.height() > 4.0 {
-        text_panels::character(host, ui, character);
+        clipped(ui, character, |ui| text_panels::character(host, ui, character));
     }
     if paragraph.height() > 4.0 {
-        text_panels::paragraph(host, ui, paragraph);
+        clipped(ui, paragraph, |ui| text_panels::paragraph(host, ui, paragraph));
     }
+}
+
+/// `draw` in a child of `ui` that paints and hits only inside `rect`.
+fn clipped(ui: &mut egui::Ui, rect: Rect, draw: impl FnOnce(&mut egui::Ui)) {
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+    child.set_clip_rect(rect.intersect(ui.clip_rect()));
+    draw(&mut child);
 }
 
 /// EffectCraft's Markers panel under Add Comp Marker / Add Layer Marker.
