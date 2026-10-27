@@ -498,9 +498,13 @@ fn timeline_now(app: &FigApp, doc: &Document) -> Option<f64> {
     card_t.or(strip_t)
 }
 
-/// Comp time under the pointer `h` on card `id` (hover scrubbing), unless that card plays.
+/// Comp time under the pointer `h` on card `id` while ⌘ (Ctrl elsewhere) is held (scrubbing, as
+/// on video cards: hovering alone never moves the playhead), unless that card plays.
 fn hover_time(app: &FigApp, doc: &Document, id: NodeId, c: &EcComp, h: Option<Pos2>) -> Option<f64> {
     let h = h?;
+    if !app.ui_context.as_ref().is_some_and(|x| x.input(|i| i.modifiers.command)) {
+        return None;
+    }
     let ec = &app.session.effectcraft;
     if ec.playing() && ec.node == Some(id) {
         return None;

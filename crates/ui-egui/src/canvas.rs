@@ -164,7 +164,8 @@ fn pointer_event(app: &FigApp, kind: PointerKind, pos: Pos2, m: &egui::Modifiers
         alt: m.alt,
         cmd: m.command,
         ctrl: m.ctrl,
-        space: ctx.input(|i| i.key_down(egui::Key::Space)),
+        // Space a video card took is no hand tool.
+        space: ctx.input(|i| i.key_down(egui::Key::Space)) && !app.videos.owns_space(),
         ignore_layout: if crate::shortcuts::platform() == figcraft_engine::keymap::Platform::Mac {
             m.ctrl
         } else {
@@ -690,11 +691,13 @@ fn input(app: &mut FigApp, ui: &mut Ui, resp: &egui::Response) -> bool {
         ctx.input(|i| (i.modifiers, i.smooth_scroll_delta, i.zoom_delta(), i.pointer.hover_pos(), i.key_down(egui::Key::Space)));
     let editing_text = app.session.ds().map(|d| d.text_edit.is_some()).unwrap_or(false);
     let typing_elsewhere = crate::a11y::field_focused(&ctx);
-    app.canvas.space_pan = space && !editing_text && !typing_elsewhere && !app.canvas.dragging;
     // A strip under the pointer wins over a selected video card.
     crate::audio_ui::space(app, &ctx, hover_pos.filter(|_| resp.hovered()), !editing_text && !typing_elsewhere);
     let audio_space = app.audio.space.is_some();
-    crate::video_ui::space(app, &ctx, !editing_text && !typing_elsewhere && !audio_space);
+    // A video card under the pointer (or being scrubbed) takes Space, ⌘-scrub, ←/→, M and the
+    // wheel over its volume slider, like a native player: no Space pan while it has Space.
+    let video = crate::video_ui::keys(app, &ctx, hover_pos.filter(|_| resp.hovered()), !editing_text && !typing_elsewhere && !audio_space);
+    app.canvas.space_pan = space && !editing_text && !typing_elsewhere && !app.canvas.dragging && !video.space;
     if !app.canvas.dragging && crate::selection_spacing::input(app, &ctx, hover_pos, resp.hovered(), app.canvas.space_pan) {
         return false;
     }
@@ -750,6 +753,7 @@ fn input(app: &mut FigApp, ui: &mut Ui, resp: &egui::Response) -> bool {
                 ds.revision += 1;
             }
         } else if scroll != egui::Vec2::ZERO
+            && !video.scroll
             && let Ok(ds) = app.session.ds_mut()
         {
             ds.view.scroll(f64::from(scroll.x), f64::from(scroll.y), mods.shift);
@@ -776,6 +780,11 @@ fn input(app: &mut FigApp, ui: &mut Ui, resp: &egui::Response) -> bool {
         if !middle_down && !ctx.input(|i| i.pointer.primary_down()) {
             app.canvas.middle_pan = None;
         }
+        return true;
+    }
+    // Video cards: play and play-all buttons, the speaker and volume slider, the scrub slider (a
+    // press there never moves or selects the card, nor a handle of it).
+    if !app.canvas.dragging && crate::video_ui::input(app, &ctx, pos, resp.hovered()) {
         return true;
     }
     if !app.canvas.dragging && (resp.hovered() || app.ui.comments.dragging()) && crate::comments::input(app, &ctx, pos) {
@@ -805,10 +814,6 @@ fn input(app: &mut FigApp, ui: &mut Ui, resp: &egui::Response) -> bool {
         && app.session.ds().is_ok_and(|d| d.vector_edit.is_none())
         && matches!(app.session.tool.tool, ToolId::Move | ToolId::Scale);
     // EffectCraft cards: play and explode buttons; a double-click opens the comp in EffectCraft.
-    // Video cards: play and play-all buttons, the scrub slider.
-    if !app.canvas.dragging && crate::video_ui::input(app, &ctx, pos, resp.hovered()) {
-        return true;
-    }
     // Fork: the comp's layers on the card the EffectCraft Timeline edits (move, scale).
     #[cfg(feature = "effectcraft-inproc")]
     if !app.canvas.dragging && crate::effectcraft_ui::layer_handles_input(app, &ctx, pos, resp.hovered()) {

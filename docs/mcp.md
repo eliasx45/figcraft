@@ -149,9 +149,11 @@ export) without decoding.
 - Transport: `video.play {id?, time?}` (with the file's sound; from the pause, or over again
   once it ended), `video.pause`,
   `video.togglePlay`, `video.seek {time | x}`, `video.transport`, `video.playAll {on?}` (every card
-  on screen plays, muted). In the desktop app the card under the pointer plays muted, its play
-  button (or Space, tapped with the card selected) plays and pauses it with sound, and the slider
-  along its bottom scrubs. Frames are decoded on the
+  on screen plays, muted). In the desktop app hovering a card never moves its playhead; ⌘ (Ctrl)
+  held over the picture scrubs it under the pointer; its play button or Space (over the card, also
+  mid-scrub; or tapped with the card selected) plays and pauses it with sound; ←/→ step a frame
+  while paused; the slider in the bar above it scrubs, and a speaker button (or M) and volume
+  slider set its volume live (per card, this session). Frames are decoded on the
   Apple media engine (macOS), scaled to the card, only for cards on screen.
 
 ### EffectCraft comps

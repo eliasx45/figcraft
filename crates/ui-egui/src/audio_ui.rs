@@ -296,7 +296,7 @@ fn seek_to(app: &mut FigApp, id: NodeId, pos: Pos2) {
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(crate) mod out {
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
@@ -306,6 +306,12 @@ pub(crate) mod out {
 
     impl Output {
         pub fn start(sound: &figcraft_audio::Sound, from: f64, until: f64) -> Result<Output, String> {
+            Self::start_with_gain(sound, from, until, Arc::new(AtomicU32::new(1.0_f32.to_bits())))
+        }
+
+        /// As [`Output::start`], every sample scaled by `gain` (an `f32`'s bits, read on each
+        /// buffer, so a volume slider changes the sound as it plays).
+        pub fn start_with_gain(sound: &figcraft_audio::Sound, from: f64, until: f64, gain: Arc<AtomicU32>) -> Result<Output, String> {
             let host = cpal::default_host();
             let device = host.default_output_device().ok_or("no sound output device")?;
             let cfg = device.default_output_config().map_err(|e| format!("sound output: {e}"))?;
@@ -314,10 +320,10 @@ pub(crate) mod out {
             let pcm: Arc<Vec<f32>> = Arc::new(sound.stereo(from, until, rate));
             let config = cfg.config();
             let stream = match cfg.sample_format() {
-                cpal::SampleFormat::F32 => build::<f32>(&device, &config, pcm, channels),
-                cpal::SampleFormat::I16 => build::<i16>(&device, &config, pcm, channels),
-                cpal::SampleFormat::U16 => build::<u16>(&device, &config, pcm, channels),
-                cpal::SampleFormat::I32 => build::<i32>(&device, &config, pcm, channels),
+                cpal::SampleFormat::F32 => build::<f32>(&device, &config, pcm, channels, gain),
+                cpal::SampleFormat::I16 => build::<i16>(&device, &config, pcm, channels, gain),
+                cpal::SampleFormat::U16 => build::<u16>(&device, &config, pcm, channels, gain),
+                cpal::SampleFormat::I32 => build::<i32>(&device, &config, pcm, channels, gain),
                 f => return Err(format!("sound output: unsupported sample format {f}")),
             }?;
             stream.play().map_err(|e| format!("sound output: {e}"))?;
@@ -330,6 +336,7 @@ pub(crate) mod out {
         config: &cpal::StreamConfig,
         pcm: Arc<Vec<f32>>,
         channels: usize,
+        gain: Arc<AtomicU32>,
     ) -> Result<cpal::Stream, String> {
         let at = AtomicUsize::new(0);
         device
@@ -337,8 +344,10 @@ pub(crate) mod out {
                 config,
                 move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
                     let mut i = at.load(Ordering::Relaxed);
+                    let g = f32::from_bits(gain.load(Ordering::Relaxed));
+                    let g = if g.is_finite() { g.clamp(0.0, 1.0) } else { 1.0 };
                     for frame in data.chunks_mut(channels) {
-                        let (l, r) = (pcm.get(i * 2).copied().unwrap_or(0.0), pcm.get(i * 2 + 1).copied().unwrap_or(0.0));
+                        let (l, r) = (pcm.get(i * 2).copied().unwrap_or(0.0) * g, pcm.get(i * 2 + 1).copied().unwrap_or(0.0) * g);
                         for (c, s) in frame.iter_mut().enumerate() {
                             let v = match (channels, c) {
                                 (1, _) => (l + r) * 0.5,
