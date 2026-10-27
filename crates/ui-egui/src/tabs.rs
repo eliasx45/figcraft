@@ -1,8 +1,9 @@
-//! The desktop tab strip: home, one tab per open file, new tab. In a frameless window it is also
+//! The desktop tab strip: home, one tab per open file (dragged, or moved from its context menu, to
+//! reorder), new tab. In a frameless window it is also
 //! the title bar: its empty space drags the window (double-click maximises), and it carries the
 //! window buttons; the window's edges resize it.
 
-use egui::{Align2, Color32, CornerRadius, Rect, Sense, Stroke, Ui, pos2, vec2};
+use egui::{Align2, Color32, CornerRadius, LayerId, Order, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use serde_json::json;
 
 use crate::a11y::Tip;
@@ -95,6 +96,12 @@ fn tab_drop_position(visible: &[(usize, Rect)], from: usize, pointer_x: f32) -> 
     }
 }
 
+/// How far a tab dragged `dx` along the strip is drawn from its slot `r`, kept within the tabs
+/// (`start`..`end`).
+fn lift_offset(dx: f32, r: Rect, start: f32, end: f32) -> Option<f32> {
+    dx.is_finite().then(|| dx.clamp((start - r.min.x).min(0.0), (end - r.max.x).max(0.0)))
+}
+
 pub fn tab_bar(app: &mut FigApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
     egui::Panel::top("tab_bar").exact_size(HEIGHT).frame(egui::Frame::NONE.fill(t.tab_bar)).show(ui, |ui| {
@@ -157,6 +164,8 @@ pub fn tab_bar(app: &mut FigApp, ui: &mut Ui) {
         let mut detach = None;
         let mut dragging = None;
         let mut dropped = None;
+        // "Move tab left/right" from a tab's context menu: (from, to) document indices.
+        let mut moved = None;
         let several = !ui.ctx().embed_viewports();
         for (slot, &w) in layout.widths.iter().enumerate() {
             let i = document_tabs[layout.first + slot];
@@ -185,15 +194,24 @@ pub fn tab_bar(app: &mut FigApp, ui: &mut Ui) {
                     dragging = Some((i, p));
                 }
             }
-            if several {
-                resp.context_menu(|ui| {
-                    ui.set_width(200.0);
-                    if crate::menus::item(ui, tr("Open in new window"), "", true, false, &t) {
-                        detach = Some((i, None));
-                        ui.close();
-                    }
-                });
-            }
+            let pos = layout.first + slot;
+            let left = pos.checked_sub(1).and_then(|p| document_tabs.get(p)).copied();
+            let right = document_tabs.get(pos + 1).copied();
+            resp.context_menu(|ui| {
+                ui.set_width(200.0);
+                if crate::menus::item(ui, tr("Move tab left"), "", left.is_some(), false, &t) {
+                    moved = left.map(|to| (i, to));
+                    ui.close();
+                }
+                if crate::menus::item(ui, tr("Move tab right"), "", right.is_some(), false, &t) {
+                    moved = right.map(|to| (i, to));
+                    ui.close();
+                }
+                if several && crate::menus::item(ui, tr("Open in new window"), "", true, false, &t) {
+                    detach = Some((i, None));
+                    ui.close();
+                }
+            });
             let label = match live {
                 Some(true) => trf("{name}, in a live session", &[("name", name)]),
                 Some(false) => trf("{name}, online, open only to you", &[("name", name)]),
@@ -202,9 +220,23 @@ pub fn tab_bar(app: &mut FigApp, ui: &mut Ui) {
             let resp = if live.is_some() { resp.on_hover_text(&label) } else { resp };
             crate::a11y::tab(&resp, &label, active);
             let progress = open_progress(&opening, d.uid, now);
-            let paint_r = r.translate(vec2(-28.0 * (1.0 - progress).powi(2), 0.0));
-            let painter = ui.painter().with_clip_rect(r);
-            if active {
+            // A tab dragged along the strip follows the pointer above the others.
+            let lift = dragging.filter(|(from, p)| *from == i && (rect.min.y - 12.0..=rect.max.y + 12.0).contains(&p.y)).and_then(|(_, p)| {
+                let origin = ui.input(|inp| inp.pointer.press_origin())?;
+                let (first, last) = (tab_rects.first()?, tab_rects.last()?);
+                lift_offset(p.x - origin.x, r, first.min.x, last.max.x)
+            });
+            let paint_r = r.translate(vec2(lift.unwrap_or(0.0) - 28.0 * (1.0 - progress).powi(2), 0.0));
+            let painter = if lift.is_some() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                ui.painter().clone().with_layer_id(LayerId::new(Order::Foreground, ui.id().with("lifted_tab"))).with_clip_rect(rect)
+            } else {
+                ui.painter().with_clip_rect(r)
+            };
+            if lift.is_some() {
+                painter.rect_filled(paint_r, CornerRadius::same(4), t.tab_active);
+                painter.rect_stroke(paint_r, CornerRadius::same(4), Stroke::new(1.0, t.border), StrokeKind::Inside);
+            } else if active {
                 painter.rect_filled(paint_r, CornerRadius::ZERO, t.tab_active.linear_multiply(progress));
             } else if resp.hovered() || cresp.hovered() {
                 painter.rect_filled(paint_r, CornerRadius::ZERO, t.hover.linear_multiply(progress));
@@ -258,7 +290,7 @@ pub fn tab_bar(app: &mut FigApp, ui: &mut Ui) {
         {
             ui.painter().line_segment([pos2(at, rect.min.y + 5.0), pos2(at, rect.max.y - 5.0)], Stroke::new(3.0, crate::theme::ACCENT));
         }
-        let reorder = dropped.and_then(|(from, at)| tab_drop_position(&visible, from, at).map(|(to, _)| (from, to)));
+        let reorder = moved.or_else(|| dropped.and_then(|(from, at)| tab_drop_position(&visible, from, at).map(|(to, _)| (from, to))));
         if layout.overflow {
             let r = Rect::from_min_size(pos2(x, rect.min.y), vec2(OVERFLOW_WIDTH, HEIGHT));
             let resp = ui.interact(r, ui.id().with("tab_overflow"), Sense::click()).tip(tr("Open files"));
@@ -535,7 +567,7 @@ pub fn resize_edges(ctx: &egui::Context) {
 
 #[cfg(test)]
 mod layout_tests {
-    use super::{MIN_TAB_WIDTH, OPEN_TIME, OVERFLOW_WIDTH, TabMotion, open_progress, tab_drop_position, tab_layout};
+    use super::{MIN_TAB_WIDTH, OPEN_TIME, OVERFLOW_WIDTH, TabMotion, lift_offset, open_progress, tab_drop_position, tab_layout};
     use egui::{Rect, pos2};
 
     #[test]
@@ -566,6 +598,16 @@ mod layout_tests {
             .collect::<Vec<_>>();
         assert_eq!(tab_drop_position(&visible, 0, 330.0).map(|(to, _)| to), Some(2));
         assert_eq!(tab_drop_position(&visible, 3, 30.0).map(|(to, _)| to), Some(0));
+    }
+
+    #[test]
+    fn a_dragged_tab_follows_the_pointer_within_the_strip() {
+        let r = Rect::from_min_max(pos2(120.0, 0.0), pos2(240.0, 40.0));
+        assert_eq!(lift_offset(50.0, r, 0.0, 480.0), Some(50.0));
+        assert_eq!(lift_offset(-500.0, r, 0.0, 480.0), Some(-120.0), "stops at the first tab's edge");
+        assert_eq!(lift_offset(500.0, r, 0.0, 480.0), Some(240.0), "stops at the last tab's edge");
+        assert_eq!(lift_offset(f32::NAN, r, 0.0, 480.0), None);
+        assert_eq!(lift_offset(30.0, r, 120.0, 240.0), Some(0.0), "a lone tab stays put");
     }
 
     #[test]
