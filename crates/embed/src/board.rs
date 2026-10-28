@@ -122,11 +122,22 @@ pub(crate) fn cards(fig: &mut FigApp) -> Vec<CardRef> {
     doc.nodes().filter(|n| n.effectcraft.is_some()).filter_map(|n| card_of(doc, n.id)).collect()
 }
 
-/// The shortest card whose stretch on the timeline holds `time`.
+/// How far ahead a time looks for a card that starts just after it (seconds, under a frame).
+/// Night run 29 Oct: a chapter marker at 316.577 s and its first scene's layer at 316.583 s, so the
+/// sidebar's "STEP 2" flew to the previous chapter's last card (it ends at 316.583).
+const CARD_SNAP: f64 = 0.02;
+
+/// The shortest card whose stretch on the timeline holds `time`; a card starting less than
+/// [`CARD_SNAP`] after `time` counts as holding it (markers and layer in-points differ by a
+/// fraction of a frame).
 pub(crate) fn card_at_time(cards: &[CardRef], time: f64) -> Option<CardRef> {
     if !time.is_finite() {
         return None;
     }
+    card_holding(cards, time + CARD_SNAP).or_else(|| card_holding(cards, time))
+}
+
+fn card_holding(cards: &[CardRef], time: f64) -> Option<CardRef> {
     cards
         .iter()
         .filter(|c| {

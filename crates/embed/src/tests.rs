@@ -154,3 +154,24 @@ fn opening_before_the_first_frame_still_reaches_the_effectcraft_host() {
         assert!(!e.contains("needs FigCraft's EffectCraft build"), "{e}");
     }
 }
+
+/// Night run 29 Oct: the sidebar's chapter "STEP 2" starts at 316.577 s (its marker), its first
+/// scene "S3 03" at 316.583 s, and the previous chapter's "S3 02" ends at 316.583 s: the chapter
+/// must fly to S3 03, not S3 02.
+#[test]
+fn a_chapter_a_hair_before_its_first_card_picks_that_card() {
+    let card = |node, start: f64, end: f64| board::CardRef {
+        node,
+        name: format!("c{node}"),
+        comp: format!("c{node}"),
+        comp_id: 0,
+        project: String::new(),
+        start: 0.0,
+        end: end - start,
+        offset: start,
+    };
+    let cards = vec![card(44, 296.463, 316.583), card(45, 316.583, 322.889)];
+    assert_eq!(board::card_at_time(&cards, 316.577).map(|c| c.node), Some(45));
+    assert_eq!(board::card_at_time(&cards, 316.0).map(|c| c.node), Some(44));
+    assert_eq!(board::card_at_time(&cards, 322.88).map(|c| c.node), Some(45), "the last card's end still finds it");
+}
