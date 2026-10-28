@@ -24,6 +24,8 @@
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
+/// What FigCraft's MAIN board asks of a project (`figcraft.board`, `figcraft.speech`, …).
+pub mod board;
 mod frames;
 /// EffectCraft's engine, for hosts of its panels (the Timeline names its `Session`).
 pub use effectcraft_engine;
@@ -192,6 +194,13 @@ impl InProc {
             "figcraft.tree" => self.tree(params),
             "figcraft.audio" => self.audio(params),
             "figcraft.reveal" => Err("opening a comp needs the EffectCraft app: open it first".into()),
+            // FigCraft's MAIN board (`figcraft_engine::ecboard`).
+            "figcraft.board" => board::board(&self.session, &self.path, params),
+            "figcraft.speech" => board::speech(&mut self.session, params),
+            "figcraft.mark" => board::mark(&mut self.session, params),
+            "figcraft.layerAt" => board::layer_at(&mut self.session, params),
+            "figcraft.comp" => board::comp(&self.session, params),
+            "figcraft.moves" => board::moves(&mut self.session, params),
             "render.frame" => {
                 let mut p = params.clone();
                 if let Some(o) = p.as_object_mut() {
