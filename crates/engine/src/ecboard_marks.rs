@@ -88,6 +88,9 @@ pub struct Marks {
     next_id: u64,
     /// Bumped on every change.
     pub revision: u64,
+    /// Armed for one mark only (`canvas.annotate.start {once: true}`, the host's ⌃⌥-click Layer
+    /// pick): the mark it adds disarms the tool.
+    pub once: bool,
 }
 
 impl Marks {
@@ -96,6 +99,7 @@ impl Marks {
             self.arm_serial = self.arm_serial.wrapping_add(1);
         }
         self.armed = tool;
+        self.once = false;
         self.revision = self.revision.wrapping_add(1);
     }
 
@@ -192,6 +196,7 @@ fn start(s: &mut Session, p: &Value) -> Result<Value> {
         Some(t) => Tool::from_name(&t).ok_or_else(|| bad(cmd, format!("`tool` is pen, comment or layer, got {t:?}")))?,
     };
     s.ecboard.marks.arm(Some(tool));
+    s.ecboard.marks.once = p.get("once").and_then(Value::as_bool).unwrap_or(false);
     // Playback pauses while marking (the frame marked is the one shown).
     s.effectcraft.pause();
     s.ecboard.push("armed", json!({"armed": tool.id()}));
@@ -319,6 +324,12 @@ fn add(s: &mut Session, p: &Value) -> Result<Value> {
     let mid = s.ecboard.marks.push(mark);
     let m = s.ecboard.marks.get(mid).cloned().ok_or_else(|| bad(cmd, "the mark was dropped"))?;
     s.ecboard.push("mark", json!({"id": mid, "tool": m.tool.id(), "card": id, "comp": m.comp}));
+    // A one-shot arm (⌃⌥-click in Ghostex) ends with its mark. Night run 29 Oct: `once` was
+    // ignored, so Layer stayed armed and every later click on a card picked a layer.
+    if s.ecboard.marks.once && s.ecboard.marks.armed == Some(tool) {
+        s.ecboard.marks.arm(None);
+        s.ecboard.push("armed", json!({"armed": null}));
+    }
     Ok(json!({"mark": mark_json(&m), "copyRef": m.copy_ref, "state": state_json(s)}))
 }
 

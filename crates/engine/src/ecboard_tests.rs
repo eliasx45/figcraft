@@ -184,6 +184,24 @@ fn marks_measure_through_effectcraft_and_queue_in_session_state() {
     assert_eq!(s.execute("board.state", &json!({})).unwrap()["armed"], Value::Null);
 }
 
+/// Night run 29 Oct: Ghostex's ⌃⌥-click arms Layer with `once: true`; the flag was ignored, so
+/// Layer stayed armed after the pick.
+#[test]
+fn a_one_shot_arm_ends_with_its_mark() {
+    let (mut s, _) = sess();
+    auto(&mut s);
+    let st = s.execute("board.state", &json!({})).unwrap();
+    let card = st["rows"][1]["cards"][1]["card"].clone();
+    s.execute("canvas.annotate.start", &json!({"tool": "layer", "once": true})).unwrap();
+    assert_eq!(s.execute("board.state", &json!({})).unwrap()["armed"], "layer");
+    s.execute("canvas.annotate.add", &json!({"card": card, "time": 1.0, "tool": "layer", "x": 10, "y": 10})).unwrap();
+    assert_eq!(s.execute("board.state", &json!({})).unwrap()["armed"], Value::Null, "once: disarmed by its mark");
+    // Without `once` the tool stays armed for the next mark.
+    s.execute("canvas.annotate.start", &json!({"tool": "layer"})).unwrap();
+    s.execute("canvas.annotate.add", &json!({"card": card, "time": 1.0, "tool": "layer", "x": 10, "y": 10})).unwrap();
+    assert_eq!(s.execute("board.state", &json!({})).unwrap()["armed"], "layer");
+}
+
 #[test]
 fn agent_view_reads_the_card_for_claude() {
     let (mut s, _) = sess();
