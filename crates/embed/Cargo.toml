@@ -1,0 +1,30 @@
+[package]
+name = "figcraft-embed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Fork-only, macOS: FigCraft's canvas (with EffectCraft cards in-process) inside another app's native view; the host gives a wgpu surface and input, FigCraft draws itself (Ghostex's EDITING canvas)"
+
+[lints]
+workspace = true
+
+# Needs ../effectcraft checked out (EffectCraft cards in-process, and the AppKit key mapping shared
+# with effectcraft-embed).
+[dependencies]
+figcraft-engine = { workspace = true }
+figcraft-ui-egui = { workspace = true, features = ["effectcraft-inproc"] }
+figcraft-ec-inproc = { workspace = true }
+figcraft-render = { workspace = true }
+figcraft-render-gpu = { workspace = true }
+figcraft-text = { workspace = true }
+egui = { workspace = true }
+# No event loop is run: only the `egui_wgpu` renderer and its wgpu are used (the same eframe and
+# wgpu the desktop app builds, so a host that also embeds EffectCraft builds one of each).
+eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }
+pollster = "0.4"
+rfd = { workspace = true }
+arboard = { workspace = true, features = ["image-data"] }

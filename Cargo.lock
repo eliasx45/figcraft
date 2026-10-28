@@ -2640,6 +2640,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "figcraft-embed"
+version = "0.7.0"
+dependencies = [
+ "arboard",
+ "eframe",
+ "egui",
+ "figcraft-ec-inproc",
+ "figcraft-engine",
+ "figcraft-render",
+ "figcraft-render-gpu",
+ "figcraft-text",
+ "figcraft-ui-egui",
+ "log",
+ "pollster 0.4.0",
+ "rfd",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "figcraft-engine"
 version = "0.7.0"
 dependencies = [
