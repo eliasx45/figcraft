@@ -115,3 +115,23 @@ fn sizes_and_scales_are_clamped() {
     assert_eq!(crate::clamp_ppp(f32::NAN, 2.0), 2.0);
     assert_eq!(crate::clamp_ppp(100.0, 2.0), 8.0);
 }
+
+#[test]
+fn the_card_at_a_time_is_the_shortest_that_holds_it() {
+    let card = |node, start: f64, end: f64, offset: f64| board::CardRef {
+        node,
+        name: format!("c{node}"),
+        comp: format!("c{node}"),
+        comp_id: 0,
+        project: String::new(),
+        start,
+        end,
+        offset,
+    };
+    let cards = vec![card(1, 0.0, 545.0, 0.0), card(2, 0.0, 12.0, 0.13), card(3, 2.0, 6.0, 12.4)];
+    assert_eq!(board::card_at_time(&cards, 5.0).map(|c| c.node), Some(2));
+    assert_eq!(board::card_at_time(&cards, 15.0).map(|c| c.node), Some(3), "comp 2..6 at 12.4 holds 14.4..18.4");
+    assert_eq!(board::card_at_time(&cards, 100.0).map(|c| c.node), Some(1));
+    assert_eq!(board::card_at_time(&cards, -1.0), None);
+    assert_eq!(board::card_at_time(&cards, f64::NAN), None);
+}

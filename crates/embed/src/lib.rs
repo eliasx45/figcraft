@@ -343,6 +343,22 @@ impl FigEmbedded {
         with_app(|fig| board::selection(fig).0.into_iter().next()).flatten()
     }
 
+    /// The canvas zoom (1 = 100 %) of the board shown.
+    pub fn zoom(&self) -> Option<f64> {
+        with_app(|fig| fig.session.ds().ok().map(|d| d.view.zoom)).flatten()
+    }
+
+    /// Every EffectCraft card on the board shown (document order).
+    pub fn cards(&self) -> Vec<CardRef> {
+        with_app(board::cards).unwrap_or_default()
+    }
+
+    /// The card showing timeline second `time` of the edit (comp time `start..end` placed at its
+    /// `offset`): the shortest such card, so a scene wins over a whole-MAIN card.
+    pub fn card_at_time(&self, time: f64) -> Option<CardRef> {
+        board::card_at_time(&self.cards(), time)
+    }
+
     /// The port FigCraft's control server was asked to listen on.
     pub fn control_port(&self) -> Option<u16> {
         self.control_port

@@ -116,6 +116,27 @@ pub(crate) fn card_of(doc: &Document, id: NodeId) -> Option<CardRef> {
     None
 }
 
+/// Every card on the shown board.
+pub(crate) fn cards(fig: &mut FigApp) -> Vec<CardRef> {
+    let Ok(doc) = fig.session.doc() else { return Vec::new() };
+    doc.nodes().filter(|n| n.effectcraft.is_some()).filter_map(|n| card_of(doc, n.id)).collect()
+}
+
+/// The shortest card whose stretch on the timeline holds `time`.
+pub(crate) fn card_at_time(cards: &[CardRef], time: f64) -> Option<CardRef> {
+    if !time.is_finite() {
+        return None;
+    }
+    cards
+        .iter()
+        .filter(|c| {
+            let (a, b) = (c.offset + c.start, c.offset + c.end);
+            a.is_finite() && b.is_finite() && a <= time && time < b
+        })
+        .min_by(|x, y| (x.end - x.start).total_cmp(&(y.end - y.start)))
+        .cloned()
+}
+
 pub(crate) fn node_ref(doc: &Document, id: NodeId) -> Option<NodeRef> {
     let n = doc.node(id)?;
     Some(NodeRef { id: n.id.0, name: n.name.clone(), kind: n.kind.type_name().to_string() })
