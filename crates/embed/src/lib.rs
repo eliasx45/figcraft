@@ -14,8 +14,9 @@
 //! - opens the project's board ([`FigEmbedded::open`]): `<project stem>.board.figcraft` next to
 //!   the `.ecproj`, made with `board.autoMain` when there is none yet, auto-saved;
 //! - runs one egui pass per [`FigEmbedded::run_frame`] and paints it with egui-wgpu into the
-//!   host's surface; only the canvas shows (the tab strip and the left rail sit outside the
-//!   drawable, the side panels are folded), so the host draws its own toolbar around it;
+//!   host's surface; only the canvas shows (FigCraft's chromeless mode: no tab strip, rail,
+//!   panels or toolbar; the cards' bars and the Timeline under a card stay), so the host draws
+//!   its own toolbar around it;
 //! - runs FigCraft commands in process ([`FigEmbedded::execute`]), hands over review marks
 //!   ([`FigEmbedded::new_annotations`]) and tells the host what was selected or clicked
 //!   ([`FrameOutput::events`]);
@@ -147,7 +148,6 @@ pub struct FigEmbedded {
     capture_rx: CaptureReceiver,
     painting: bool,
     pending_textures: egui::TexturesDelta,
-    chrome: bool,
     queue: Arc<Mutex<Vec<ControlRequest>>>,
     control_port: Option<u16>,
     /// The host's EffectCraft control port, as given to [`FigEmbedded::start`].
@@ -213,10 +213,8 @@ impl FigEmbedded {
         let mut fig = FigApp::new(session, Box::new(services::EmbedServices::new()));
         fig.ui.home = false;
         fig.ui.title_bar = figcraft_ui_egui::TitleBar::Native;
-        if !opts.chrome {
-            fig.ui.left_collapsed = true;
-            fig.ui.right_collapsed = true;
-        }
+        // The bare canvas: no tab strip, rail, panels or toolbar (the host draws its own).
+        fig.ui.chromeless = !opts.chrome;
         figcraft_ui_egui::windows::install(fig);
         gpu::install_tiles(&rs, gpu_canvas);
         gpu::install_effectcraft(&rs);
@@ -244,7 +242,6 @@ impl FigEmbedded {
             capture_rx,
             painting: true,
             pending_textures: egui::TexturesDelta::default(),
-            chrome: opts.chrome,
             queue,
             control_port: opts.control_port,
             effectcraft_port: opts.effectcraft_port,
@@ -462,10 +459,8 @@ impl FigEmbedded {
         }
         let [w, h] = self.size;
         let points = egui::vec2(w as f32 / self.ppp, h as f32 / self.ppp);
-        // The bare canvas: FigCraft lays its tab strip and left rail out above and left of the
-        // drawable, so the canvas starts at the view's corner (its side panels are folded).
-        let origin = if self.chrome { egui::Pos2::ZERO } else { egui::pos2(-board::RAIL_WIDTH, -figcraft_ui_egui::tabs::HEIGHT) };
-        let screen = egui::Rect::from_min_max(origin, points.to_pos2());
+        // Chromeless (unless the host asked for chrome), the canvas fills the view.
+        let screen = egui::Rect::from_min_max(egui::Pos2::ZERO, points.to_pos2());
         let mut raw = egui::RawInput {
             screen_rect: Some(screen),
             time: Some(self.beginning.elapsed().as_secs_f64()),

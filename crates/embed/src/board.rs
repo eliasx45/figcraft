@@ -12,8 +12,6 @@ use crate::OpenReport;
 
 /// FigCraft's native file extension.
 pub const BOARD_EXT: &str = "figcraft";
-/// FigCraft's left rail (the bare canvas lays it out left of the drawable).
-pub(crate) const RAIL_WIDTH: f32 = 56.0;
 /// How far up from a selected layer its card is looked for.
 const MAX_DEPTH: usize = 64;
 

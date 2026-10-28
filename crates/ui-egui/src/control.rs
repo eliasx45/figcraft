@@ -510,6 +510,10 @@ pub fn handle(app: &mut FigApp, ctx: &Context, method: &str, p: &Value) -> Resul
             if let Some(h) = p.get("iconGallery").and_then(Value::as_bool) {
                 app.ui.icon_gallery = h;
             }
+            // Fork: no tab strip, rail, panels or toolbar (figcraft-embed's bare canvas).
+            if let Some(c) = p.get("chromeless").and_then(Value::as_bool) {
+                app.ui.chromeless = c;
+            }
             // Comment thread popover: an id opens it, null closes it.
             if let Some(v) = p.get("commentOpen") {
                 match v.as_u64() {

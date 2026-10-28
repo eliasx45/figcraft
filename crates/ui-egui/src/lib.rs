@@ -102,6 +102,8 @@ mod canvas_image_rect_tests;
 #[cfg(test)]
 mod card_cover_tests;
 #[cfg(test)]
+mod chromeless_tests;
+#[cfg(test)]
 mod colorpicker_selection_tests;
 #[cfg(test)]
 mod comments_tests;
@@ -650,6 +652,11 @@ pub struct UiState {
     /// The Rename layers dialog (several layers), while open.
     pub batch_rename: Option<dialogs::BatchRenameUi>,
     pub left_collapsed: bool,
+    /// Fork: no chrome at all (figcraft-embed sets it for a host that draws its own: Ghostex's
+    /// EDITING canvas). The tab strip, the left rail and panels, the right panel and the bottom
+    /// toolbar are not drawn; the canvas fills the window and keeps the cards' bars and the
+    /// EffectCraft Timeline under a card.
+    pub chromeless: bool,
     /// Fork: the right sidebar (Design / Prototype / Dev Mode) is hidden; a button on the canvas
     /// brings it back.
     pub right_collapsed: bool,
@@ -779,6 +786,7 @@ impl Default for UiState {
             find: None,
             batch_rename: None,
             left_collapsed: false,
+            chromeless: false,
             right_collapsed: false,
             comments: comments::CommentUi::default(),
             versions: versions::VersionUi::default(),
@@ -1692,7 +1700,9 @@ impl FigApp {
         widgets::set_nudge(&ctx, self.session.prefs.nudge_small, self.session.prefs.nudge_big);
         self.sync_dev_mode();
         self.end_pen_outside_design();
-        tabs::tab_bar(self, ui);
+        if !self.ui.chromeless {
+            tabs::tab_bar(self, ui);
+        }
         if self.ui.present.is_some() {
             // A close request can arrive while the presenter fills the window. Let its unsaved
             // changes dialog take Escape and draw above the player just as it does in the editor.
@@ -1716,8 +1726,11 @@ impl FigApp {
             return;
         }
         let hidden = self.session.ds().map(|d| d.view.ui_hidden).unwrap_or(false);
-        let right_open = self.right_panel_shown(hidden);
-        if !hidden {
+        // Fork: chromeless hides FigCraft's chrome but not what lives on the canvas (the
+        // EffectCraft Timeline under a card).
+        let chrome = !hidden && !self.ui.chromeless;
+        let right_open = self.right_panel_shown(!chrome);
+        if chrome {
             egui::Panel::left("left_rail")
                 .exact_size(56.0)
                 .resizable(false)
@@ -1728,7 +1741,7 @@ impl FigApp {
                 });
         }
         // The panels are as wide as asked, less in a window too small for them and the canvas.
-        let left_open = !hidden && !self.ui.left_collapsed;
+        let left_open = chrome && !self.ui.left_collapsed;
         let (left_w, right_w) = fit_panels(ui.available_width(), left_open.then_some(self.ui.left_width), right_open.then_some(self.ui.right_width));
         let rows = ui.available_rect_before_wrap().y_range();
         let mut edges: Vec<(&str, f32, f32, f32)> = Vec::new();
@@ -1774,7 +1787,7 @@ impl FigApp {
             let mut worker = worker.unwrap_or_else(|| render_worker::Worker::new(ctx.clone()));
             canvas::show(self, ui, &mut worker);
             self.worker = Some(worker);
-            if !hidden {
+            if chrome {
                 ui.scope_builder(egui::UiBuilder::new().id_salt("toolbar"), |ui| {
                     a11y::container(ui, egui::accesskit::Role::Toolbar, i18n::tr("Tools"));
                     toolbar::show(self, ui);
