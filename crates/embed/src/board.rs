@@ -67,6 +67,8 @@ pub(crate) fn open(fig: &mut FigApp, ctx: &egui::Context, ecproj: &Path, board: 
     }
     fig.ui.home = false;
     let empty = fig.session.doc().map(|d| !has_cards(d)).unwrap_or(true);
+    // The cards' EffectCraft host is otherwise installed on the first frame, after this.
+    figcraft_ui_egui::effectcraft_ui::install_board_host(fig);
     let auto_main = empty.then(|| exec(fig, ctx, "board.autoMain", json!({"ecproj": ecproj.to_string_lossy()})));
     if let Some(Err(e)) = &auto_main {
         log::warn!("embedded FigCraft: board.autoMain: {e}");

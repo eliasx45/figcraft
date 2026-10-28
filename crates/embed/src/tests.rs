@@ -135,3 +135,22 @@ fn the_card_at_a_time_is_the_shortest_that_holds_it() {
     assert_eq!(board::card_at_time(&cards, -1.0), None);
     assert_eq!(board::card_at_time(&cards, f64::NAN), None);
 }
+
+/// Night run 29 Oct: Ghostex opens the board before FigCraft's first frame; the EffectCraft host
+/// was only installed by that frame, so `board.autoMain` answered "needs FigCraft's EffectCraft
+/// build" and the EDITING canvas stayed empty. `open` installs the host first.
+#[test]
+fn opening_before_the_first_frame_still_reaches_the_effectcraft_host() {
+    let dir = temp("prehost");
+    let project = dir.join("p.ecproj");
+    std::fs::write(&project, b"{}").unwrap();
+    let board = board::board_path(&project);
+    let ctx = egui::Context::default();
+    let mut fig = app();
+    assert!(fig.session.ecboard.host.is_none(), "no frame has run yet");
+    let r = board::open(&mut fig, &ctx, &project, &board).unwrap();
+    assert!(fig.session.ecboard.host.is_some(), "open installs the host");
+    if let Some(Err(e)) = r.auto_main {
+        assert!(!e.contains("needs FigCraft's EffectCraft build"), "{e}");
+    }
+}

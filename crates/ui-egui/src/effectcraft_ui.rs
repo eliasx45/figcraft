@@ -184,6 +184,16 @@ pub fn set_control_port(port: u16) {
     CONTROL_PORT.store(port, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Installs the MAIN board's EffectCraft host now, for a host that runs board commands
+/// (`board.autoMain`) before FigCraft's first frame. Idempotent; without the in-process EffectCraft
+/// build it does nothing.
+pub fn install_board_host(app: &mut crate::FigApp) {
+    #[cfg(feature = "effectcraft-inproc")]
+    board::install_host(app);
+    #[cfg(not(feature = "effectcraft-inproc"))]
+    let _ = app;
+}
+
 /// The EffectCraft control port: the host's ([`set_control_port`]), else
 /// `EFFECTCRAFT_CONTROL_PORT`, else 9877.
 pub fn control_port() -> u16 {

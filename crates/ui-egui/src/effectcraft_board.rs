@@ -163,14 +163,22 @@ pub(crate) fn request(app: &mut FigApp, kind: &str, data: &Value) {
     }
 }
 
-/// Every frame: the host, the selection, flashes, keys, the mark's box.
-pub(crate) fn frame(app: &mut FigApp, ctx: &egui::Context) {
+/// Installs the board's EffectCraft host once (the first frame does it; a host that runs board
+/// commands before any frame, figcraft-embed's `open` with `board.autoMain`, calls it first).
+/// Night run 29 Oct: Ghostex opened the board before FigCraft's first frame, so `board.autoMain`
+/// answered "needs FigCraft's EffectCraft build" and the EDITING canvas stayed empty.
+pub(crate) fn install_host(app: &mut FigApp) {
     if !app.effectcraft.board.installed {
         app.effectcraft.board.installed = true;
         if app.session.ecboard.host.is_none() {
             app.session.ecboard.host = Some(Box::new(Host::default()));
         }
     }
+}
+
+/// Every frame: the host, the selection, flashes, keys, the mark's box.
+pub(crate) fn frame(app: &mut FigApp, ctx: &egui::Context) {
+    install_host(app);
     ecboard::observe(&mut app.session);
     let now = ctx.input(|i| i.time);
     let st = &mut app.effectcraft.board;
