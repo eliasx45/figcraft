@@ -130,3 +130,21 @@ fn nothing_of_the_card_bar_covers_the_picture() {
     }
     assert!(card_bar(Rect::from_min_size(pos2(0.0, 0.0), egui::vec2(40.0, 30.0))).is_none(), "too small: no bar");
 }
+
+/// Ghostex runs its EffectCraft on its own port (9878 in its sandbox): a Dock launch has no
+/// `EFFECTCRAFT_CONTROL_PORT`, so the cards went to Elias's standalone app on 9877. The host's
+/// port now wins over the environment's, which wins over 9877.
+#[test]
+fn a_host_given_effectcraft_port_wins_over_the_environment_and_9877() {
+    use crate::effectcraft_ui::{DEFAULT_CONTROL_PORT, resolve_control_port};
+    assert_eq!(resolve_control_port(0, None), DEFAULT_CONTROL_PORT);
+    assert_eq!(DEFAULT_CONTROL_PORT, 9877);
+    assert_eq!(resolve_control_port(0, Some(" 9900 ")), 9900);
+    assert_eq!(resolve_control_port(9878, Some("9900")), 9878, "the host wins");
+    assert_eq!(resolve_control_port(9878, None), 9878);
+    for junk in ["", "abc", "70000", "-1", "0"] {
+        assert_eq!(resolve_control_port(0, Some(junk)), DEFAULT_CONTROL_PORT, "{junk:?}");
+    }
+    // (The setter itself is global state: not set here, so no other test's card reaches a real
+    // EffectCraft port through it.)
+}

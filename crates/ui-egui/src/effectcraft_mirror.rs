@@ -213,8 +213,8 @@ impl Transport for Direct {
     }
 }
 
-/// The app's control channel (127.0.0.1, `EFFECTCRAFT_CONTROL_PORT` or 9877), connected on use
-/// and again after a failure.
+/// The app's control channel (127.0.0.1, [`crate::effectcraft_ui::control_port`]: the host's port,
+/// `EFFECTCRAFT_CONTROL_PORT` or 9877), connected on use and again after a failure.
 pub struct Tcp {
     port: u16,
     conn: Option<(TcpStream, BufReader<TcpStream>)>,
@@ -223,7 +223,7 @@ pub struct Tcp {
 
 impl Tcp {
     pub fn new() -> Tcp {
-        let port = std::env::var("EFFECTCRAFT_CONTROL_PORT").ok().and_then(|p| p.trim().parse().ok()).unwrap_or(9877);
+        let port = crate::effectcraft_ui::control_port();
         Tcp { port, conn: None, next: 1 }
     }
 

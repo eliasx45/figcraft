@@ -69,9 +69,9 @@ use serde_json::{Value, json};
 pub struct EmbedOptions {
     /// Serve FigCraft's control channel on `127.0.0.1:<port>` (`None`: off).
     pub control_port: Option<u16>,
-    /// The EffectCraft control port cards mirror (the host's in-process EffectCraft). FigCraft's
-    /// cards read `EFFECTCRAFT_CONTROL_PORT` (else 9877); until FigCraft takes the port from its
-    /// host this is only checked against it and a mismatch logged.
+    /// The EffectCraft control port cards mirror (the host's in-process EffectCraft). Given, it
+    /// wins over `EFFECTCRAFT_CONTROL_PORT`, which wins over 9877
+    /// (`effectcraft_ui::set_control_port`).
     pub effectcraft_port: Option<u16>,
     /// Show FigCraft's own chrome (tab strip, rail, panels) instead of the bare canvas.
     pub chrome: bool,
@@ -150,6 +150,8 @@ pub struct FigEmbedded {
     chrome: bool,
     queue: Arc<Mutex<Vec<ControlRequest>>>,
     control_port: Option<u16>,
+    /// The host's EffectCraft control port, as given to [`FigEmbedded::start`].
+    effectcraft_port: Option<u16>,
     /// The project and board [`FigEmbedded::open`] opened last.
     project: Option<PathBuf>,
     board: Option<PathBuf>,
@@ -205,6 +207,8 @@ impl FigEmbedded {
         // The board saves itself a moment after each change (FigCraft's auto-save).
         session.prefs.auto_save = true;
         figcraft_ui_egui::i18n::set(&session.prefs.language, None);
+        // Before the cards' link starts: they follow the host's EffectCraft.
+        set_effectcraft_port(opts.effectcraft_port);
         let gpu_canvas = session.prefs.gpu_canvas;
         let mut fig = FigApp::new(session, Box::new(services::EmbedServices::new()));
         fig.ui.home = false;
@@ -216,7 +220,6 @@ impl FigEmbedded {
         figcraft_ui_egui::windows::install(fig);
         gpu::install_tiles(&rs, gpu_canvas);
         gpu::install_effectcraft(&rs);
-        check_effectcraft_port(opts.effectcraft_port);
 
         let queue: Arc<Mutex<Vec<ControlRequest>>> = Arc::new(Mutex::new(Vec::new()));
         if let Some(port) = opts.control_port {
@@ -244,6 +247,7 @@ impl FigEmbedded {
             chrome: opts.chrome,
             queue,
             control_port: opts.control_port,
+            effectcraft_port: opts.effectcraft_port,
             project: None,
             board: None,
             marks_seen: HashSet::new(),
@@ -261,6 +265,8 @@ impl FigEmbedded {
     /// is built with `board.autoMain {ecproj}`; a new one is saved at once, so auto-save keeps it.
     pub fn open(&mut self, ecproj: &Path) -> Result<OpenReport, String> {
         let board = board_path(ecproj);
+        // The board's cards mirror the host's EffectCraft (as set at start).
+        set_effectcraft_port(self.effectcraft_port);
         let ctx = self.ctx.clone();
         let report = with_app(|fig| board::open(fig, &ctx, ecproj, &board)).ok_or("FigCraft isn't running")??;
         self.project = Some(ecproj.to_path_buf());
@@ -672,16 +678,11 @@ pub fn is_unknown(error: &str) -> bool {
     error.starts_with("unknown command")
 }
 
-/// Cards mirror the EffectCraft on `EFFECTCRAFT_CONTROL_PORT` (else 9877): say so when the host
-/// runs its own EffectCraft on another port.
-fn check_effectcraft_port(wanted: Option<u16>) {
-    let Some(wanted) = wanted else { return };
-    let used = std::env::var("EFFECTCRAFT_CONTROL_PORT").ok().and_then(|p| p.trim().parse::<u16>().ok()).unwrap_or(9877);
-    if used != wanted {
-        log::warn!(
-            "embedded FigCraft: cards follow the EffectCraft on port {used}, not the host's on {wanted} (set EFFECTCRAFT_CONTROL_PORT={wanted})"
-        );
-        eprintln!("embedded FigCraft: cards follow the EffectCraft on port {used}, not the host's on {wanted}");
+/// Cards mirror the host's EffectCraft on `port` (none: `EFFECTCRAFT_CONTROL_PORT`, else 9877).
+fn set_effectcraft_port(port: Option<u16>) {
+    if let Some(port) = port.filter(|p| *p != 0) {
+        figcraft_ui_egui::effectcraft_ui::set_control_port(port);
+        log::info!("embedded FigCraft: cards follow the host's EffectCraft on port {port}");
     }
 }
 

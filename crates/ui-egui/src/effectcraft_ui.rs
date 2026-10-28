@@ -1,5 +1,5 @@
 //! EffectCraft cards on the canvas ([`figcraft_doc::effectcraft`]): the desktop app asks the
-//! running EffectCraft (its control channel, 127.0.0.1:9877) for each card's frames and draws the
+//! running EffectCraft (its control channel, 127.0.0.1:9877, or the host's port: [`set_control_port`]) for each card's frames and draws the
 //! one at the playhead over the card, like Dynamic Link. EffectCraft answers from its own preview
 //! cache and queues the frames it lacks behind its own viewer's work, so nothing renders twice
 //! and its preview never waits for FigCraft; frames show up here as they become ready.
@@ -162,6 +162,36 @@ pub fn set_native_frames(frames: Box<dyn NativeFrames>) {
 #[cfg_attr(not(feature = "effectcraft-inproc"), allow(dead_code))]
 pub(crate) fn native_frames() -> Option<&'static dyn NativeFrames> {
     NATIVE_FRAMES.get().map(|b| b.as_ref())
+}
+
+/// The EffectCraft control port a host gave ([`set_control_port`]); 0 = none.
+static CONTROL_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+
+/// The port EffectCraft's control channel listens on when nothing says otherwise.
+pub const DEFAULT_CONTROL_PORT: u16 = 9877;
+
+/// Fork: the EffectCraft cards (and the mirrored Timeline) talk to the EffectCraft on `port`. A
+/// host that runs its own EffectCraft calls it before the cards connect (figcraft-embed's `start`:
+/// Ghostex's EffectCraft is on its own port, 9878 in its sandbox, so a Dock launch without
+/// `EFFECTCRAFT_CONTROL_PORT` no longer reaches Elias's standalone app on 9877). 0 forgets it.
+pub fn set_control_port(port: u16) {
+    CONTROL_PORT.store(port, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The EffectCraft control port: the host's ([`set_control_port`]), else
+/// `EFFECTCRAFT_CONTROL_PORT`, else 9877.
+pub fn control_port() -> u16 {
+    let host = CONTROL_PORT.load(std::sync::atomic::Ordering::Relaxed);
+    resolve_control_port(host, std::env::var("EFFECTCRAFT_CONTROL_PORT").ok().as_deref())
+}
+
+/// [`control_port`]'s rule: a host-given port (non-zero) wins over the environment's (a number
+/// 1–65535), which wins over 9877.
+pub fn resolve_control_port(host: u16, env: Option<&str>) -> u16 {
+    if host != 0 {
+        return host;
+    }
+    env.and_then(|p| p.trim().parse::<u16>().ok()).filter(|p| *p != 0).unwrap_or(DEFAULT_CONTROL_PORT)
 }
 
 /// A registered GPU frame. Dropped, its texture id is freed two UI passes later (the pass that
@@ -2065,7 +2095,7 @@ mod io {
     }
 
     fn port() -> u16 {
-        std::env::var("EFFECTCRAFT_CONTROL_PORT").ok().and_then(|p| p.trim().parse().ok()).unwrap_or(9877)
+        super::control_port()
     }
 
     enum CallError {
