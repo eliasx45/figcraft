@@ -71,6 +71,12 @@ pub(crate) mod menu;
 #[path = "effectcraft_cards.rs"]
 pub(crate) mod cards;
 
+/// Fork: the MAIN board in the app (Ghostex's EDITING canvas): its EffectCraft host, the glide
+/// of `canvas.flyTo`, review marks on cards, card flashes with Before / After.
+#[cfg(feature = "effectcraft-inproc")]
+#[path = "effectcraft_board.rs"]
+pub(crate) mod board;
+
 /// Play / explode button radius (screen points).
 const BUTTON: f32 = 10.0;
 /// Texture memory kept for card frames (bytes).
@@ -218,6 +224,36 @@ pub(crate) struct Store {
     /// The revision of the Timeline's unsaved edits these frames must show: frames of another
     /// revision are asked for again (each edit re-renders the card; a later reply replaces them).
     want: Option<u64>,
+    /// Fork: frames of the revision before, kept when a newer one replaced them (the card's
+    /// Before / After badge after `card.flash`), nearest the focus first, at most [`BEFORE`].
+    before: BTreeMap<i64, Slot>,
+}
+
+/// Frames of the revision before kept per store.
+const BEFORE: usize = 24;
+
+impl Store {
+    /// Keep `old` (replaced by a frame of another revision) as frame `f` of the revision before.
+    fn keep_before(&mut self, f: i64, old: Slot, rev: u64) {
+        if old.rev == rev {
+            return;
+        }
+        // A newer edit: the frames kept are of an older revision than this one replaced.
+        if self.before.values().next().is_some_and(|b| b.rev != old.rev) {
+            self.before.clear();
+        }
+        self.before.insert(f, old);
+        while self.before.len() > BEFORE {
+            let focus = self.focus;
+            let far = self.before.keys().copied().max_by_key(|k| (k - focus).abs());
+            match far {
+                Some(k) => {
+                    self.before.remove(&k);
+                }
+                None => break,
+            }
+        }
+    }
 }
 
 /// Comp, comp id, start and end (milliseconds).
@@ -293,6 +329,9 @@ pub struct Link {
     /// Unsaved-edits question, new cards into view, caching ([`cards`]).
     #[cfg(feature = "effectcraft-inproc")]
     pub(crate) cards: cards::State,
+    /// The MAIN board's marks, flashes and host ([`board`]).
+    #[cfg(feature = "effectcraft-inproc")]
+    pub(crate) board: board::State,
 }
 
 impl Store {
@@ -355,6 +394,17 @@ impl Link {
 
     /// The texture of comp frame `f` of `c`, or the nearest one there is within the card's
     /// stretch and `NEAR` of `f` (else the card shows its poster, not some other moment).
+    /// Fork: the frame of `c` nearest `f` from the revision before the last edit (Before / After).
+    #[cfg_attr(not(feature = "effectcraft-inproc"), allow(dead_code))]
+    pub(crate) fn before_near(&self, c: &EcComp, f: i64) -> Option<&FrameTex> {
+        self.stores
+            .iter()
+            .filter(|(k, _)| k.same_comp(c))
+            .flat_map(|(k, s)| s.before.iter().map(move |(g, slot)| ((g - f).abs(), std::cmp::Reverse(k.side), &slot.tex)))
+            .min_by_key(|(d, side, _)| (*d, *side))
+            .map(|(_, _, t)| t)
+    }
+
     fn texture_near(&self, c: &EcComp, f: i64, prefer: Option<u32>) -> Option<&FrameTex> {
         // The size the card asks for (a preview resolution) when it has this frame: a larger
         // one held from before would hide the choice.
@@ -518,7 +568,7 @@ fn hover_time(app: &FigApp, doc: &Document, id: NodeId, c: &EcComp, h: Option<Po
 }
 
 /// The comp time card `id` shows now.
-fn card_time(app: &FigApp, doc: &Document, id: NodeId, c: &EcComp, hover: Option<Pos2>) -> f64 {
+pub(crate) fn card_time(app: &FigApp, doc: &Document, id: NodeId, c: &EcComp, hover: Option<Pos2>) -> f64 {
     let ec = &app.session.effectcraft;
     // The card the EffectCraft Timeline edits shows the one playhead they share (no skimming
     // under the pointer, no audio strip's time).
@@ -541,7 +591,7 @@ fn card_time(app: &FigApp, doc: &Document, id: NodeId, c: &EcComp, hover: Option
     app.effectcraft.shown.get(&id).copied().unwrap_or(c.start)
 }
 
-fn frame_at(c: &EcComp, t: f64) -> i64 {
+pub(crate) fn frame_at(c: &EcComp, t: f64) -> i64 {
     let r = c.frames();
     c.frame_of(t).clamp(*r.start(), *r.end())
 }
@@ -770,7 +820,7 @@ pub(crate) fn chip(painter: &egui::Painter, at: Pos2, text: String, font: egui::
 }
 
 /// The topmost card under screen point `pos`.
-fn card_at(app: &FigApp, doc: &Document, page: NodeId, pos: Pos2) -> Option<(NodeId, Rect)> {
+pub(crate) fn card_at(app: &FigApp, doc: &Document, page: NodeId, pos: Pos2) -> Option<(NodeId, Rect)> {
     cards(doc, page).into_iter().rev().find_map(|id| {
         let c = doc.node(id)?.effectcraft.as_deref()?;
         let r = screen_rect(app, doc, id)?;
@@ -1345,6 +1395,7 @@ impl FigApp {
     /// right and bottom edges (their corner, Effect Controls' right edge) that size them, the keyboard focus, and the card following its edits.
     pub(crate) fn effectcraft_panel_ui(&mut self, ctx: &egui::Context) {
         cards::frame(self, ctx);
+        board::frame(self, ctx);
         let Some(mut p) = self.effectcraft.panel.take() else {
             self.effectcraft.panel_rects = None;
             return;
@@ -1560,6 +1611,7 @@ impl FigApp {
                         s.failed.remove(&f);
                         if let Some(old) = s.frames.insert(f, Slot { tex, rev: revision, bytes }) {
                             self.effectcraft.bytes = self.effectcraft.bytes.saturating_sub(old.bytes);
+                            s.keep_before(f, old, revision);
                         }
                         self.effectcraft.bytes += bytes;
                     }

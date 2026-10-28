@@ -270,6 +270,9 @@ pub fn show(app: &mut FigApp, ui: &mut Ui, worker: &mut Worker) {
     crate::theme::set_canvas_page(&ctx, bg);
     draw_canvas_image(app, &painter, ppp, shown, tiled);
     crate::effectcraft_ui::overlay(app, &painter);
+    // Fork: the MAIN board's marks, flashes and Before / After badges on the cards.
+    #[cfg(feature = "effectcraft-inproc")]
+    crate::effectcraft_ui::board::overlay(app, &painter);
     crate::video_ui::overlay(app, &painter);
     app.session.tool.labels = overlays(app, &painter, &t);
     crate::audio_ui::overlay(app, &painter);
@@ -815,6 +818,12 @@ fn input(app: &mut FigApp, ui: &mut Ui, resp: &egui::Response) -> bool {
         && matches!(app.session.tool.tool, ToolId::Move | ToolId::Scale);
     // EffectCraft cards: play and explode buttons; a double-click opens the comp in EffectCraft.
     // Fork: the comp's layers on the card the EffectCraft Timeline edits (move, scale).
+    // Fork: review marks on cards (an armed Pen / Comment / Layer, ⌃⌥-click) and the Before /
+    // After badge come first.
+    #[cfg(feature = "effectcraft-inproc")]
+    if !app.canvas.dragging && crate::effectcraft_ui::board::input(app, &ctx, pos, resp.hovered()) {
+        return true;
+    }
     #[cfg(feature = "effectcraft-inproc")]
     if !app.canvas.dragging && crate::effectcraft_ui::layer_handles_input(app, &ctx, pos, resp.hovered()) {
         return false;

@@ -1040,6 +1040,9 @@ impl FigApp {
                 }
                 "dialog.preferences" => self.ui.preferences = true,
                 "effectcraft.explode" | "effectcraft.reveal" => self.effectcraft_request_ui(&r.kind, &r.data),
+                // Fork: the MAIN board's glide and card flashes.
+                #[cfg(feature = "effectcraft-inproc")]
+                "canvas.flyTo" | "card.flash" | "card.flashDismiss" => crate::effectcraft_ui::board::request(self, &r.kind, &r.data),
                 // Fork: a new EffectCraft comp as a card (its settings dialog first without a size).
                 #[cfg(feature = "effectcraft-inproc")]
                 "effectcraft.newComp" | "dialog.effectcraftNewComp" => crate::effectcraft_ui::project::request(self, &r.kind, &r.data),

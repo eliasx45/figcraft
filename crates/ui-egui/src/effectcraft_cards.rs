@@ -357,6 +357,18 @@ pub(crate) fn view_to_show(view: (f64, f64, f64), viewport: (f64, f64), r: PRect
     Some((r.center().x, r.center().y, z))
 }
 
+/// Fork (`canvas.flyTo`): glide the view from `from` to `to` (centre x, centre y, zoom), as a new
+/// card is brought into view. The engine set the view to `to` already: it goes back to `from`
+/// first. Motion off: it stays at `to`.
+pub(crate) fn fly(app: &mut FigApp, from: (f64, f64, f64), to: (f64, f64, f64), motion: bool) {
+    let finite = [from.0, from.1, from.2, to.0, to.1, to.2].iter().all(|v| v.is_finite()) && from.2 > 0.0 && to.2 > 0.0;
+    if !finite || !motion {
+        return;
+    }
+    let _ = app.session.execute("view.set", &json!({"cx": from.0, "cy": from.1, "zoom": from.2}));
+    app.effectcraft.cards.glide = Some(Glide { from, to, since: None, last: None });
+}
+
 /// Eased progress (ease-out cubic) at `u` (0..1).
 pub(crate) fn ease(u: f64) -> f64 {
     let u = if u.is_finite() { u.clamp(0.0, 1.0) } else { 1.0 };

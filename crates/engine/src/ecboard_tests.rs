@@ -157,7 +157,8 @@ fn marks_measure_through_effectcraft_and_queue_in_session_state() {
     auto(&mut s);
     let st = s.execute("board.state", &json!({})).unwrap();
     let card = st["rows"][1]["cards"][1]["card"].clone();
-    let rev = s.ds().unwrap().revision;
+    let doc = s.ds().unwrap().doc.clone();
+    let undo = s.ds().unwrap().history.undo.len();
     s.execute("canvas.annotate.start", &json!({"tool": "comment"})).unwrap();
     assert_eq!(s.execute("board.state", &json!({})).unwrap()["armed"], "comment");
     let m = s.execute("canvas.annotate.add", &json!({"card": card, "time": 1.0, "point": [960, 540], "note": "bigger"})).unwrap();
@@ -173,7 +174,8 @@ fn marks_measure_through_effectcraft_and_queue_in_session_state() {
     let list = s.execute("canvas.annotate.list", &json!({"since": mark["id"]})).unwrap();
     assert_eq!(list["marks"].as_array().unwrap().len(), 1);
     // Never the document.
-    assert_eq!(s.ds().unwrap().revision, rev);
+    assert!(std::sync::Arc::ptr_eq(&doc, &s.ds().unwrap().doc));
+    assert_eq!(s.ds().unwrap().history.undo.len(), undo);
     let agent = s.execute("board.agentView", &json!({"card": card})).unwrap();
     assert_eq!(agent["marks"].as_array().unwrap().len(), 2);
     s.execute("canvas.annotate.remove", &json!({"id": mark["id"]})).unwrap();
