@@ -123,11 +123,13 @@ fn the_project_tab_is_effectcrafts_panel_answering_through_figcraft() {
     super::set_side(&ctx, &h, Side::Project);
     let input = || egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 400.0))), ..Default::default() };
     for _ in 0..2 {
-        let _ = ctx.run_ui(input(), |ui| {
+        ctx.run_ui(input(), |ui| {
             let tl = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 400.0));
             let fx = egui::Rect::from_min_size(egui::pos2(1000.0, 0.0), egui::vec2(400.0, 400.0));
             h.show(ui, tl, Some(fx));
-        });
+        })
+        .textures_delta
+        .clear();
     }
     assert!(h.auto().find_current("figcraft.side.project").is_some(), "the tabs drew");
     assert!(h.auto().find_current("project.newComp").is_some(), "EffectCraft's Project panel drew");

@@ -82,8 +82,12 @@ fn a_bad_comp_or_bad_params_are_errors() {
     // Junk frame numbers are reported per frame.
     let v = ec.call("figcraft.frames", &json!({"comp": cid, "frames": [-1, "x", 1e300, i64::MAX]})).unwrap();
     assert!(v["frames"].as_array().unwrap().iter().all(|f| f["error"].is_string()), "{v}");
-    for p in [json!({"comp": cid}), json!({"comp": cid, "start": 1.0, "end": 0.0}), json!({"comp": cid, "start": f64::MAX, "end": 1.0}), json!({"comp": 0, "start": 0, "end": 1})]
-    {
+    for p in [
+        json!({"comp": cid}),
+        json!({"comp": cid, "start": 1.0, "end": 0.0}),
+        json!({"comp": cid, "start": f64::MAX, "end": 1.0}),
+        json!({"comp": 0, "start": 0, "end": 1}),
+    ] {
         assert!(ec.call("figcraft.tree", &p).is_err(), "{p}");
         assert!(ec.call("figcraft.audio", &p).is_err(), "{p}");
     }
@@ -155,4 +159,16 @@ fn a_snapshot_answers_tree_and_sound_like_the_file() {
         assert!(snap.call("figcraft.audio", &bad).is_err(), "{bad}");
     }
     assert!(snap.call("figcraft.frames", &p).is_err());
+}
+
+#[test]
+fn a_deleted_files_key_is_the_key_it_had() {
+    // Night run 29 Oct: canonicalize fails once the file is gone, and the raw temp path
+    // (/var/…) no longer matched the stored /private/var/… key, so the pool kept the session.
+    let dir = temp("key");
+    let path = dir.join("gone.ecproj");
+    std::fs::write(&path, "{}").unwrap();
+    let before = crate::key(&path);
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(crate::key(&path), before);
 }

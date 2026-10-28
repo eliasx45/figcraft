@@ -409,9 +409,11 @@ fn the_timelines_keys_open_the_dialogs_from_effectcrafts_keymap() {
             ..Default::default()
         };
         let rev = host(&mut u).session().revision;
-        let _ = ctx.run_ui(input, |ui| {
+        ctx.run_ui(input, |ui| {
             let _ = host(&mut u).keys(ui.ctx());
-        });
+        })
+        .textures_delta
+        .clear();
         let s = shown(&ctx);
         assert!(s.is_some(), "{id}: its dialog");
         assert_eq!(host(&mut u).session().revision, rev, "{id}: nothing made yet");
@@ -690,9 +692,11 @@ fn keyframe_interpolation_opens_from_its_key_and_ok_changes_the_keys() {
             events: vec![egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: mods }],
             ..Default::default()
         };
-        let _ = ctx.run_ui(input, |ui| {
+        ctx.run_ui(input, |ui| {
             let _ = host(&mut u).keys(ui.ctx());
-        });
+        })
+        .textures_delta
+        .clear();
         assert!(shown(&ctx).is_some(), "{id}: its dialog");
         tried += 1;
     }

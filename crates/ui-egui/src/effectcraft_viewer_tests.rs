@@ -50,9 +50,11 @@ fn card(k: f32) -> ViewerMap {
 fn frame(ctx: &egui::Context, h: &mut EcHost, map: ViewerMap, events: Vec<Event>) -> vh::Frame {
     let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))), events, ..Default::default() };
     let mut out = vh::Frame::default();
-    let _ = ctx.run_ui(input, |ui| {
+    ctx.run_ui(input, |ui| {
         out = vh::tools(h, ui, map, vh::Options { id: egui::Id::new("card"), space_pan: false });
-    });
+    })
+    .textures_delta
+    .clear();
     out
 }
 
@@ -115,9 +117,11 @@ fn tool_keys_switch_the_card_tools() {
             events: vec![Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: mods }],
             ..Default::default()
         };
-        let _ = ctx.run_ui(input, |ui| {
+        ctx.run_ui(input, |ui| {
             let _ = h.keys(ui.ctx());
-        });
+        })
+        .textures_delta
+        .clear();
         assert_eq!(h.ui().tool, want, "{id}");
         tried += 1;
     }
@@ -133,9 +137,11 @@ fn the_tool_row_draws_and_lights_the_current_tool() {
     let (mut h, _, _) = host("row");
     let ctx = egui::Context::default();
     h.ui_mut().tool = Tool::Ellipse;
-    let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+    ctx.run_ui(egui::RawInput::default(), |ui| {
         ui.horizontal(|ui| tool_row(ui, &mut h));
-    });
+    })
+    .textures_delta
+    .clear();
     let lit: Vec<Slot> = ROW.iter().map(|(s, ..)| *s).filter(|s| s.has(Tool::Ellipse)).collect();
     assert_eq!(lit, vec![Slot::Shape]);
     assert!(Slot::Pen.has(Tool::PenConvert) && Slot::Type.has(Tool::TypeVertical) && !Slot::Selection.has(Tool::Rotate));
@@ -263,9 +269,11 @@ fn guides_and_grids_show_on_the_card_only_while_on() {
     // The grid button and its open menu draw (lit while one is on).
     egui::Popup::open_id(&ctx, super::grid_popup_id());
     for _ in 0..2 {
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        ctx.run_ui(egui::RawInput::default(), |ui| {
             ui.horizontal(|ui| grid_button(ui, &mut h));
-        });
+        })
+        .textures_delta
+        .clear();
     }
 }
 
@@ -343,7 +351,7 @@ fn junk_never_panics() {
     for tool in [Tool::Selection, Tool::Rotate, Tool::PanBehind, Tool::Star, Tool::Pen, Tool::PenAdd, Tool::MaskFeather, Tool::Type] {
         h.ui_mut().tool = tool;
         for m in maps {
-            let _ = ctx.run_ui(egui::RawInput::default(), |ui| vh::view_overlays(&mut h, ui, m));
+            ctx.run_ui(egui::RawInput::default(), |ui| vh::view_overlays(&mut h, ui, m)).textures_delta.clear();
             for at in [pos2(f32::NAN, 0.0), pos2(-1e30, 1e30), pos2(110.0, 60.0)] {
                 frame(&ctx, &mut h, m, vec![Event::PointerMoved(at), button(at, true)]);
                 frame(&ctx, &mut h, m, vec![Event::PointerMoved(at + vec2(30.0, 30.0)), button(at, false)]);
@@ -351,7 +359,7 @@ fn junk_never_panics() {
             }
         }
     }
-    let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+    ctx.run_ui(egui::RawInput::default(), |ui| {
         for tool in Tool::ALL {
             for r in [
                 Rect::NOTHING,
@@ -363,5 +371,7 @@ fn junk_never_panics() {
                 paint_grid_icon(ui.painter(), r, egui::Color32::WHITE);
             }
         }
-    });
+    })
+    .textures_delta
+    .clear();
 }

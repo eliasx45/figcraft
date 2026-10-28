@@ -27,10 +27,12 @@ fn layers(h: &EcHost) -> usize {
 }
 
 fn frame(ctx: &egui::Context, h: &mut EcHost, input: egui::RawInput) {
-    let _ = ctx.run_ui(input, |ui| {
+    ctx.run_ui(input, |ui| {
         let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 300.0));
         h.show(ui, rect, None);
-    });
+    })
+    .textures_delta
+    .clear();
 }
 
 fn input() -> egui::RawInput {
@@ -102,10 +104,11 @@ fn junk_never_panics() {
     bad.comp_id = 0;
     bad.comp = "Nope".into();
     assert!(EcHost::open(&p, &bad, false).is_err());
-    // Junk commands and keys.
+    // Junk commands and keys. (layer.newSolid with null params makes a default solid now, so
+    // the junk is a comp that isn't there; night run 29 Oct.)
     let mut h = EcHost::open(&p, &c, false).unwrap();
     let ctx = egui::Context::default();
-    for (id, params) in [("no.such", json!({})), ("layer.newSolid", json!(null)), ("prop.set", json!([1, 2])), ("", json!("x"))] {
+    for (id, params) in [("no.such", json!({})), ("layer.newSolid", json!({"comp": 987_654})), ("prop.set", json!([1, 2])), ("", json!("x"))] {
         assert!(h.invoke(&ctx, id, params).is_err(), "{id}");
     }
     let mut keys = input();
@@ -115,7 +118,7 @@ fn junk_never_panics() {
         egui::Event::Key { key: egui::Key::F13, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE },
     ];
     let mut actions = vec![];
-    let _ = ctx.run_ui(keys, |_| actions = h.keys(&ctx));
+    ctx.run_ui(keys, |_| actions = h.keys(&ctx)).textures_delta.clear();
     assert_eq!(actions.get(..2), Some(&[PanelAction::Play, PanelAction::Save][..]));
 }
 
@@ -136,17 +139,21 @@ fn undo_stays_in_effectcraft_while_the_panel_has_focus() {
     let mut undo = input();
     undo.events = vec![key(egui::Key::Z, egui::Modifiers::COMMAND)];
     let mut left = 1;
-    let _ = ctx.run_ui(undo, |_| {
+    ctx.run_ui(undo, |_| {
         let _ = h.keys(&ctx);
         left = ctx.input(|i| i.events.iter().filter(|e| matches!(e, egui::Event::Key { key: egui::Key::Z, .. })).count());
-    });
+    })
+    .textures_delta
+    .clear();
     assert_eq!(layers(&h), n, "EffectCraft's undo ran");
     assert_eq!(left, 0, "the key was taken from FigCraft");
     let mut redo = input();
     redo.events = vec![key(egui::Key::Z, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT)];
-    let _ = ctx.run_ui(redo, |_| {
+    ctx.run_ui(redo, |_| {
         let _ = h.keys(&ctx);
-    });
+    })
+    .textures_delta
+    .clear();
     assert_eq!(layers(&h), n + 1, "and its redo");
 }
 
@@ -171,7 +178,7 @@ fn the_graph_editor_opens_and_draws_in_the_docked_panel() {
     let mut press = input();
     press.events = vec![key(egui::Key::F3, egui::Modifiers::SHIFT)];
     let mut actions = vec![];
-    let _ = ctx.run_ui(press, |_| actions = h.keys(&ctx));
+    ctx.run_ui(press, |_| actions = h.keys(&ctx)).textures_delta.clear();
     assert!(actions.contains(&PanelAction::Ran("timeline.graphEditor".into())), "{actions:?}");
     assert!(h.ui().timeline.graph_editor, "Shift+F3 opened the Graph Editor");
     for _ in 0..3 {
@@ -181,7 +188,7 @@ fn the_graph_editor_opens_and_draws_in_the_docked_panel() {
     assert!(!h.auto().query_current("timeline.graph.key.").is_empty(), "the opacity keys drew in the graph");
     let mut press = input();
     press.events = vec![key(egui::Key::F, egui::Modifiers::NONE)];
-    let _ = ctx.run_ui(press, |_| actions = h.keys(&ctx));
+    ctx.run_ui(press, |_| actions = h.keys(&ctx)).textures_delta.clear();
     assert!(actions.contains(&PanelAction::Ran("timeline.graph.fit".into())), "{actions:?}");
     frame(&ctx, &mut h, input());
     let rev = h.session().revision;
@@ -207,10 +214,12 @@ fn timeline_reveal_keys_work_in_the_docked_panel() {
     press.events = vec![key(egui::Key::P, egui::Modifiers::NONE)];
     let mut actions = vec![];
     let mut left = 1;
-    let _ = ctx.run_ui(press, |_| {
+    ctx.run_ui(press, |_| {
         actions = h.keys(&ctx);
         left = ctx.input(|i| i.events.iter().filter(|e| matches!(e, egui::Event::Key { key: egui::Key::P, .. })).count());
-    });
+    })
+    .textures_delta
+    .clear();
     assert!(actions.contains(&PanelAction::Ran("timeline.reveal.position".into())), "{actions:?}");
     assert_eq!(left, 0, "FigCraft's P (Pen) never saw it");
     assert_eq!(h.ui().timeline.reveal, ["position"]);
@@ -425,7 +434,10 @@ mod mirrored {
     fn rig(name: &str, mirrors: bool, app_path: Option<&std::path::Path>) -> Rig {
         let (p, c) = sample(name);
         let app = Rc::new(RefCell::new(InProc::open(app_path.unwrap_or(&p)).unwrap()));
-        if let Ok(id) = app.borrow().comp_id(&json!(c.comp)) {
+        // Bound first: an `if let` scrutinee's borrow lives through its block (edition 2021),
+        // so borrow_mut inside it panicked "RefCell already borrowed" (night run 29 Oct).
+        let id = app.borrow().comp_id(&json!(c.comp));
+        if let Ok(id) = id {
             app.borrow_mut().session_mut().open_comp(ItemId(id));
         }
         let down = Rc::new(Cell::new(false));
@@ -510,17 +522,21 @@ mod mirrored {
         assert_eq!(r.app_layers(), n + 1);
         let mut undo = input();
         undo.events = vec![key(egui::Key::Z, egui::Modifiers::COMMAND)];
-        let _ = ctx.run_ui(undo, |_| {
+        ctx.run_ui(undo, |_| {
             let _ = r.h.keys(&ctx);
-        });
+        })
+        .textures_delta
+        .clear();
         r.settle();
         assert_eq!(r.app_layers(), n, "undone in the app");
         assert_eq!(layers(&r.h), n, "and shown here");
         let mut redo = input();
         redo.events = vec![key(egui::Key::Z, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT)];
-        let _ = ctx.run_ui(redo, |_| {
+        ctx.run_ui(redo, |_| {
             let _ = r.h.keys(&ctx);
-        });
+        })
+        .textures_delta
+        .clear();
         r.settle();
         assert_eq!(r.app_layers(), n + 1, "redone in the app");
         assert!(r.same());

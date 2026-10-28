@@ -95,14 +95,16 @@ fn pass(app: &mut FigApp, ctx: &egui::Context, time: f64, events: Vec<Event>, po
     let raw =
         RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1440.0, 900.0))), time: Some(time), events, ..Default::default() };
     let mut took = false;
-    let _ = ctx.run_ui(raw, |ui| {
+    ctx.run_ui(raw, |ui| {
         let ctx = ui.ctx().clone();
         frame(app, &ctx);
         if let Some(p) = pos {
             took = input(app, &ctx, p, true);
         }
         overlay(app, &ui.painter().clone());
-    });
+    })
+    .textures_delta
+    .clear();
     took
 }
 

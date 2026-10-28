@@ -70,7 +70,14 @@ fn stamp(path: &Path) -> Result<Stamp, String> {
 
 /// The project path as sessions are keyed (absolute when it exists).
 pub fn key(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    // A file deleted since it was opened no longer canonicalizes: its folder still does, so the
+    // key stays the same (macOS: /var → /private/var) and the pool finds and lets go its session.
+    std::fs::canonicalize(path)
+        .or_else(|e| match (path.parent(), path.file_name()) {
+            (Some(dir), Some(name)) if !dir.as_os_str().is_empty() => std::fs::canonicalize(dir).map(|d| d.join(name)),
+            _ => Err(e),
+        })
+        .unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// One EffectCraft session holding one saved project.

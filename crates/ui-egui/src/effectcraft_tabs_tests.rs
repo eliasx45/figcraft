@@ -42,11 +42,13 @@ fn input(events: Vec<Event>) -> egui::RawInput {
 
 /// One frame of the Timeline with its column (the tabs at x 1000…1400).
 fn show(ctx: &egui::Context, h: &mut EcHost, events: Vec<Event>) {
-    let _ = ctx.run_ui(input(events), |ui| {
+    ctx.run_ui(input(events), |ui| {
         let tl = egui::Rect::from_min_size(pos2(0.0, 0.0), egui::vec2(1000.0, SCREEN.y));
         let fx = egui::Rect::from_min_size(pos2(1000.0, 0.0), egui::vec2(400.0, SCREEN.y));
         h.show(ui, tl, Some(fx));
-    });
+    })
+    .textures_delta
+    .clear();
 }
 
 /// Click automation target `id` (drawn last frame).
@@ -101,11 +103,13 @@ fn each_tab_draws_effectcrafts_panel_headless() {
         assert!(h.auto().find_current(&format!("figcraft.side.{key}")).is_some(), "the {key} tab");
     }
     // A narrow column still shows every tab (short labels).
-    let _ = ctx.run_ui(input(vec![]), |ui| {
+    ctx.run_ui(input(vec![]), |ui| {
         let tl = egui::Rect::from_min_size(pos2(0.0, 0.0), egui::vec2(1000.0, SCREEN.y));
         let fx = egui::Rect::from_min_size(pos2(1000.0, 0.0), egui::vec2(230.0, SCREEN.y));
         h.show(ui, tl, Some(fx));
-    });
+    })
+    .textures_delta
+    .clear();
     assert!(h.auto().find_current("figcraft.side.library").is_some());
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -301,11 +305,13 @@ fn junk_never_panics() {
     for side in [Side::Text, Side::Markers, Side::Library] {
         set_side(&ctx, &h, side);
         for w in [0.0, 3.0, 40.0] {
-            let _ = ctx.run_ui(input(vec![]), |ui| {
+            ctx.run_ui(input(vec![]), |ui| {
                 let tl = egui::Rect::from_min_size(pos2(0.0, 0.0), egui::vec2(1000.0, 30.0));
                 let fx = egui::Rect::from_min_size(pos2(1000.0, 0.0), egui::vec2(w, 30.0));
                 h.show(ui, tl, Some(fx));
-            });
+            })
+            .textures_delta
+            .clear();
         }
     }
     let _ = std::fs::remove_dir_all(dir);

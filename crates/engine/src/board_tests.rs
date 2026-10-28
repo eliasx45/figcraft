@@ -480,7 +480,8 @@ fn a_text_edit_gesture_left_open_never_swallows_later_commands() {
     // gesture starts from the current document, not the text edit's stale snapshot.
     let mut s = design();
     let r = s.execute("board.sticky", &json!({"x": 0, "y": 0})).unwrap();
-    assert!(crate::board::edit_text(&mut s, id(&r, "text")).unwrap());
+    // edit_text takes the board object (the sticky), not its text node (night run 29 Oct).
+    assert!(crate::board::edit_text(&mut s, id(&r, "id")).unwrap());
     crate::textedit::insert(&mut s, "Hi").unwrap();
     // Editing dropped behind the engine's back (as old paths did).
     s.ds_mut().unwrap().text_edit = None;
