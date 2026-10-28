@@ -32,6 +32,8 @@ pub mod doc_urls;
 pub mod drop;
 pub mod effectcraft;
 pub mod effectcraft_clipboard;
+/// Fork: the MAIN board (Ghostex's EDITING canvas).
+pub mod ecboard;
 pub mod file_access;
 pub mod fonts;
 pub mod guard;
@@ -817,6 +819,8 @@ pub struct Session {
     pub effectcraft: effectcraft::Transport,
     /// The video card playhead (see [`video`]).
     pub video: video::Transport,
+    /// Fork: the MAIN board's session state: its EffectCraft host, review marks, events.
+    pub ecboard: ecboard::State,
 }
 
 impl Default for Session {
@@ -868,6 +872,7 @@ impl Session {
             audio: audio::Transport::default(),
             effectcraft: effectcraft::Transport::default(),
             video: video::Transport::default(),
+            ecboard: ecboard::State::default(),
         }
     }
 
@@ -993,6 +998,7 @@ impl Session {
             Ok(_) => {
                 self.after_command(spec, before);
                 self.apply_view_prefs();
+                ecboard::observe(self);
                 if spec.history && id != "edit.repeat" {
                     self.last_command = Some((id.to_string(), params.clone()));
                 }
@@ -1620,6 +1626,8 @@ fn mark_dev_changes(doc: &mut Document, before: &Document, touched: &BTreeSet<No
     }
 }
 
+#[cfg(test)]
+mod ecboard_tests;
 #[cfg(test)]
 mod a11y_keys_tests;
 #[cfg(test)]

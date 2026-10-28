@@ -324,11 +324,8 @@ fn place(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let nid = doc.alloc_id();
     let name = string(p, "name").unwrap_or_else(|| format!("{} · {}–{}", c.comp, clock(c.start), clock(c.end)));
-    let mut node = Node::new(nid, NodeKind::Frame, name, w, h);
+    let mut node = card_node(nid, c, name, w, h);
     node.transform = figcraft_geom::Affine::translate((x, y));
-    node.fills = vec![figcraft_color::Paint::solid(figcraft_color::Color::from_rgb8_const(0x0C, 0x0C, 0x0E))];
-    node.clip = true;
-    node.effectcraft = Some(Box::new(c));
     if let Some(from) = exploded {
         node.plugin_data.insert(EXPLODED_FROM.into(), from.to_string());
     }
@@ -339,6 +336,15 @@ fn place(s: &mut Session, p: &Value) -> Result<Value> {
         o.insert("into".into(), json!(into));
     }
     Ok(out)
+}
+
+/// A card layer `w`×`h` showing `c` (at the origin; the caller places it).
+pub(crate) fn card_node(id: NodeId, c: EcComp, name: String, w: f64, h: f64) -> Node {
+    let mut node = Node::new(id, NodeKind::Frame, name, w, h);
+    node.fills = vec![figcraft_color::Paint::solid(figcraft_color::Color::from_rgb8_const(0x0C, 0x0C, 0x0E))];
+    node.clip = true;
+    node.effectcraft = Some(Box::new(c));
+    node
 }
 
 /// The cards `p` names: `ids`/`id`, else the selected cards, else the playhead's card, else every
