@@ -260,6 +260,8 @@ fn junk_never_panics() {
         json!({"card": -1, "id": 1e308, "row": {"x": 1}, "chapter": [], "since": -5, "maxZoom": -1}),
         json!({"comp": "", "before": "yes", "ids": ["x"], "point": {"x": "a"}, "frame": "NaN"}),
         json!({"ecproj": "\u{0}", "chapter": "\u{1F4A5}".repeat(300), "time": -1e308}),
+        json!({"agent": "A1", "comp": "S1 06 Old vs AI", "bbox": [1, "x", 3, 4], "color": "red-ish", "status": 3, "layer": {"a": 1}}),
+        json!({"agent": "\u{1F4A5}".repeat(300), "card": 1e308, "bbox": {"x": 1e308, "y": 0, "w": -1, "h": 2}, "name": [1]}),
     ];
     let ids: Vec<&str> = crate::all_commands()
         .iter()
@@ -269,9 +271,10 @@ fn junk_never_panics() {
                 || i.starts_with("canvas.annotate.")
                 || i.starts_with("canvas.flyTo")
                 || i.starts_with("card.flash")
+                || i.starts_with("canvas.presence.")
         })
         .collect();
-    assert!(ids.len() >= 17, "{ids:?}");
+    assert!(ids.len() >= 20, "{ids:?}");
     for with_board in [false, true] {
         for cmd in &ids {
             for j in &junk {
@@ -300,4 +303,82 @@ fn stress_and_lines_from_words() {
     assert_eq!((st.0.as_str(), st.2), ("content", "longest stressed word"));
     assert_eq!(ecboard::timecode(62.5, 29.97), "1:02:14");
     assert_eq!(ecboard::clock(62.9), "1:02");
+}
+
+/// Agents on the board, pen.dev style (Elias: "if an agent is working on its comp, its comp is
+/// glowing like this and has this system that Pen Dev has. include that too"): session state only,
+/// positions only from what the host passes.
+#[test]
+fn presence_shows_agents_on_their_cards_without_touching_the_document() {
+    let (mut s, _) = sess();
+    auto(&mut s);
+    let doc_before = s.doc().unwrap().clone();
+    let a = s
+        .execute(
+            "canvas.presence.set",
+            &json!({"agent": "A2", "name": "A2", "color": "#ffb020", "comp": "S1 06 Old vs AI", "layer": "S1 06 N A1 W1 T", "bbox": [100, 200, 300, 80]}),
+        )
+        .unwrap();
+    assert_eq!(a["tag"], "A2 · S1 06");
+    assert_eq!(a["color"], "#FFB020");
+    assert_eq!(a["status"], "working", "working by default");
+    assert_eq!(a["bbox"], json!([100.0, 200.0, 300.0, 80.0]));
+    let card = crate::params::id_of(&a["card"]).unwrap();
+    let board_card = s.execute("board.state", &json!({})).unwrap()["rows"][1]["cards"][1]["card"].clone();
+    assert_eq!(a["card"], board_card, "the MAIN board's card of that comp");
+
+    // A second agent, no bbox (no box, cursor at the card's corner), its own colour; then the first
+    // one moves and is done.
+    let b = s
+        .execute("canvas.presence.set", &json!({"agent": "A3", "card": card, "status": "idle", "bbox": {"x": 0, "y": 0, "width": 10, "height": 10}}))
+        .unwrap();
+    assert_eq!(b["name"], "A3");
+    assert_eq!(b["status"], "idle");
+    assert_eq!(
+        b["color"],
+        json!(format!(
+            "#{:02X}{:02X}{:02X}",
+            ecboard::presence::color_for("A3")[0],
+            ecboard::presence::color_for("A3")[1],
+            ecboard::presence::color_for("A3")[2]
+        ))
+    );
+    let moved =
+        s.execute("canvas.presence.set", &json!({"agent": "A2", "comp": "S1 06 Old vs AI", "bbox": [0, 0, 1920, 1080], "status": "done"})).unwrap();
+    assert!(moved["serial"].as_u64() > a["serial"].as_u64(), "a new serial: the cursor glides, the touch box shows again");
+    assert_eq!(moved["color"], "#FFB020", "keeps its colour");
+    assert_eq!(moved["layer"], json!(null), "only what was passed");
+    let st = s.execute("canvas.presence.state", &json!({})).unwrap();
+    assert_eq!(st["agents"].as_array().unwrap().len(), 2);
+    assert_eq!(st["agents"][0]["status"], "done");
+
+    // Bad input is refused, never guessed.
+    for bad in [
+        json!({"comp": "S1 06 Old vs AI"}),
+        json!({"agent": "A4", "comp": "nope"}),
+        json!({"agent": "A4"}),
+        json!({"agent": "A4", "comp": "S1 06 Old vs AI", "bbox": [1, 2, -3, 4]}),
+        json!({"agent": "A4", "comp": "S1 06 Old vs AI", "status": "sleeping"}),
+        json!({"agent": "A4", "comp": "S1 06 Old vs AI", "color": "not a colour"}),
+    ] {
+        assert!(s.execute("canvas.presence.set", &bad).is_err(), "{bad}");
+    }
+
+    // Hover / open come from the UI as board events.
+    s.ecboard.push("presence.hover", json!({"agent": "A2"}));
+    let ev = s.execute("board.events", &json!({"since": 0})).unwrap();
+    assert!(ev["events"].as_array().unwrap().iter().any(|e| e["kind"] == "presence.hover" && e["data"]["agent"] == "A2"));
+
+    assert_eq!(s.execute("canvas.presence.clear", &json!({"agent": "A3"})).unwrap()["cleared"], json!(["A3"]));
+    assert_eq!(s.execute("canvas.presence.clear", &json!({})).unwrap()["cleared"], json!(["A2"]));
+    assert!(s.ecboard.presence.list.is_empty());
+    assert_eq!(s.doc().unwrap().nodes().count(), doc_before.nodes().count(), "never the document");
+    assert!(!s.undo_labels(8).iter().any(|l| l.contains("Agent")), "not an undo step");
+
+    // At most 16 at once.
+    for i in 0..ecboard::presence::MAX_AGENTS {
+        s.execute("canvas.presence.set", &json!({"agent": format!("A{i}"), "card": card})).unwrap();
+    }
+    assert!(s.execute("canvas.presence.set", &json!({"agent": "one more", "card": card})).is_err());
+    assert!(s.execute("canvas.presence.set", &json!({"agent": "A0", "card": card, "status": "done"})).is_ok(), "an agent shown can still change");
 }

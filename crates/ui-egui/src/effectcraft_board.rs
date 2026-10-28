@@ -18,6 +18,8 @@
 //! - **Flashes.** `card.flash` makes the cards flash (three 0.45 s pulses) and puts a "Before /
 //!   After" badge on them: held, the card shows its frame from the revision before the edit (the
 //!   store keeps those frames when newer ones replace them).
+//! - **Agents** (`canvas.presence.*`): their cards glow and their cursors sit at what they touched
+//!   ([`super::presence`]).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -93,10 +95,12 @@ pub(crate) struct State {
     /// The last layer pick: card, screen point, when.
     pick: Option<(NodeId, Pos2, f64)>,
     auto: Registry,
+    /// Agents shown on the board.
+    pub(crate) presence: super::presence::View,
 }
 
 /// Card `id`'s picture on screen and its comp.
-fn pic_of(app: &FigApp, doc: &Document, id: NodeId) -> Option<(Rect, EcComp)> {
+pub(crate) fn pic_of(app: &FigApp, doc: &Document, id: NodeId) -> Option<(Rect, EcComp)> {
     let c = doc.node(id)?.effectcraft.as_deref()?.clone();
     let r = super::screen_rect(app, doc, id)?;
     Some((super::fit(r, c.width, c.height), c))
@@ -186,6 +190,7 @@ pub(crate) fn frame(app: &mut FigApp, ctx: &egui::Context) {
     }
     keys(app, ctx, now);
     draft_box(app, ctx, now);
+    super::presence::frame(app, ctx);
 }
 
 /// Whether the active page holds a MAIN board.
@@ -406,6 +411,8 @@ pub(crate) fn overlay(app: &FigApp, painter: &egui::Painter) {
             egui::StrokeKind::Middle,
         );
     }
+    // Agents, on top.
+    super::presence::overlay(app, painter);
 }
 
 /// Feed this frame's pointer samples to the Pen stroke; on release, open its box.
@@ -448,8 +455,8 @@ fn code(name: &str) -> String {
     name.split_whitespace().take(2).collect::<Vec<_>>().join(" ")
 }
 
-/// The pointer for review marks: a held Before / After badge, the Pen's stroke, an armed tool or
-/// ⌃⌥ on a card. Returns whether it took the pointer.
+/// The pointer for review marks: a held Before / After badge, the Pen's stroke, an agent's cursor
+/// or glow, an armed tool or ⌃⌥ on a card. Returns whether it took the pointer.
 pub(crate) fn input(app: &mut FigApp, ctx: &egui::Context, pos: Pos2, hovered: bool) -> bool {
     let (pressed, down, mods, now) =
         ctx.input(|i| (i.pointer.button_pressed(egui::PointerButton::Primary), i.pointer.primary_down(), i.modifiers, i.time));
@@ -465,6 +472,10 @@ pub(crate) fn input(app: &mut FigApp, ctx: &egui::Context, pos: Pos2, hovered: b
     }
     if !hovered {
         return false;
+    }
+    // A click on an agent's cursor or glow (no tool armed): the host opens that agent.
+    if app.session.ecboard.marks.armed.is_none() && super::presence::input(app, ctx, pos, hovered) {
+        return true;
     }
     let Ok(ds) = app.session.ds() else { return false };
     let (doc, page) = (ds.doc.clone(), ds.page);

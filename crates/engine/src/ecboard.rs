@@ -15,6 +15,7 @@
 //!   comp's pixels, queued here (session state, never the document) for the host to take.
 //! - `card.flash` ([`flash`]): a card flashes when Claude edits its comp, with a Before / After badge.
 //! - `board.storyboard` / `board.review` ([`boards`]): boards beside a row or a card.
+//! - `canvas.presence.*` ([`presence`]): agents shown on the cards they work on, pen.dev style.
 //!
 //! The engine knows no EffectCraft: what a board needs from the project comes from an
 //! [`EcHost`] the desktop app installs (FigCraft's in-process EffectCraft, `figcraft_ec_inproc`'s
@@ -30,6 +31,8 @@ pub mod boards;
 pub mod flash;
 #[path = "ecboard_marks.rs"]
 pub mod marks;
+#[path = "ecboard_presence.rs"]
+pub mod presence;
 
 use std::collections::VecDeque;
 
@@ -76,7 +79,8 @@ const HEAD_INK: Color = Color::from_rgb8_const(0xD8, 0xDC, 0xE4);
 #[derive(Clone, Debug, PartialEq)]
 pub struct Event {
     pub seq: u64,
-    /// `select`, `board`, `mark`, `marksRemoved`, `armed`, `flash`, `storyboard`, `review`.
+    /// `select`, `board`, `mark`, `marksRemoved`, `armed`, `flash`, `storyboard`, `review`,
+    /// `presence.hover`, `presence.open`.
     pub kind: String,
     pub data: Value,
 }
@@ -88,6 +92,8 @@ pub struct State {
     pub host: Option<Box<dyn EcHost>>,
     pub marks: marks::Marks,
     pub flash: flash::Flashes,
+    /// Agents shown on the board (`canvas.presence.*`).
+    pub presence: presence::Presence,
     events: VecDeque<Event>,
     next_seq: u64,
     /// Bumped with every event.
@@ -923,7 +929,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "board.events",
             "MAIN Board Events",
-            "{since? (the last seq seen)}  → {last, revision, events: [{seq, kind: select|board|mark|marksRemoved|armed|flash|storyboard|review, data}]}: what changed since `since` (the newest 256 kept); `select` carries the selected card ({card, label, comp, compId, project, row, mainStart, mainEnd, parent}; card null when none)",
+            "{since? (the last seq seen)}  → {last, revision, events: [{seq, kind: select|board|mark|marksRemoved|armed|flash|storyboard|review|presence.hover|presence.open, data}]}: what changed since `since` (the newest 256 kept); `select` carries the selected card ({card, label, comp, compId, project, row, mainStart, mainEnd, parent}; card null when none)",
             false,
             events
         ),
@@ -944,6 +950,7 @@ pub fn specs() -> Vec<CommandSpec> {
     ];
     v.extend(marks::specs());
     v.extend(flash::specs());
+    v.extend(presence::specs());
     v.extend(boards::specs());
     v
 }

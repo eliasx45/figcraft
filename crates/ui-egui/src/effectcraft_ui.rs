@@ -77,6 +77,12 @@ pub(crate) mod cards;
 #[path = "effectcraft_board.rs"]
 pub(crate) mod board;
 
+/// Fork: agents on the MAIN board, pen.dev style (`canvas.presence.*`): their cards glow, their
+/// cursors sit at what they touched.
+#[cfg(feature = "effectcraft-inproc")]
+#[path = "effectcraft_presence.rs"]
+pub(crate) mod presence;
+
 /// Play / explode button radius (screen points).
 const BUTTON: f32 = 10.0;
 /// Texture memory kept for card frames (bytes).
