@@ -85,17 +85,94 @@ fn a_handle_drag_is_one_undo_step_and_a_pick_is_another() {
 }
 
 #[test]
-fn the_shelf_docks_right_of_the_card_never_over_the_picture() {
-    let card = Rect::from_min_size(pos2(100.0, 100.0), vec2(320.0, 200.0));
-    let pic = Rect::from_min_size(pos2(100.0, 110.0), vec2(320.0, 180.0));
-    let s = shelf_rect(card, pic);
+fn the_shelf_docks_right_of_the_card_in_panel_units_and_grows_down_the_timeline() {
+    // A 480×270 card (panel units), its viewer bar and a Timeline under it, ending left of the shelf.
+    let card = Rect::from_min_size(pos2(0.0, 0.0), vec2(480.0, 270.0));
+    let footer = Rect::from_min_size(pos2(0.0, 278.0), vec2(480.0, 30.0));
+    let strip = Rect::from_min_max(pos2(-368.0, 316.0), pos2(480.0, 604.0));
+    let s = shelf_rect(card, card, Some(strip), Some(footer), content_height(1));
     assert!(s.min.x >= card.max.x + GAP - 0.01);
-    assert!(!s.intersects(pic));
-    assert_eq!(s.min.y, pic.min.y);
+    assert!(!s.intersects(card));
+    assert_eq!(s.min.y, card.min.y);
     assert_eq!(s.width(), SHELF_W);
-    // A tiny picture still gets a usable shelf.
-    let small = Rect::from_min_size(pos2(0.0, 0.0), vec2(80.0, 45.0));
-    assert!(shelf_rect(small, small).height() >= 180.0);
+    assert!(s.height() >= MIN_SHELF_H && s.height() <= content_height(1).max(MIN_SHELF_H) + 0.01, "{s:?}");
+    // Ten graphs: as tall as picture + Timeline, no taller (the rest scrolls).
+    let tall = shelf_rect(card, card, Some(strip), Some(footer), content_height(10));
+    assert!((tall.max.y - strip.max.y).abs() < 0.01, "{tall:?}");
+    // A Timeline reaching under the shelf: it stops at the viewer bar.
+    let wide = Rect::from_min_max(pos2(-368.0, 316.0), pos2(1200.0, 604.0));
+    let s = shelf_rect(card, card, Some(wide), Some(footer), content_height(10));
+    assert!((s.max.y - footer.max.y).abs() < 0.01 && !s.intersects(wide), "{s:?}");
+    // Junk content never panics.
+    let _ = shelf_rect(card, card, None, None, f32::NAN);
+}
+
+#[test]
+fn scrolling_reaches_the_last_graph_and_stays_in_range() {
+    let view = 300.0;
+    let content = content_height(5) - HEAD_H;
+    assert_eq!(clamp_scroll(-40.0, content, view), 0.0);
+    let most = clamp_scroll(1e9, content, view);
+    assert!((most - (content - view)).abs() < 0.01, "the last card's bottom reaches the view's");
+    assert!(most + view >= 5.0 * CARD_H - 0.01);
+    assert_eq!(clamp_scroll(50.0, 100.0, view), 0.0, "everything fits: no scroll");
+    assert_eq!(clamp_scroll(f32::NAN, content, view), 0.0);
+}
+
+#[test]
+fn key_times_map_to_the_axis_and_snap_to_frames() {
+    let g = Rect::from_min_size(pos2(10.0, 0.0), vec2(200.0, 40.0));
+    let ax = axis(1.0, 2.0, 0.04);
+    assert!(ax.0 < 1.0 && ax.1 > 2.0, "room either side: {ax:?}");
+    for t in [1.0, 1.5, 2.0] {
+        assert!((x_time(g, ax, time_x(g, ax, t)) - t).abs() < 1e-4);
+    }
+    assert!((snap(1.013, 0.04) - 1.0).abs() < 1e-9);
+    assert!((snap(1.03, 0.04) - 1.04).abs() < 1e-9);
+    assert!(snap(f64::NAN, 0.04).is_nan());
+    assert_eq!(snap(1.3, 0.0), 1.3);
+    let _ = time_x(g, (1.0, 1.0), 1.0);
+    let _ = x_time(Rect::NOTHING, ax, f32::NAN);
+    let l = Listing { frame_rate: 0.0, ..Listing::default() };
+    assert!((l.frame() - 0.04).abs() < 1e-9);
+}
+
+#[test]
+fn a_key_drag_is_one_undo_step_and_the_listing_follows_the_move() {
+    let (mut h, _) = host("key");
+    let ctx = egui::Context::default();
+    let l = list(&mut h);
+    let g = l.graphs[0].clone();
+    assert_eq!(g.keys(), [0.4, 1.2]);
+    // Drag the second key from 1.2 s to 1.5 s, frame by frame, one undo key.
+    for t in [1.28, 1.36, 1.5] {
+        h.run_engine(&ctx, "nowGraphs.moveKey", move_call(l.comp, &g, 1, t, "nowgraphs-drag-7")).unwrap();
+    }
+    let g2 = list(&mut h).graphs[0].clone();
+    assert!((g2.end - 1.5).abs() < 0.01, "{g2:?}");
+    assert!((g2.start - 0.4).abs() < 0.01);
+    h.invoke(&ctx, "edit.undo", json!({})).unwrap();
+    let g3 = list(&mut h).graphs[0].clone();
+    assert!((g3.end - 1.2).abs() < 0.01, "one undo takes the whole drag back: {g3:?}");
+}
+
+#[test]
+fn graphs_under_the_playhead_come_first() {
+    let (mut h, bx) = host("order");
+    let ctx = egui::Context::default();
+    // A second layer whose fade ended 0.3 s before the playhead (0.8 s): listed after the Box.
+    let early =
+        h.invoke(&ctx, "layer.newSolid", json!({"name": "Early", "color": "#0000ff", "width": 8, "height": 8})).unwrap()["layer"].as_u64().unwrap();
+    for (t, v) in [(0.1, 0.0), (0.5, 100.0)] {
+        h.invoke(&ctx, "prop.addKey", json!({"layer": early, "path": "transform/opacity", "time": t, "value": v})).unwrap();
+    }
+    h.set_time(0.8);
+    let l = list(&mut h);
+    assert_eq!(l.graphs.len(), 2, "{l:#?}");
+    assert_eq!(l.graphs[0].layer, bx);
+    assert!(l.graphs[0].contains_playhead && !l.graphs[1].contains_playhead);
+    assert_eq!(l.graphs[0].object, 0);
+    assert!(l.find(l.graphs[1].who()).is_some_and(|(n, _)| n == 1));
 }
 
 #[test]
