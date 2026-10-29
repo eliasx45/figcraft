@@ -375,3 +375,27 @@ fn a_card_placed_by_comp_name_follows_the_viewer_resolution_too() {
     assert_eq!(super::chosen_side(&u.app, card, &c), Some(480), "the viewer's Quarter of 1920");
     let _ = std::fs::remove_dir_all(d);
 }
+
+/// A card's own resolution (its title row's chip) decides its frame size over the comp's viewer
+/// Resolution, is kept on the card (one undo step) and reads back; junk values are none.
+#[test]
+fn a_cards_own_resolution_wins_and_is_kept_on_the_card() {
+    let (d, p, cid) = sample("resolution-per-card");
+    let (mut u, card) = app_with_card(&p, cid, 640.0);
+    let c = comp(cid, &p);
+    assert_eq!(super::chosen_side(&u.app, card, &c), None, "Auto: what its size on screen needs");
+    let value = super::res_value(Resolution::Half);
+    u.app.run("node.set", json!({"ids": [card], "props": {"pluginData": {super::RES_KEY: value}}}));
+    assert_eq!(super::card_resolution(u.app.session.doc().unwrap(), card), Some(Resolution::Half));
+    assert_eq!(super::chosen_side(&u.app, card, &c), Some(960), "Half of 1920");
+    u.app.run("edit.undo", json!({}));
+    assert_eq!(super::chosen_side(&u.app, card, &c), None, "undo takes it back");
+    for r in [Resolution::Auto, Resolution::Full, Resolution::Third, Resolution::Quarter, Resolution::Custom(7)] {
+        assert_eq!(super::parse_res(&super::res_value(r)), Some(r));
+    }
+    for junk in ["", "custom:", "custom:x", "huge", "custom:-3"] {
+        assert_eq!(super::parse_res(junk), None, "{junk}");
+    }
+    u.frame(vec![]);
+    let _ = std::fs::remove_dir_all(d);
+}

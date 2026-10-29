@@ -83,6 +83,12 @@ pub(crate) mod board;
 #[path = "effectcraft_presence.rs"]
 pub(crate) mod presence;
 
+/// Fork: a playing card plays as EffectCraft's viewer previews: frames ahead, the newest ready
+/// one held (never black), EffectCraft's real-time readout.
+#[cfg(feature = "effectcraft-inproc")]
+#[path = "effectcraft_play.rs"]
+pub(crate) mod play;
+
 /// Play / explode button radius (screen points).
 const BUTTON: f32 = 10.0;
 /// Texture memory kept for card frames (bytes).
@@ -398,6 +404,11 @@ pub struct Link {
     /// The MAIN board's marks, flashes and host ([`board`]).
     #[cfg(feature = "effectcraft-inproc")]
     pub(crate) board: board::State,
+    /// The playing card's meter ([`play`]) and the frame store it fetches into.
+    #[cfg(feature = "effectcraft-inproc")]
+    pub(crate) play: play::Shared,
+    #[cfg(feature = "effectcraft-inproc")]
+    pub(crate) play_key: Option<StoreKey>,
 }
 
 impl Store {
@@ -510,6 +521,38 @@ impl Link {
             }
         }
         best.map(|(_, _, t)| t)
+    }
+
+    /// Fork: the frame a playing card shows for playhead frame `f` ([`play::pick`]: `f`, else the
+    /// newest frame held since the one on screen `last`, else that one) and its texture (the
+    /// preview's size `prefer` when held, else the biggest). `None` before any frame near `f`.
+    #[cfg(feature = "effectcraft-inproc")]
+    pub(crate) fn texture_playing(&self, c: &EcComp, f: i64, prefer: Option<u32>, last: Option<i64>) -> Option<(i64, &FrameTex)> {
+        let r = c.frames();
+        let lo = last.filter(|l| *l <= f).unwrap_or(*r.start()).max(*r.start());
+        let mut held: Vec<i64> = Vec::new();
+        for (_, s) in self.stores.iter().filter(|(k, _)| k.same_comp(c)) {
+            if lo <= f {
+                held.extend(s.frames.range(lo..=f).map(|(g, _)| *g));
+            }
+            if let Some(l) = last
+                && s.frames.contains_key(&l)
+            {
+                held.push(l);
+            }
+        }
+        let g = play::pick(&held, f, last)?;
+        if let Some(side) = prefer
+            && let Some(slot) = self.stores.get(&StoreKey::of(c, side)).and_then(|s| s.frames.get(&g))
+        {
+            return Some((g, &slot.tex));
+        }
+        self.stores
+            .iter()
+            .filter(|(k, _)| k.same_comp(c))
+            .filter_map(|(k, s)| s.frames.get(&g).map(|slot| (k.side, &slot.tex)))
+            .max_by_key(|(side, _)| *side)
+            .map(|(_, t)| (g, t))
     }
 
     /// Frames of `c` held (any size) and frames shown.
@@ -633,6 +676,14 @@ pub(crate) fn first_batch(mut frames: Vec<i64>, at: i64, refreshing: bool) -> Ve
         frames.truncate(1);
     }
     frames
+}
+
+/// Frames asked for in one request while a card plays.
+fn play_batch() -> usize {
+    #[cfg(feature = "effectcraft-inproc")]
+    return play::PLAY_BATCH;
+    #[cfg(not(feature = "effectcraft-inproc"))]
+    BATCH
 }
 
 /// Seconds of a comp time as milliseconds (sound keys).
@@ -853,7 +904,27 @@ pub fn overlay(app: &FigApp, painter: &egui::Painter) {
         let prefer = cards::chosen_side(app, id, c);
         #[cfg(not(feature = "effectcraft-inproc"))]
         let prefer = None;
-        let drawn = match app.effectcraft.texture_near(c, f, prefer) {
+        let playing_here = ec.playing() && ec.node == Some(id);
+        // Fork: a playing card never shows black: the newest frame ready stays up ([`play`]).
+        #[cfg(feature = "effectcraft-inproc")]
+        let held = playing_here
+            .then(|| {
+                let last = app.effectcraft.play.try_borrow().ok().filter(|m| m.card() == Some(id)).and_then(|m| m.last());
+                app.effectcraft.texture_playing(c, f, prefer, last)
+            })
+            .flatten();
+        #[cfg(feature = "effectcraft-inproc")]
+        if let Some((g, _)) = held
+            && let Ok(mut m) = app.effectcraft.play.try_borrow_mut()
+            && m.card() == Some(id)
+        {
+            m.shown(g, painter.ctx().input(|i| i.time));
+        }
+        #[cfg(feature = "effectcraft-inproc")]
+        let tex = held.map(|(_, t)| t).or_else(|| app.effectcraft.texture_near(c, f, prefer));
+        #[cfg(not(feature = "effectcraft-inproc"))]
+        let tex = app.effectcraft.texture_near(c, f, prefer);
+        let drawn = match tex {
             Some(tex) => {
                 painter.rect_filled(r, CornerRadius::ZERO, Color32::from_rgb(0x0C, 0x0C, 0x0E));
                 painter.image(tex.id(), pic, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
@@ -865,6 +936,11 @@ pub fn overlay(app: &FigApp, painter: &egui::Painter) {
             }
             None => false,
         };
+        // Fork: EffectCraft's real-time readout on the playing card (green: keeps real time).
+        #[cfg(feature = "effectcraft-inproc")]
+        if playing_here && let Some((label, rt)) = app.effectcraft.play.try_borrow().ok().filter(|m| m.card() == Some(id)).and_then(|m| m.rate()) {
+            effectcraft_ui_egui::panels::viewer_tools::paint_rate(painter, pic.right_top() + vec2(-6.0, 6.0), &label, rt);
+        }
         // Fork: the selected layers' boxes and handles while the Timeline edits this card.
         #[cfg(feature = "effectcraft-inproc")]
         handles::draw(app, painter, id, c, pic, hover);
@@ -1216,6 +1292,22 @@ impl FigApp {
             // Cache Before Playback and the preview resolution.
             cards::cache_step(self, ctx, &preset, now);
         }
+        // Fork: the playing card's meter follows the transport ([`play`]).
+        #[cfg(feature = "effectcraft-inproc")]
+        {
+            let ec = &self.session.effectcraft;
+            let caching = self.effectcraft.cards.cache.is_some();
+            let card = ec.node.zip(ec.span()).filter(|_| !caching).and_then(|(n, sp)| Some((n, sp, doc.node(n)?.effectcraft.as_deref()?.fps)));
+            let generation = ec.generation;
+            match (card, self.effectcraft.play.try_borrow_mut()) {
+                (Some((n, sp, fps)), Ok(mut m)) => {
+                    let step = if sp.step > 0.0 && sp.step.is_finite() { (sp.step * fps).round().max(1.0) as i64 } else { 1 };
+                    m.follow(n, generation, fps * sp.speed, step);
+                }
+                (None, Ok(mut m)) => m.stop(),
+                _ => {}
+            }
+        }
         let ppp = ctx.pixels_per_point();
         let hover = ctx.input(|i| i.pointer.hover_pos()).filter(|h| self.canvas.rect.contains(*h));
         let mut wanted: Vec<(NodeId, EcComp, u32, i64)> = Vec::new();
@@ -1534,6 +1626,7 @@ impl FigApp {
         cards::frame(self, ctx);
         board::frame(self, ctx);
         strips::room_frame(self);
+        cards::resolution_chips(self, ctx);
         let Some(mut p) = self.effectcraft.panel.take() else {
             self.effectcraft.panel_rects = None;
             return;
@@ -1754,6 +1847,8 @@ impl FigApp {
                             }
                         }
                     }
+                    #[cfg(feature = "effectcraft-inproc")]
+                    let for_play = self.effectcraft.play_key.as_ref() == Some(&store);
                     let s = self.effectcraft.stores.entry(store).or_default();
                     // In-process frames of an older save of the file go.
                     if file.is_some() && s.file.is_some() && s.file != file {
@@ -1762,6 +1857,11 @@ impl FigApp {
                         self.effectcraft.bytes = self.effectcraft.bytes.saturating_sub(dropped);
                     }
                     s.file = file;
+                    #[cfg(feature = "effectcraft-inproc")]
+                    if for_play && let Ok(mut m) = self.effectcraft.play.try_borrow_mut() {
+                        let frames: Vec<i64> = got.iter().map(|(f, _)| *f).collect();
+                        m.got(&frames, now);
+                    }
                     for (f, tex) in got {
                         let [w, h] = tex.size();
                         let bytes = w * h * 4;
@@ -1877,7 +1977,18 @@ impl FigApp {
         let caching: Option<NodeId> = None;
         let full = |id: NodeId| Some(id) == playing || Some(id) == caching;
         let each = prefetch_each(wanted, full);
-        for (id, c, side, at) in wanted {
+        // Fork: the playing card asks first, and alone: it plays as EffectCraft previews ([`play`]).
+        #[cfg(feature = "effectcraft-inproc")]
+        let span = self.session.effectcraft.span().filter(|_| playing.is_some() && caching != playing);
+        #[cfg(feature = "effectcraft-inproc")]
+        let order_by: Vec<&(NodeId, EcComp, u32, i64)> = {
+            let mut v: Vec<&(NodeId, EcComp, u32, i64)> = wanted.iter().collect();
+            v.sort_by_key(|w| Some(w.0) != playing);
+            v
+        };
+        #[cfg(not(feature = "effectcraft-inproc"))]
+        let order_by: Vec<&(NodeId, EcComp, u32, i64)> = wanted.iter().collect();
+        for (id, c, side, at) in order_by {
             if c.sound {
                 // The piece of sound at the playhead, and the next one while the card plays.
                 let w = sound_window(c, *at as f64 / c.fps);
@@ -1906,6 +2017,11 @@ impl FigApp {
             if self.effectcraft.in_flight >= IN_FLIGHT {
                 continue;
             }
+            #[cfg(feature = "effectcraft-inproc")]
+            if span.is_some() && Some(*id) != playing {
+                // The renderer is the playing card's while it plays (the others keep what they show).
+                continue;
+            }
             let key = StoreKey::of(c, *side);
             let rev = self.effectcraft.revision;
             // While EffectCraft is closed any frame held is as new as the saved file allows.
@@ -1913,12 +2029,23 @@ impl FigApp {
             let s = self.effectcraft.stores.entry(key.clone()).or_default();
             s.focus = *at;
             let mut frames = Vec::new();
-            for f in order(c, *at, if full(*id) { full_frames(c, *side) } else { each }) {
+            // Fork: playing, only frames ahead of the playhead, from where it will be when they
+            // are ready, in small batches ([`play::order`]).
+            #[cfg(feature = "effectcraft-inproc")]
+            let plan = span.filter(|_| Some(*id) == playing).map(|sp| {
+                let lead = self.effectcraft.play.try_borrow().map(|m| m.lead(c.fps * sp.speed)).unwrap_or(0);
+                play::order(c, &sp, *at, lead, play::PLAY_BATCH * 8)
+            });
+            #[cfg(not(feature = "effectcraft-inproc"))]
+            let plan: Option<Vec<i64>> = None;
+            let batch = if plan.is_some() { play_batch() } else { BATCH };
+            let candidates = plan.unwrap_or_else(|| order(c, *at, if full(*id) { full_frames(c, *side) } else { each }));
+            for f in candidates {
                 if !wants(s, f, now, rev, headless) {
                     continue;
                 }
                 frames.push(f);
-                if frames.len() >= BATCH {
+                if frames.len() >= batch {
                     break;
                 }
             }
@@ -1929,6 +2056,14 @@ impl FigApp {
             let frames = first_batch(frames, *at, s.refreshing(*at, headless));
             for f in &frames {
                 s.pending.insert(*f, now);
+            }
+            #[cfg(feature = "effectcraft-inproc")]
+            if span.is_some()
+                && Some(*id) == playing
+                && let Ok(mut m) = self.effectcraft.play.try_borrow_mut()
+            {
+                m.ask(&frames, now);
+                self.effectcraft.play_key = Some(key.clone());
             }
             // The poster: the first frame fetched (the one at the playhead), once a session, for a
             // card without one.

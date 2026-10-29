@@ -23,17 +23,30 @@
 //!   Playback the card renders its play range first ("Caching n%" on it), then plays; play pressed
 //!   again meanwhile plays what is cached ("If caching, play cached frames"), else stops
 //!   ([`cache_step`]). A range bigger than the frame budget caches what fits.
+//! - **A resolution per card.** EffectCraft's own Resolution control (its viewer bar's dropdown:
+//!   Full, Half, Third, Quarter, Custom, Auto) sits at the right of the card's title row
+//!   ([`resolution_chips`]): it shows the resolution the card is rendered at (while it plays, the
+//!   Space preset's when that isn't Auto) and sets the card's own, kept on the card (plugin data
+//!   [`RES_KEY`], one undo step); a card without one follows its comp's viewer Resolution.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use effectcraft_ui_egui::panels::timeline::TimelineHost;
+use effectcraft_ui_egui::state::Resolution;
 use egui::{Color32, pos2};
 use figcraft_doc::{Document, EcComp, NodeId};
 use figcraft_geom::Rect as PRect;
 use serde_json::{Value, json};
 
 use crate::FigApp;
+
+/// The card's plugin data holding its own resolution ([`res_value`]: auto, full, half, third,
+/// quarter or custom:N).
+pub(crate) const RES_KEY: &str = "effectcraft.resolution";
+/// The resolution chip's size (screen points) and the narrowest card picture that shows one.
+const CHIP: (f32, f32) = (84.0, 18.0);
+const CHIP_MIN_CARD: f32 = 200.0;
 
 /// Seconds a glide to a new card takes.
 const GLIDE: f64 = 0.35;
@@ -484,13 +497,91 @@ fn side_of(app: &FigApp, id: NodeId, c: &EcComp, auto: u32) -> u32 {
 }
 
 /// The frame size card `id` shows when a preview resolution decides it (`None`: Auto, the
-/// sharpest frame held). Playing or caching, the Space preset's resolution (Auto: the viewer's).
+/// sharpest frame held). The card's own resolution ([`RES_KEY`]), else its comp's viewer
+/// Resolution; playing or caching, the Space preset's resolution when it isn't Auto.
 pub(crate) fn chosen_side(app: &FigApp, id: NodeId, c: &EcComp) -> Option<u32> {
+    shown_factor(app, id, c).map(|k| side_at(c, k))
+}
+
+/// The resolution factor card `id` renders at (`None`: Auto), as [`chosen_side`] explains.
+fn shown_factor(app: &FigApp, id: NodeId, c: &EcComp) -> Option<u32> {
     let st = &app.effectcraft.cards;
     let t = &app.session.effectcraft;
     let previewing = (t.playing() && t.node == Some(id)) || st.cache.as_ref().is_some_and(|k| k.card == id);
-    let factor = if previewing { st.preview_factor.or_else(|| viewer_factor(app, c)) } else { viewer_factor(app, c) };
-    factor.map(|k| side_at(c, k))
+    let own = app.session.doc().ok().and_then(|d| card_resolution(d, id));
+    let base = match own {
+        Some(r) => r.factor().map(u32::from),
+        None => viewer_factor(app, c),
+    };
+    if previewing { st.preview_factor.or(base) } else { base }
+}
+
+/// Card `id`'s own resolution ([`RES_KEY`]), when it has one.
+pub(crate) fn card_resolution(doc: &Document, id: NodeId) -> Option<Resolution> {
+    parse_res(doc.node(id)?.plugin_data.get(RES_KEY)?)
+}
+
+/// A resolution as kept on a card.
+pub(crate) fn res_value(r: Resolution) -> String {
+    match r {
+        Resolution::Auto => "auto".into(),
+        Resolution::Full => "full".into(),
+        Resolution::Half => "half".into(),
+        Resolution::Third => "third".into(),
+        Resolution::Quarter => "quarter".into(),
+        Resolution::Custom(n) => format!("custom:{n}"),
+    }
+}
+
+/// [`res_value`] read back (junk: none).
+pub(crate) fn parse_res(v: &str) -> Option<Resolution> {
+    Some(match v {
+        "auto" => Resolution::Auto,
+        "full" => Resolution::Full,
+        "half" => Resolution::Half,
+        "third" => Resolution::Third,
+        "quarter" => Resolution::Quarter,
+        _ => Resolution::from_factor(v.strip_prefix("custom:")?.parse::<u64>().ok()?),
+    })
+}
+
+/// Each card big enough on screen gets EffectCraft's Resolution control at the right of its title
+/// row (`effectcraft_ui_egui::panels::viewer_tools::resolution_chip`, EMBED17). Picking one sets
+/// the card's own resolution (one undo step).
+pub(crate) fn resolution_chips(app: &mut FigApp, ctx: &egui::Context) {
+    let Ok(ds) = app.session.ds() else { return };
+    let doc = ds.doc.clone();
+    let canvas = app.canvas.rect;
+    let ppp = ctx.pixels_per_point();
+    let mut chips: Vec<(NodeId, egui::Rect, Resolution, f64)> = Vec::new();
+    for id in super::cards(&doc, ds.page) {
+        let Some(c) = doc.node(id).and_then(|n| n.effectcraft.as_deref()) else { continue };
+        let Some(r) = super::screen_rect(app, &doc, id) else { continue };
+        let pic = super::fit(r, c.width, c.height);
+        let rect = egui::Rect::from_min_size(pos2(pic.max.x - CHIP.0, pic.min.y - super::TITLE + 1.0), egui::vec2(CHIP.0, CHIP.1));
+        if pic.width() < CHIP_MIN_CARD || !canvas.contains_rect(rect) {
+            continue;
+        }
+        let res = shown_factor(app, id, c).map_or(Resolution::Auto, |k| Resolution::from_factor(u64::from(k)));
+        let zoom = pic.width() / c.width.max(1) as f32;
+        chips.push((id, rect, res, Resolution::Auto.scale(zoom, ppp)));
+    }
+    let t = effectcraft_ui_egui::theme::Tokens::for_kind(effectcraft_ui_egui::theme::ThemeKind::Dark);
+    let mut picked: Option<(NodeId, Resolution)> = None;
+    for (id, rect, res, scale) in chips {
+        let aid = egui::Id::new(("effectcraft-card-res", id));
+        egui::Area::new(aid).order(egui::Order::Middle).fixed_pos(rect.min).constrain(false).movable(false).show(ctx, |ui| {
+            let got = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                effectcraft_ui_egui::panels::viewer_tools::resolution_chip(ui, rect, res, scale, &t, aid.with("chip"))
+            }));
+            if let Ok(Some(r)) = got {
+                picked = Some((id, r));
+            }
+        });
+    }
+    if let Some((id, r)) = picked {
+        app.run("node.set", json!({"ids": [id], "props": {"pluginData": {RES_KEY: res_value(r)}}}));
+    }
 }
 
 /// The frames of `c` held at frame size `side`, of `frames`.

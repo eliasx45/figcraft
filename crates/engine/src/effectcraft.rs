@@ -101,6 +101,18 @@ pub fn wrap(run: f64, range: (f64, f64), looping: bool) -> Option<f64> {
     if looping { Some(a + (run - a).rem_euclid(span)) } else { None }
 }
 
+/// What a playing card plays ([`Transport::span`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Span {
+    pub start: f64,
+    pub end: f64,
+    /// The frame grid shown (seconds; Skip shows every n-th frame).
+    pub step: f64,
+    pub looping: bool,
+    /// Comp seconds per second of playback.
+    pub speed: f64,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Transport {
     /// The card the playhead is on.
@@ -154,6 +166,12 @@ impl Transport {
             return (self.start + n * self.step).max(self.start);
         }
         t
+    }
+
+    /// While playing: what is played (comp seconds `start..end`, every `step` seconds, looping or
+    /// not, `speed` comp seconds per second), for the frames fetched ahead of the playhead.
+    pub fn span(&self) -> Option<Span> {
+        self.playing().then_some(Span { start: self.start, end: self.end, step: self.step, looping: self.looping, speed: self.speed })
     }
 
     /// EffectCraft's preview rules for card `node` (`None`: loop over the card's stretch). While
