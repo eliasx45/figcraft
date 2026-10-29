@@ -175,3 +175,13 @@ fn a_chapter_a_hair_before_its_first_card_picks_that_card() {
     assert_eq!(board::card_at_time(&cards, 316.0).map(|c| c.node), Some(44));
     assert_eq!(board::card_at_time(&cards, 322.88).map(|c| c.node), Some(45), "the last card's end still finds it");
 }
+
+/// Ghostex hang, 29 Oct: Ghostex calls set_visible before every frame, and each call asked for an
+/// immediate frame, so the canvas drew at the display rate for ever on an idle board.
+#[test]
+fn set_visible_asks_for_a_frame_only_when_the_view_comes_back() {
+    assert!(crate::shows_again(false, true));
+    assert!(!crate::shows_again(true, true), "already shown: no frame of its own");
+    assert!(!crate::shows_again(true, false));
+    assert!(!crate::shows_again(false, false));
+}

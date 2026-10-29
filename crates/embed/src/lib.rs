@@ -213,7 +213,7 @@ impl FigEmbedded {
         let mut fig = FigApp::new(session, Box::new(services::EmbedServices::new()));
         fig.ui.home = false;
         fig.ui.title_bar = figcraft_ui_egui::TitleBar::Native;
-        // The bare canvas: no tab strip, rail, panels or toolbar (the host draws its own).
+        // FigCraft's chrome, or the bare canvas (no tab strip, rail, panels or toolbar).
         fig.ui.chromeless = !opts.chrome;
         figcraft_ui_egui::windows::install(fig);
         gpu::install_tiles(&rs, gpu_canvas);
@@ -346,6 +346,19 @@ impl FigEmbedded {
         with_app(|fig| board::selection(fig).0.into_iter().next()).flatten()
     }
 
+    /// FigCraft's own chrome (tab strip, rail, panels, toolbar) shows around the canvas (`false`:
+    /// the bare canvas; the control channel's `ui.set {chromeless}` changes it too).
+    pub fn chrome(&self) -> Option<bool> {
+        with_app(|fig| !fig.ui.chromeless)
+    }
+
+    /// Show or hide FigCraft's chrome; the next frame lays it out inside the view.
+    pub fn set_chrome(&mut self, on: bool) {
+        if with_app(|fig| fig.ui.chromeless = !on).is_some() {
+            self.ctx.request_repaint();
+        }
+    }
+
     /// The canvas zoom (1 = 100 %) of the board shown.
     pub fn zoom(&self) -> Option<f64> {
         with_app(|fig| fig.session.ds().ok().map(|d| d.view.zoom)).flatten()
@@ -401,9 +414,12 @@ impl FigEmbedded {
     /// The host shows (`true`) or hides the view. Hidden, [`FigEmbedded::run_frame`] still runs
     /// FigCraft's frame (auto-save, card links, control requests) but draws nothing; the view
     /// comes back exactly as it was.
+    /// Called by the host before every frame, so it asks for a frame only when the view comes
+    /// back (Ghostex hang, 29 Oct: asking on every call made each frame ask for the next one, a
+    /// FigCraft frame per display refresh for ever, ~25 % CPU on an idle board).
     pub fn set_visible(&mut self, visible: bool) {
-        self.painting = visible;
-        if visible {
+        let was = std::mem::replace(&mut self.painting, visible);
+        if shows_again(was, visible) {
             self.ctx.request_repaint();
         }
     }
@@ -503,6 +519,10 @@ impl FigEmbedded {
         let mut capture_data = Vec::new();
         if let Some(vp) = full.viewport_output.get(&egui::ViewportId::ROOT) {
             out.repaint_after = vp.repaint_delay;
+            // FIGCRAFT_REPAINT_CAUSES: log what asked for an immediate frame (a frame loop).
+            if vp.repaint_delay.is_zero() && std::env::var_os("FIGCRAFT_REPAINT_CAUSES").is_some() {
+                log::info!("embedded FigCraft: repaint now: {:?}", self.ctx.repaint_causes());
+            }
             for cmd in &vp.commands {
                 if let egui::ViewportCommand::Screenshot(data) = cmd {
                     capture_data.push(data.clone());
@@ -689,4 +709,9 @@ fn clamp_size([w, h]: [u32; 2]) -> [u32; 2] {
 /// Pixels per point between 0.5 and 8 (`fallback` when not a number).
 fn clamp_ppp(ppp: f32, fallback: f32) -> f32 {
     if ppp.is_finite() { ppp.clamp(0.5, 8.0) } else { fallback }
+}
+
+/// Whether a host's `set_visible` call shows the view again (hidden before, shown now).
+fn shows_again(was: bool, visible: bool) -> bool {
+    visible && !was
 }

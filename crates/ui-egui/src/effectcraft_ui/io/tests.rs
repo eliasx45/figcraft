@@ -228,3 +228,21 @@ mod in_process {
         assert!(matches!(t.run(Job::Reveal { comp: c, time: 0.0 }), Some(Reply::Down { kind: Kind::Other, .. })));
     }
 }
+
+/// Ghostex hang, 29 Oct: double-clicking a card asked the host's EffectCraft, served by this same
+/// UI thread, over TCP from the UI thread, and waited for itself for good. On the UI thread the
+/// link thread's last answer (however old) or Unknown stands in; never a call.
+#[cfg(feature = "effectcraft-inproc")]
+#[test]
+fn the_ui_thread_never_calls_an_app_it_serves_itself() {
+    use std::time::{Duration, Instant};
+    let now = Instant::now();
+    let owns = Seen::Open(Some(PathBuf::from("/p.ecproj")));
+    let old = now.checked_sub(Duration::from_secs(60)).unwrap();
+    assert_eq!(super::pick_seen(None, true, now), Some(Seen::Unknown));
+    assert_eq!(super::pick_seen(Some((old, owns.clone())), true, now), Some(owns.clone()));
+    // Another process's app: a fresh answer stands, an old one is asked again.
+    assert_eq!(super::pick_seen(Some((now, owns.clone())), false, now), Some(owns.clone()));
+    assert_eq!(super::pick_seen(Some((old, owns)), false, now), None);
+    assert_eq!(super::pick_seen(None, false, now), None);
+}

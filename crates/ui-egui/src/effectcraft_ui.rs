@@ -107,6 +107,8 @@ const WINDOW: i64 = 300;
 /// fill together. The card that plays or caches is not counted (it fetches its whole window).
 const PREFETCH: usize = (2 * WINDOW + 1) as usize;
 const PREFETCH_SHARE: f64 = 0.3;
+/// The share of [`BUDGET`] the playing or caching card's own window may fill.
+const FULL_SHARE: f64 = 0.6;
 /// Seconds from the playhead a frame may be and still stand in for it.
 const NEAR: f64 = 2.0;
 /// Most cards one explode places.
@@ -187,8 +189,16 @@ pub const DEFAULT_CONTROL_PORT: u16 = 9877;
 /// host that runs its own EffectCraft calls it before the cards connect (figcraft-embed's `start`:
 /// Ghostex's EffectCraft is on its own port, 9878 in its sandbox, so a Dock launch without
 /// `EFFECTCRAFT_CONTROL_PORT` no longer reaches Elias's standalone app on 9877). 0 forgets it.
+/// Such a host runs that EffectCraft in its own process, its control channel served by the same
+/// UI thread as FigCraft: FigCraft never calls it from the UI thread ([`io::app_state_now`]).
 pub fn set_control_port(port: u16) {
     CONTROL_PORT.store(port, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// A host gave the EffectCraft port: that EffectCraft answers from this UI thread.
+#[cfg_attr(not(feature = "effectcraft-inproc"), allow(dead_code))]
+pub(crate) fn host_serves_on_ui_thread() -> bool {
+    CONTROL_PORT.load(std::sync::atomic::Ordering::Relaxed) != 0
 }
 
 /// Installs the MAIN board's EffectCraft host now, for a host that runs board commands
@@ -578,6 +588,14 @@ pub(crate) fn prefetch_each(wanted: &[(NodeId, EcComp, u32, i64)], full: impl Fn
     let by_memory = BUDGET as f64 * PREFETCH_SHARE / bytes.max(1.0);
     let by_memory = if by_memory.is_finite() { by_memory.clamp(0.0, PREFETCH as f64) as usize } else { PREFETCH };
     by_count.min(by_memory).clamp(1, PREFETCH)
+}
+
+/// Fork: the frames the playing or caching card fetches around its playhead: its whole window,
+/// as far as [`FULL_SHARE`] of the budget holds (601 frames at 960 px are 1.2 GB: eviction then
+/// dropped frames it still wanted and they were fetched again while it played).
+pub(crate) fn full_frames(c: &EcComp, side: u32) -> usize {
+    let n = BUDGET as f64 * FULL_SHARE / frame_bytes(c, side);
+    if n.is_finite() { (n.clamp(1.0, PREFETCH as f64)) as usize } else { PREFETCH }
 }
 
 /// The frames of `c` to fetch, nearest the playhead frame `at` first (on to the end, then from
@@ -1212,7 +1230,9 @@ impl FigApp {
         // Fork: the comp viewer's / Space preview's resolution; a caching card's range.
         #[cfg(feature = "effectcraft-inproc")]
         cards::shape_wanted(self, &mut wanted);
-        if self.session.effectcraft.playing() || self.effectcraft.in_flight > 0 {
+        // (Frames in flight wake the canvas when they land, and REPOLL asks again: no frame loop
+        // while they render. Ghostex hang, 29 Oct.)
+        if self.session.effectcraft.playing() {
             ctx.request_repaint();
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -1867,7 +1887,7 @@ impl FigApp {
             let s = self.effectcraft.stores.entry(key.clone()).or_default();
             s.focus = *at;
             let mut frames = Vec::new();
-            for f in order(c, *at, if full(*id) { PREFETCH } else { each }) {
+            for f in order(c, *at, if full(*id) { full_frames(c, *side) } else { each }) {
                 if !wants(s, f, now, rev, headless) {
                     continue;
                 }
@@ -2151,18 +2171,48 @@ mod io {
     #[cfg(feature = "effectcraft-inproc")]
     const PROBE_EVERY: Duration = Duration::from_secs(2);
 
-    /// Ask the EffectCraft app now (its own connection) what it has to do with `project`.
+    /// What the link thread last heard the app has open, and when.
+    #[cfg(feature = "effectcraft-inproc")]
+    static LAST_SEEN: std::sync::Mutex<Option<(Instant, Seen)>> = std::sync::Mutex::new(None);
+
+    #[cfg(feature = "effectcraft-inproc")]
+    fn publish_seen(seen: &Seen) {
+        *LAST_SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((Instant::now(), seen.clone()));
+    }
+
+    /// Ask the EffectCraft app now what it has to do with `project` (called on the UI thread).
+    /// The link thread's answer when it is fresh; else, for an app in another process, a call on
+    /// its own connection. A host's EffectCraft ([`super::set_control_port`]) is served by this very
+    /// thread, so a call would wait for itself (Ghostex hang, 29 Oct: double-clicking a card to
+    /// open its Timeline froze Ghostex for good): it gets the link thread's last answer, or
+    /// `Unknown` before there is one.
     #[cfg(feature = "effectcraft-inproc")]
     pub(crate) fn app_state_now(project: &Path) -> AppState {
-        let seen = match Conn::open(port()) {
-            Err(_) => Seen::Closed,
-            Ok(mut c) => match c.call("engine.execute", summary()) {
-                Ok(v) => seen_of(&v),
-                Err(CallError::Remote(_)) => Seen::Unknown,
-                Err(CallError::Io(_)) => Seen::Closed,
+        let last = LAST_SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        let seen = match pick_seen(last, super::host_serves_on_ui_thread(), Instant::now()) {
+            Some(seen) => seen,
+            None => match Conn::open(port()) {
+                Err(_) => Seen::Closed,
+                Ok(mut c) => match c.call("engine.execute", summary()) {
+                    Ok(v) => seen_of(&v),
+                    Err(CallError::Remote(_)) => Seen::Unknown,
+                    Err(CallError::Io(_)) => Seen::Closed,
+                },
             },
         };
         state_of(&seen, &figcraft_ec_inproc::key(project))
+    }
+
+    /// [`app_state_now`]'s rule: the link thread's answer `last` when it is under
+    /// [`PROBE_EVERY`] old, or whatever its age when the app is served on the UI thread
+    /// (`Unknown` without one); `None`: ask the app.
+    #[cfg(feature = "effectcraft-inproc")]
+    pub(crate) fn pick_seen(last: Option<(Instant, Seen)>, on_ui_thread: bool, now: Instant) -> Option<Seen> {
+        match last {
+            Some((at, seen)) if on_ui_thread || now.saturating_duration_since(at) < PROBE_EVERY => Some(seen),
+            _ if on_ui_thread => Some(Seen::Unknown),
+            _ => None,
+        }
     }
 
     impl Io {
@@ -2573,6 +2623,7 @@ mod io {
             }
             let seen = self.ask_app();
             self.seen = Some((Instant::now(), seen.clone()));
+            publish_seen(&seen);
             seen
         }
 

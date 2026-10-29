@@ -6,7 +6,7 @@ use egui::{Rect, pos2};
 use figcraft_doc::{EcComp, NodeId};
 use serde_json::json;
 
-use crate::effectcraft_ui::{card_bar, explode_steps, fit, frame_bytes, on_button, on_slider, order, prefetch_each, side_for, slider_time};
+use crate::effectcraft_ui::{card_bar, explode_steps, fit, frame_bytes, full_frames, on_button, on_slider, order, prefetch_each, side_for, slider_time};
 
 fn main_card() -> EcComp {
     EcComp::new("MAIN", 1.4, 5.1, 29.97)
@@ -73,6 +73,10 @@ fn many_cards_share_a_fetch_that_fits_the_budget() {
     assert!(one <= 601);
     // The playing card fetches its whole window and isn't counted.
     assert_eq!(prefetch_each(&wanted[..2], |id| id == NodeId(100)), 601);
+    // ... as far as its share of the budget holds.
+    assert_eq!(full_frames(&c, 240), 601);
+    let n = full_frames(&c, 960);
+    assert!(n < 601 && n as f64 * frame_bytes(&c, 960) <= (1u64 << 30) as f64 * 0.6, "{n}");
 }
 
 #[test]
