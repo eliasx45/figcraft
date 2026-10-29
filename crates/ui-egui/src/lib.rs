@@ -1787,15 +1787,9 @@ impl FigApp {
             let mut worker = worker.unwrap_or_else(|| render_worker::Worker::new(ctx.clone()));
             canvas::show(self, ui, &mut worker);
             self.worker = Some(worker);
-            if chrome {
-                ui.scope_builder(egui::UiBuilder::new().id_salt("toolbar"), |ui| {
-                    a11y::container(ui, egui::accesskit::Role::Toolbar, i18n::tr("Tools"));
-                    toolbar::show(self, ui);
-                });
-                // Fork: the hidden right sidebar comes back from the canvas's top-right corner.
-                if self.ui.right_collapsed {
-                    right::expand_button(self, ui);
-                }
+            // Fork: the hidden right sidebar comes back from the canvas's top-right corner.
+            if chrome && self.ui.right_collapsed {
+                right::expand_button(self, ui);
             }
         });
         // Fork: the EffectCraft Timeline on the canvas, under its card (drawn over the canvas, where
@@ -1807,6 +1801,19 @@ impl FigApp {
             crate::effectcraft_ui::project::frame(self, &ctx);
             // The card's right-click menu (EffectCraft's viewer menu) and its dialogs.
             crate::effectcraft_ui::menu::frame(self, &ctx);
+        }
+        // Fork: the toolbar has a layer of its own, kept on top of what is drawn over the canvas
+        // (the open EffectCraft Timeline went over it and took its clicks).
+        if chrome {
+            let layer = toolbar::layer();
+            egui::Area::new(layer.id).order(layer.order).fixed_pos(self.canvas.rect.min).constrain(false).movable(false).show(&ctx, |ui| {
+                ui.set_clip_rect(self.canvas.rect);
+                a11y::container(ui, egui::accesskit::Role::Toolbar, i18n::tr("Tools"));
+                toolbar::show(self, ui);
+            });
+            ctx.move_to_top(layer);
+        } else {
+            toolbar::forget(&ctx);
         }
         // The panels' edges, over the canvas and the panels (drawn after them: they take the press).
         for (name, x, shown, grows) in edges {

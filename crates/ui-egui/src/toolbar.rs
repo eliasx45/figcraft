@@ -133,6 +133,7 @@ fn remembered(ui: &Ui, key: &str, default: ToolId) -> ToolId {
 
 pub fn show(app: &mut FigApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
+    forget(ui.ctx());
     let canvas = app.canvas.rect;
     app.ui.actions_rect = None;
     // A file you can't edit now (view only, or on its way to a server): moving around only.
@@ -152,6 +153,29 @@ pub fn show(app: &mut FigApp, ui: &mut Ui) {
     }
     let board = app.session.doc().is_ok_and(figcraft_engine::board::is_board);
     main_toolbar(app, ui, canvas, &t, board);
+}
+
+/// Fork: the toolbar's layer, over the canvas and the EffectCraft Timeline drawn on it.
+pub(crate) fn layer() -> egui::LayerId {
+    egui::LayerId::new(egui::Order::Middle, egui::Id::new("canvas_toolbar"))
+}
+
+fn rects_id() -> egui::Id {
+    egui::Id::new("canvas_toolbar_rects")
+}
+
+/// Fork: the toolbar's pill and Help button as last drawn (screen), so what lies under them sits the pointer out.
+pub(crate) fn rects(ctx: &egui::Context) -> Vec<Rect> {
+    ctx.data(|d| d.get_temp::<Vec<Rect>>(rects_id())).unwrap_or_default()
+}
+
+/// Fork: no toolbar this frame (chrome hidden): nothing under it to leave alone.
+pub(crate) fn forget(ctx: &egui::Context) {
+    ctx.data_mut(|d| d.remove_temp::<Vec<Rect>>(rects_id()));
+}
+
+fn note_rect(ui: &Ui, r: Rect) {
+    ui.ctx().data_mut(|d| d.get_temp_mut_or_default::<Vec<Rect>>(rects_id()).push(r));
 }
 
 /// The main toolbar pill's width for the active file: the Actions palette matches it so the two
@@ -339,6 +363,7 @@ fn pick_mode(app: &mut FigApp, i: usize) {
 /// The floating help button at the bottom right of the canvas.
 fn help_button(app: &mut FigApp, ui: &mut Ui, canvas: Rect, t: &Tokens) {
     let hr = Rect::from_center_size(pos2(canvas.max.x - 32.0, canvas.max.y - 32.0), vec2(32.0, 32.0));
+    note_rect(ui, hr);
     let hresp = ui.interact(hr, ui.id().with("help"), Sense::click()).tip(tr("Help and resources"));
     ui.painter().circle_filled(hr.center() + vec2(0.0, 1.0), 17.0, Color32::from_black_alpha(20));
     ui.painter().circle_filled(hr.center(), 16.0, t.panel);
@@ -488,6 +513,7 @@ pub(crate) fn pill_rect(canvas: Rect, width: f32) -> Rect {
 /// toolbar region keyboard navigation moves through.
 fn pill(ui: &Ui, nav: &mut Nav, canvas: Rect, width: f32, t: &Tokens) -> Rect {
     let rect = pill_rect(canvas, width);
+    note_rect(ui, rect.expand(6.0));
     // The pill takes the press and the drag over it: its buttons sense clicks only, and egui gives
     // a drag the canvas under them would sense to the canvas, so the pen placed an anchor there.
     // Not focusable: the keyboard walks the buttons, not the pill.

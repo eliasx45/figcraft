@@ -1584,7 +1584,13 @@ impl FigApp {
             let (s_strip, s_fx) = (xf * strip, fx.map(|f| xf * f));
             let hot = strips::edges_input(self, ctx, p.card, &g, s_strip, s_fx);
             zones = strips::zones(s_strip, s_fx).into_iter().map(|r| r.intersect(canvas)).filter(|r| r.is_positive()).collect();
-            let interactable = !self.canvas.space_pan && !zooming && hot.is_none();
+            // The canvas toolbar is drawn over the Timeline: the pointer on it is the toolbar's.
+            let bar = crate::toolbar::rects(ctx);
+            let on_toolbar = ctx.input(|i| {
+                let on = |p: Option<Pos2>| p.is_some_and(|p| bar.iter().any(|r| r.contains(p)));
+                on(i.pointer.hover_pos()) && (!i.pointer.any_down() || on(i.pointer.press_origin()))
+            });
+            let interactable = !self.canvas.space_pan && !zooming && hot.is_none() && !on_toolbar;
             egui::Area::new(id).order(egui::Order::Middle).fixed_pos(whole.min).constrain(false).movable(false).interactable(interactable).show(
                 ctx,
                 |ui| {
