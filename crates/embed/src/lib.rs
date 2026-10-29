@@ -34,6 +34,7 @@
 mod board;
 mod gpu;
 mod services;
+mod wheel;
 
 /// AppKit keys → egui events: EffectCraft's embed's mapping (AZERTY letters by the layout,
 /// ⌘C/⌘X/⌘V as Copy/Cut/Paste), shared so both embedded views read keys the same way.
@@ -144,6 +145,8 @@ pub struct FigEmbedded {
     system_theme: Option<egui::Theme>,
     beginning: Instant,
     capture: Option<CaptureState>,
+    /// Trackpad gestures, reshaped for egui ([`wheel`]).
+    wheel: wheel::Wheel,
     capture_tx: CaptureSender,
     capture_rx: CaptureReceiver,
     painting: bool,
@@ -240,6 +243,7 @@ impl FigEmbedded {
             capture: None,
             capture_tx,
             capture_rx,
+            wheel: wheel::Wheel::default(),
             painting: true,
             pending_textures: egui::TexturesDelta::default(),
             queue,
@@ -452,7 +456,7 @@ impl FigEmbedded {
             }
             _ => {}
         }
-        self.events.push(event);
+        self.wheel.push(&mut self.events, event);
         self.ctx.request_repaint();
     }
 
@@ -481,6 +485,7 @@ impl FigEmbedded {
             screen_rect: Some(screen),
             time: Some(self.beginning.elapsed().as_secs_f64()),
             focused: self.focused,
+        let wheel_end = self.wheel.before_frame(&mut self.events);
             events: std::mem::take(&mut self.events),
             max_texture_side: Some(self.rs.device.limits().max_texture_dimension_2d as usize),
             system_theme: self.system_theme,
@@ -518,7 +523,7 @@ impl FigEmbedded {
         out.events = self.take_events();
         let mut capture_data = Vec::new();
         if let Some(vp) = full.viewport_output.get(&egui::ViewportId::ROOT) {
-            out.repaint_after = vp.repaint_delay;
+            out.repaint_after = if wheel_end { Duration::ZERO } else { vp.repaint_delay };
             // FIGCRAFT_REPAINT_CAUSES: log what asked for an immediate frame (a frame loop).
             if vp.repaint_delay.is_zero() && std::env::var_os("FIGCRAFT_REPAINT_CAUSES").is_some() {
                 log::info!("embedded FigCraft: repaint now: {:?}", self.ctx.repaint_causes());
