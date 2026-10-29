@@ -29,8 +29,6 @@ use figcraft_engine::effectcraft::Span;
 /// Frames asked for in one request while a card plays (EffectCraft answers a request once all of
 /// it is rendered: small batches land sooner).
 pub(crate) const PLAY_BATCH: usize = 4;
-/// Requests a playing card keeps out at once, so a batch is always rendering.
-pub(crate) const PLAY_IN_FLIGHT: usize = 2;
 /// The time from asking for a frame to having it, assumed before one was measured (seconds).
 const FIRST_GUESS: f64 = 0.25;
 /// How fast the measured time follows a new measurement (0..1).
