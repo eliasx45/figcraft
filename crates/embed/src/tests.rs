@@ -185,3 +185,65 @@ fn set_visible_asks_for_a_frame_only_when_the_view_comes_back() {
     assert!(!crate::shows_again(true, false));
     assert!(!crate::shows_again(false, false));
 }
+
+#[test]
+fn the_hosts_save_writes_the_board_tab_and_keeps_the_front_tab() {
+    // Ghostex's one ⌘S saves the board (whatever tab is in front) and the EffectCraft project.
+    let dir = temp("save");
+    let project = dir.join("p.ecproj");
+    std::fs::write(&project, b"{}").unwrap();
+    let board = board::board_path(&project);
+    let ctx = egui::Context::default();
+    let mut fig = app();
+    board::open(&mut fig, &ctx, &project, &board).unwrap();
+    let i = fig.session.active;
+    fig.session.execute("shape.rectangle", &json!({"x": 0, "y": 0, "width": 5, "height": 5})).unwrap();
+    assert!(fig.session.docs[i].is_dirty());
+    let before = std::fs::metadata(&board).unwrap().len();
+    // Another tab in front: the board is still the one saved, and the front tab stays in front.
+    crate::run_command(&mut fig, &ctx, "file.new", &json!({"name": "other"})).unwrap();
+    let front = fig.session.active;
+    assert_ne!(front, i);
+    board::save(&mut fig, &board).unwrap();
+    assert!(!fig.session.docs[i].is_dirty(), "the board is saved");
+    assert_ne!(std::fs::metadata(&board).unwrap().len(), before, "the rectangle is in the file");
+    assert_eq!(fig.session.active, front);
+    assert_eq!(std::fs::read(&project).unwrap(), b"{}", "the project is never written");
+    // No board open: an error, no dialog, no panic.
+    let e = board::save(&mut app(), &board).unwrap_err();
+    assert!(e.contains("isn't open"), "{e}");
+}
+
+#[test]
+fn claimed_commands_go_to_the_host_and_are_answered_once() {
+    use figcraft_ui_egui::ControlRequest;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, mpsc};
+    let (tx, rx) = mpsc::channel();
+    let req = |id: u64, method: &str, params: serde_json::Value| ControlRequest {
+        id: json!(id),
+        method: method.into(),
+        params,
+        reply: tx.clone(),
+        cancelled: Arc::new(AtomicBool::new(false)),
+    };
+    let mut queue = vec![
+        req(1, "engine.execute", json!({"command": "editing.saveAll"})),
+        req(2, "engine.execute", json!({"command": "file.save", "params": {}})),
+        req(3, "editing.saveAll", json!(null)),
+        req(4, "window.list", json!({})),
+    ];
+    let claimed = vec!["editing.saveAll".to_string()];
+    let taken = crate::host_commands::take(&mut queue, &claimed);
+    assert_eq!(taken.iter().map(|t| t.command.as_str()).collect::<Vec<_>>(), ["editing.saveAll", "editing.saveAll"]);
+    assert_eq!(taken[0].params, json!({}));
+    assert_eq!(queue.iter().map(|r| r.id.as_u64().unwrap()).collect::<Vec<_>>(), [2, 4], "the rest stay, in order");
+    let mut taken = taken.into_iter();
+    taken.next().unwrap().reply(Ok(json!({"saved": true})));
+    drop(taken); // the second, unanswered: the caller still hears back
+    let replies: Vec<_> = rx.try_iter().collect();
+    assert_eq!(replies.len(), 2);
+    assert_eq!(replies[0].result, Ok(json!({"saved": true})));
+    assert!(replies[1].result.as_ref().unwrap_err().contains("wasn't answered"));
+    assert!(crate::host_commands::take(&mut queue, &[]).is_empty());
+}

@@ -48,6 +48,9 @@ mod keys;
 #[path = "../../../apps/figcraft/src/control_server.rs"]
 mod control_server;
 
+mod host_commands;
+pub use host_commands::HostRequest;
+
 #[cfg(test)]
 mod tests;
 
@@ -104,6 +107,8 @@ pub struct FrameOutput {
     pub events: Vec<FigEvent>,
     /// Seconds spent waiting for a drawable (vsync) this frame.
     pub vsync_wait: f32,
+    /// Control requests for commands the host claimed: the host answers each.
+    pub host_requests: Vec<HostRequest>,
 }
 
 /// What [`FigEmbedded::open`] did.
@@ -140,13 +145,13 @@ pub struct FigEmbedded {
     size: [u32; 2],
     ppp: f32,
     events: Vec<egui::Event>,
+    /// Trackpad gestures, reshaped for egui ([`wheel`]).
+    wheel: wheel::Wheel,
     modifiers: egui::Modifiers,
     focused: bool,
     system_theme: Option<egui::Theme>,
     beginning: Instant,
     capture: Option<CaptureState>,
-    /// Trackpad gestures, reshaped for egui ([`wheel`]).
-    wheel: wheel::Wheel,
     capture_tx: CaptureSender,
     capture_rx: CaptureReceiver,
     painting: bool,
@@ -165,6 +170,8 @@ pub struct FigEmbedded {
     armed: Option<String>,
     /// Commands FigCraft didn't know, and when they were last tried.
     unknown: Vec<(String, Instant)>,
+    /// Commands the host answers itself ([`FigEmbedded::claim_commands`]).
+    claimed: Vec<String>,
     /// The selection the host last heard of (node ids).
     last_selection: Vec<u64>,
     /// Where the primary button went down (points) and whether it moved since.
@@ -236,6 +243,7 @@ impl FigEmbedded {
             size: clamp_size(size),
             ppp: clamp_ppp(pixels_per_point, 2.0),
             events: Vec::new(),
+            wheel: wheel::Wheel::default(),
             modifiers: egui::Modifiers::default(),
             focused: false,
             system_theme: None,
@@ -243,7 +251,6 @@ impl FigEmbedded {
             capture: None,
             capture_tx,
             capture_rx,
-            wheel: wheel::Wheel::default(),
             painting: true,
             pending_textures: egui::TexturesDelta::default(),
             queue,
@@ -255,6 +262,7 @@ impl FigEmbedded {
             marks_since: 0,
             armed: None,
             unknown: Vec::new(),
+            claimed: Vec::new(),
             last_selection: Vec::new(),
             press: None,
             clicked: false,
@@ -477,6 +485,7 @@ impl FigEmbedded {
                 self.events.push(egui::Event::Screenshot { viewport_id, user_data, image: image.clone() });
             }
         }
+        let wheel_end = self.wheel.before_frame(&mut self.events);
         let [w, h] = self.size;
         let points = egui::vec2(w as f32 / self.ppp, h as f32 / self.ppp);
         // Chromeless (unless the host asked for chrome), the canvas fills the view.
@@ -485,7 +494,6 @@ impl FigEmbedded {
             screen_rect: Some(screen),
             time: Some(self.beginning.elapsed().as_secs_f64()),
             focused: self.focused,
-        let wheel_end = self.wheel.before_frame(&mut self.events);
             events: std::mem::take(&mut self.events),
             max_texture_side: Some(self.rs.device.limits().max_texture_dimension_2d as usize),
             system_theme: self.system_theme,
@@ -501,6 +509,10 @@ impl FigEmbedded {
         if let Some(events) = with_app(|fig| figcraft_ui_egui::windows::take_input(fig, raw.viewport_id)) {
             raw.events.extend(events);
         }
+        let host_requests = {
+            let mut q = self.queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            host_commands::take(&mut q, &self.claimed)
+        };
         let queue = self.queue.clone();
         let full = self.ctx.run_ui(raw, |ui| {
             let ctx = ui.ctx().clone();
@@ -509,7 +521,7 @@ impl FigEmbedded {
                 figcraft_ui_egui::windows::guard(fig, &ctx, |fig| fig.ui(ui));
             });
         });
-        let mut out = FrameOutput { cursor: full.platform_output.cursor_icon, repaint_after: Duration::MAX, ..Default::default() };
+        let mut out = FrameOutput { cursor: full.platform_output.cursor_icon, repaint_after: Duration::MAX, host_requests, ..Default::default() };
         for c in &full.platform_output.commands {
             match c {
                 egui::OutputCommand::CopyText(t) => out.copied_text = Some(t.clone()),
@@ -566,6 +578,29 @@ impl FigEmbedded {
             events.push(FigEvent::Clicked { card, node });
         }
         events
+    }
+
+    /// Commands the host answers itself on the control channel (`editing.saveAll`): their
+    /// requests come back in [`FrameOutput::host_requests`] instead of reaching FigCraft.
+    pub fn claim_commands(&mut self, commands: &[&str]) {
+        self.claimed = commands.iter().map(|c| c.to_string()).collect();
+    }
+
+    /// Save the board now (the host's ⌘S, which also saves its EffectCraft project): `Ok` with its
+    /// file, `Err` when no board is open or the save failed. No toast: the host says what was
+    /// saved ([`FigEmbedded::toast`]).
+    pub fn save_board(&mut self) -> Result<PathBuf, String> {
+        let board = self.board.clone().ok_or("no board is open")?;
+        with_app(|fig| board::save(fig, &board)).ok_or("FigCraft isn't running")??;
+        self.ctx.request_repaint();
+        Ok(board)
+    }
+
+    /// Show `message` in FigCraft's toast on the canvas.
+    pub fn toast(&mut self, message: impl Into<String>) {
+        let message = message.into();
+        let _ = with_app(|fig| fig.toast(message));
+        self.ctx.request_repaint();
     }
 
     /// The host is going away (Ghostex quits or closes the Editing view): unsaved boards are

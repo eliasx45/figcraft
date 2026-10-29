@@ -190,6 +190,18 @@ pub(crate) fn save_all(fig: &mut FigApp) {
     fig.session.active = active.min(fig.session.docs.len().saturating_sub(1));
 }
 
+/// Save the board at `board` (the tab whose file it is, whichever tab is in front), for the host's
+/// one ⌘S that saves the board and the EffectCraft project together. Never opens a dialog: a
+/// board that isn't open is an error. The tab in front stays in front.
+pub(crate) fn save(fig: &mut FigApp, board: &Path) -> Result<(), String> {
+    let i = open_index(fig, board).ok_or_else(|| format!("{} isn't open", board.display()))?;
+    let active = fig.session.active;
+    fig.session.active = i;
+    let r = fig.session.execute("file.save", &json!({})).map(|_| ()).map_err(|e| e.to_string());
+    fig.session.active = active.min(fig.session.docs.len().saturating_sub(1));
+    r
+}
+
 /// The marks of a `canvas.annotate.list` answer (`{marks: [...]}` or a bare list) not handed over
 /// yet, oldest first, and the highest numeric id among them.
 pub(crate) fn fresh_marks(listed: &Value, seen: &mut HashSet<String>) -> (Vec<Value>, u64) {
