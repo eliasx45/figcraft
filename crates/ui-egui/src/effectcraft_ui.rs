@@ -89,6 +89,13 @@ pub(crate) mod presence;
 #[path = "effectcraft_play.rs"]
 pub(crate) mod play;
 
+/// Fork: the "Now graphs" shelf beside the paused card the Timeline edits: every keyframed
+/// segment under the playhead, through its precomps, with its speed graph, influence handles and
+/// saved eases; coloured outlines of the objects on the picture.
+#[cfg(feature = "effectcraft-inproc")]
+#[path = "effectcraft_nowgraphs.rs"]
+pub(crate) mod nowgraphs;
+
 /// Play / explode button radius (screen points).
 const BUTTON: f32 = 10.0;
 /// Texture memory kept for card frames (bytes).
@@ -409,6 +416,9 @@ pub struct Link {
     pub(crate) play: play::Shared,
     #[cfg(feature = "effectcraft-inproc")]
     pub(crate) play_key: Option<StoreKey>,
+    /// The Now graphs shelf beside the paused card ([`nowgraphs`]).
+    #[cfg(feature = "effectcraft-inproc")]
+    pub(crate) nowgraphs: nowgraphs::State,
 }
 
 impl Store {
@@ -1736,6 +1746,11 @@ impl FigApp {
                 let layer = egui::LayerId::new(egui::Order::Foreground, id.with("edges"));
                 strips::draw_edge(&ctx.layer_painter(layer).with_clip_rect(canvas), s_strip, s_fx, edge);
             }
+        }
+        // The Now graphs shelf right of the paused card, and its objects' outlines on the picture:
+        // the pointer there is the shelf's, a press there gives the Timeline the keyboard.
+        if let Some(shelf) = nowgraphs::frame(self, ctx, &mut p) {
+            screen.extend(Some(shelf.intersect(self.canvas.rect)).filter(|r| r.is_positive()));
         }
         // The view is the canvas's: the viewer bar's magnification zooms it (see viewer::card_can).
         if let Some(want) = magnification {

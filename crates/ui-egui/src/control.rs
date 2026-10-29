@@ -710,6 +710,9 @@ pub fn handle(app: &mut FigApp, ctx: &Context, method: &str, p: &Value) -> Resul
             ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close);
             Ok(json!({"ok": true}))
         }
+        // Fork: the Now graphs shelf beside the paused EffectCraft card.
+        #[cfg(feature = "effectcraft-inproc")]
+        m if m == "effectcraft.nowGraphs" || m.starts_with("effectcraft.nowGraphs.") => crate::effectcraft_ui::nowgraphs::control(app, ctx, m, p),
         other => Err(format!("unknown method `{other}`")),
     }
 }
