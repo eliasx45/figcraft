@@ -6,7 +6,7 @@ use egui::{Rect, pos2};
 use figcraft_doc::{EcComp, NodeId};
 use serde_json::json;
 
-use crate::effectcraft_ui::{card_bar, explode_steps, fit, on_button, on_slider, order, side_for, slider_time};
+use crate::effectcraft_ui::{card_bar, explode_steps, fit, frame_bytes, on_button, on_slider, order, prefetch_each, side_for, slider_time};
 
 fn main_card() -> EcComp {
     EcComp::new("MAIN", 1.4, 5.1, 29.97)
@@ -34,11 +34,45 @@ fn frames_are_asked_for_at_the_size_shown_up_to_half_the_comp() {
 #[test]
 fn frames_come_from_the_playhead_on_the_way_it_plays() {
     let c = main_card(); // frames 41..=152
-    let o = order(&c, 100);
+    let o = order(&c, 100, 601);
     assert_eq!(&o[..3], &[100, 101, 102]);
     assert_eq!(o.len(), 112, "every frame once");
     assert_eq!(o[52], 152);
     assert_eq!(o[53], 41, "then round from the start");
+}
+
+#[test]
+fn a_capped_fetch_stays_around_the_playhead() {
+    let mut c = main_card(); // frames 41..=152
+    c.end = 400.0; // frames 41..=11987
+    let o = order(&c, 5000, 11);
+    assert_eq!(o, vec![5000, 5001, 5002, 5003, 5004, 5005, 4999, 4998, 4997, 4996, 4995]);
+    let o = order(&c, 11987, 11);
+    assert_eq!(o.len(), 11, "no room ahead: all behind");
+    assert_eq!(o[0], 11987);
+    assert_eq!(*o.last().unwrap(), 11977);
+    assert_eq!(order(&c, 5000, 601).len(), 601, "the whole window either side");
+}
+
+#[test]
+fn many_cards_share_a_fetch_that_fits_the_budget() {
+    // Ghostex hang, 29 Oct: 57 cards each fetched 601 frames, more than the texture budget held,
+    // so evicted frames were asked for again forever.
+    let mut c = main_card();
+    c.end = 400.0;
+    let wanted: Vec<(NodeId, EcComp, u32, i64)> = (0..57).map(|i| (NodeId(100 + i), c.clone(), 480, 5000)).collect();
+    let each = prefetch_each(&wanted, |_| false);
+    assert_eq!(each, 601 / 57);
+    let fetched: f64 = wanted.iter().map(|w| order(&w.1, w.3, each).len() as f64 * frame_bytes(&w.1, w.2)).sum();
+    assert!(fetched < (1u64 << 30) as f64 * 0.3, "{fetched} bytes");
+    // One card alone at a big size: as many as fit, not its whole window.
+    let one = prefetch_each(&wanted[..1], |_| false);
+    assert_eq!(prefetch_each(&[(NodeId(1), c.clone(), 240, 0)], |_| false), 601);
+    let big = prefetch_each(&[(NodeId(1), c.clone(), 960, 0)], |_| false);
+    assert!(big < 601 && big as f64 * frame_bytes(&c, 960) <= (1u64 << 30) as f64 * 0.3, "{big}");
+    assert!(one <= 601);
+    // The playing card fetches its whole window and isn't counted.
+    assert_eq!(prefetch_each(&wanted[..2], |id| id == NodeId(100)), 601);
 }
 
 #[test]

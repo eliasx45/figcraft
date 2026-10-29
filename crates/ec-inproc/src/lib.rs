@@ -68,8 +68,39 @@ fn stamp(path: &Path) -> Result<Stamp, String> {
     Ok(Stamp { len: m.len(), modified })
 }
 
-/// The project path as sessions are keyed (absolute when it exists).
+/// How long a [`key`] is remembered, and how many are.
+const KEY_TTL: std::time::Duration = std::time::Duration::from_secs(1);
+const KEYS_MAX: usize = 256;
+/// Keys made in the last [`KEY_TTL`]: FigCraft asks for a card's key several times per card per
+/// frame, and a realpath of a deep folder is a dozen syscalls (Ghostex hang, 29 Oct: most of a
+/// 57-card board's frame time).
+static KEYS: std::sync::Mutex<Option<std::collections::HashMap<PathBuf, (PathBuf, std::time::Instant)>>> = std::sync::Mutex::new(None);
+
+/// The project path as sessions are keyed (absolute when it exists). Remembered for [`KEY_TTL`].
 pub fn key(path: &Path) -> PathBuf {
+    let now = std::time::Instant::now();
+    {
+        let keys = KEYS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((k, at)) = keys.as_ref().and_then(|m| m.get(path))
+            && now.duration_since(*at) < KEY_TTL
+        {
+            return k.clone();
+        }
+    }
+    let k = canonical_key(path);
+    let mut keys = KEYS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let m = keys.get_or_insert_with(Default::default);
+    if m.len() >= KEYS_MAX {
+        m.retain(|_, (_, at)| now.duration_since(*at) < KEY_TTL);
+        if m.len() >= KEYS_MAX {
+            m.clear();
+        }
+    }
+    m.insert(path.to_path_buf(), (k.clone(), now));
+    k
+}
+
+fn canonical_key(path: &Path) -> PathBuf {
     // A file deleted since it was opened no longer canonicalizes: its folder still does, so the
     // key stays the same (macOS: /var → /private/var) and the pool finds and lets go its session.
     std::fs::canonicalize(path)

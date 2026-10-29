@@ -102,6 +102,11 @@ pub(crate) const FAILED_RETRY: f64 = 10.0;
 const RETRY_DOWN: f64 = 2.0;
 /// Frames either side of the playhead kept for long cards.
 const WINDOW: i64 = 300;
+/// Fork: the frames all the cards on screen fetch around their playheads, together (one card
+/// alone: its whole `WINDOW` either side; many share it), and the share of [`BUDGET`] they may
+/// fill together. The card that plays or caches is not counted (it fetches its whole window).
+const PREFETCH: usize = (2 * WINDOW + 1) as usize;
+const PREFETCH_SHARE: f64 = 0.3;
 /// Seconds from the playhead a frame may be and still stand in for it.
 const NEAR: f64 = 2.0;
 /// Most cards one explode places.
@@ -549,13 +554,45 @@ pub(crate) fn side_for(px: f32, c: &EcComp) -> u32 {
     SIDES.into_iter().filter(|s| *s <= cap).find(|s| *s as f32 >= px).unwrap_or_else(|| SIDES.into_iter().rfind(|s| *s <= cap).unwrap_or(SIDES[0]))
 }
 
+/// The bytes of one frame of `c` at frame size `side` (longest side, pixels).
+pub(crate) fn frame_bytes(c: &EcComp, side: u32) -> f64 {
+    let (w, h) = (f64::from(c.width.max(1)), f64::from(c.height.max(1)));
+    let s = f64::from(side.max(1));
+    (s * s * (w.min(h) / w.max(h)) * 4.0).max(1.0)
+}
+
+/// Fork: how many frames around its playhead each card in `wanted` (card, comp, frame size,
+/// playhead frame) fetches, but for those `full(card)` names (playing, caching: their whole
+/// window). The cards share [`PREFETCH`] frames and [`PREFETCH_SHARE`] of the texture budget.
+/// Ghostex hang, 29 Oct: each of the 57 cards of Elias's MAIN board fetched 601 frames (15 671,
+/// about 2 GB of textures for a 1 GB budget), so eviction dropped frames the cards still wanted,
+/// they were asked for again, forever: EffectCraft rendered without end (its caches grew to
+/// 16 GB in 5 h) and the main thread never idled.
+pub(crate) fn prefetch_each(wanted: &[(NodeId, EcComp, u32, i64)], full: impl Fn(NodeId) -> bool) -> usize {
+    let shared: Vec<&(NodeId, EcComp, u32, i64)> = wanted.iter().filter(|w| !full(w.0)).collect();
+    if shared.is_empty() {
+        return PREFETCH;
+    }
+    let by_count = PREFETCH / shared.len();
+    let bytes: f64 = shared.iter().map(|w| frame_bytes(&w.1, w.2)).sum();
+    let by_memory = BUDGET as f64 * PREFETCH_SHARE / bytes.max(1.0);
+    let by_memory = if by_memory.is_finite() { by_memory.clamp(0.0, PREFETCH as f64) as usize } else { PREFETCH };
+    by_count.min(by_memory).clamp(1, PREFETCH)
+}
+
 /// The frames of `c` to fetch, nearest the playhead frame `at` first (on to the end, then from
-/// the start: the way it plays), within `WINDOW` of it.
-pub(crate) fn order(c: &EcComp, at: i64) -> Vec<i64> {
+/// the start: the way it plays), within `WINDOW` of it, `n` at most (half ahead, half behind;
+/// what one side has no room for goes to the other).
+pub(crate) fn order(c: &EcComp, at: i64, n: usize) -> Vec<i64> {
     let r = c.frames();
     let (a, b) = (*r.start(), *r.end());
     let at = at.clamp(a, b);
-    let (lo, hi) = ((at - WINDOW).max(a), (at + WINDOW).min(b));
+    let want = n.clamp(1, PREFETCH) as i64 - 1;
+    let (ahead_room, back_room) = ((b - at).min(WINDOW), (at - a).min(WINDOW));
+    let ahead = (want - want / 2).min(ahead_room);
+    let back = (want - ahead).min(back_room);
+    let ahead = (want - back).min(ahead_room);
+    let (lo, hi) = (at - back, at + ahead);
     let mut out: Vec<i64> = (at..=hi).collect();
     if hi == b && lo == a {
         out.extend(a..at);
@@ -1786,6 +1823,14 @@ impl FigApp {
             ctx.request_repaint_after(std::time::Duration::from_secs_f64(REVISION_EVERY));
         }
         let mut keep: HashSet<SoundKey> = HashSet::new();
+        let ec = &self.session.effectcraft;
+        let playing = ec.node.filter(|_| ec.playing());
+        #[cfg(feature = "effectcraft-inproc")]
+        let caching = self.effectcraft.cards.cache.as_ref().map(|k| k.card);
+        #[cfg(not(feature = "effectcraft-inproc"))]
+        let caching: Option<NodeId> = None;
+        let full = |id: NodeId| Some(id) == playing || Some(id) == caching;
+        let each = prefetch_each(wanted, full);
         for (id, c, side, at) in wanted {
             if c.sound {
                 // The piece of sound at the playhead, and the next one while the card plays.
@@ -1822,7 +1867,7 @@ impl FigApp {
             let s = self.effectcraft.stores.entry(key.clone()).or_default();
             s.focus = *at;
             let mut frames = Vec::new();
-            for f in order(c, *at) {
+            for f in order(c, *at, if full(*id) { PREFETCH } else { each }) {
                 if !wants(s, f, now, rev, headless) {
                     continue;
                 }
