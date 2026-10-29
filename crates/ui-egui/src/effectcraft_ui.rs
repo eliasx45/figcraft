@@ -382,6 +382,9 @@ pub struct Link {
     /// An edge of the open Timeline being dragged ([`strips::edges_input`]).
     #[cfg(feature = "effectcraft-inproc")]
     pub(crate) widen: Option<strips::Widen>,
+    /// The card the page has made room for: its Timeline is open ([`strips::room_frame`]).
+    #[cfg(feature = "effectcraft-inproc")]
+    pub(crate) room: Option<NodeId>,
     /// Space pressed in the Timeline: it plays the card when let go, unless the pointer was pressed
     /// meanwhile (Space held and a drag pans the canvas). `true`: it was.
     #[cfg(feature = "effectcraft-inproc")]
@@ -1528,6 +1531,7 @@ impl FigApp {
     pub(crate) fn effectcraft_panel_ui(&mut self, ctx: &egui::Context) {
         cards::frame(self, ctx);
         board::frame(self, ctx);
+        strips::room_frame(self);
         let Some(mut p) = self.effectcraft.panel.take() else {
             self.effectcraft.panel_rects = None;
             return;

@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use figcraft_geom::Rect as PRect;
 use serde_json::json;
 
@@ -49,9 +47,9 @@ fn place(s: &mut figcraft_engine::Session, x: f64, y: f64) -> NodeId {
     figcraft_engine::params::id_of(&v["id"]).unwrap()
 }
 
-/// Widening a Timeline pushes what it would cover to its right in its band (cascading, with a
-/// gap), never what is above or below that band or to its left, and never pulls back; the width
-/// is kept on the card.
+/// Widening a Timeline slides the card's row right as one piece (with a gap), never what is
+/// below that row out of reach; narrower again, the row follows back, and putting back returns
+/// it where it was; the width is kept on the card.
 #[test]
 fn widening_pushes_the_neighbours_right() {
     let mut s = figcraft_engine::Session::new();
@@ -69,9 +67,8 @@ fn widening_pushes_the_neighbours_right() {
     let page = s.ds().unwrap().page;
     let snap = s.doc().unwrap().clone();
     let x_of = |d: &Document, id: NodeId| d.world_bounds(id).unwrap().x0;
-    let mut pushed = HashMap::new();
     let mut d = snap.clone();
-    resize(&mut d, page, card, Size { width: Some(1600.0), ..Size::default() }, &[(right, 3)], &mut pushed).unwrap();
+    resize(&mut d, page, card, Size { width: Some(1600.0), ..Size::default() }, &[(right, 3)]).unwrap();
     assert_eq!(asked_width(&d, card), Some(1600.0));
     let g = geom_of(&d, card, true, 0).unwrap();
     let moved = x_of(&d, right);
@@ -83,10 +80,12 @@ fn widening_pushes_the_neighbours_right() {
     if let Some(below) = below {
         assert_eq!(x_of(&d, below), x_of(&snap, below), "out of the band: stays");
     }
-    // Narrower again (from the same snapshot, as a gesture's preview is): nothing comes back.
-    let mut d2 = snap.clone();
-    resize(&mut d2, page, card, Size { width: Some(500.0), ..Size::default() }, &[(right, 3)], &mut pushed).unwrap();
-    assert_eq!(x_of(&d2, right), moved, "shrinking doesn't pull them back");
+    // Narrower again (on the widened page, as a later drag is): the row follows back.
+    let mut d2 = d.clone();
+    resize(&mut d2, page, card, Size { width: Some(500.0), ..Size::default() }, &[(right, 3)]).unwrap();
+    assert!(x_of(&d2, right) < moved, "the room follows the size");
+    put_back(&mut d2, card);
+    assert_eq!(x_of(&d2, right), x_of(&snap, right), "put back where it was");
 }
 
 /// Junk never panics: a card without bounds, a width that isn't a number.
@@ -96,11 +95,10 @@ fn junk_widths_never_panic() {
     let card = place(&mut s, 0.0, 0.0);
     let page = s.ds().unwrap().page;
     let mut d = s.doc().unwrap().clone();
-    let mut pushed = HashMap::new();
     for w in [f64::NAN, f64::INFINITY, -5.0, 0.0, 1e300] {
-        let _ = resize(&mut d, page, card, Size { width: Some(w), height: Some(w), fx: Some(w) }, &[], &mut pushed);
+        let _ = resize(&mut d, page, card, Size { width: Some(w), height: Some(w), fx: Some(w) }, &[]);
     }
-    let _ = resize(&mut d, page, page, Size { width: Some(100.0), ..Size::default() }, &[(page, 2)], &mut pushed);
+    let _ = resize(&mut d, page, page, Size { width: Some(100.0), ..Size::default() }, &[(page, 2)]);
     assert!(
         geom(PRect::new(0.0, 0.0, 0.0, 0.0), Size { width: Some(f64::NAN), height: Some(f64::NAN), fx: Some(f64::NAN) }, true, 0)
             .strip
@@ -109,7 +107,7 @@ fn junk_widths_never_panic() {
     );
 }
 
-/// Taller pushes what is below in the Timeline's columns down (not what is beside it), Effect
+/// Taller slides everything below the card's row down as one piece (rows keep their shape), Effect
 /// Controls follow the height, and the sizes are kept on the card; Effect Controls' own width
 /// pushes the right neighbours too.
 #[test]
@@ -129,28 +127,27 @@ fn taller_pushes_down_and_effect_controls_follow() {
         .and_then(|v| figcraft_engine::params::id_of(&v["id"]));
     let snap = s.doc().unwrap().clone();
     let y_of = |d: &Document, id: NodeId| d.world_bounds(id).unwrap().y0;
-    let mut pushed = HashMap::new();
     let mut d = snap.clone();
     let tall = g0.strip.height() + 600.0;
-    resize(&mut d, page, card, Size { height: Some(tall), ..Size::default() }, &[], &mut pushed).unwrap();
+    resize(&mut d, page, card, Size { height: Some(tall), ..Size::default() }, &[]).unwrap();
     assert_eq!(asked_height(&d, card), Some(tall));
     let g = geom_of(&d, card, true, 0).unwrap();
     assert_eq!(g.fx.unwrap().height(), g.strip.height(), "Effect Controls follow the height");
     if let Some(below) = below {
         assert!(y_of(&d, below) > g.strip.y1, "pushed down under the taller Timeline");
     }
-    if let Some(beside) = beside {
-        assert_eq!(y_of(&d, beside), y_of(&snap, beside), "outside its columns: stays");
+    if let (Some(below), Some(beside)) = (below, beside) {
+        assert_eq!(y_of(&d, beside) - y_of(&snap, beside), y_of(&d, below) - y_of(&snap, below), "the row below moves as one");
     }
     // Never shorter than a header and a few rows.
     let mut d2 = snap.clone();
-    resize(&mut d2, page, card, Size { height: Some(1.0), ..Size::default() }, &[], &mut HashMap::new()).unwrap();
+    resize(&mut d2, page, card, Size { height: Some(1.0), ..Size::default() }, &[]).unwrap();
     assert!(geom_of(&d2, card, true, 0).unwrap().strip.height() >= height_range(b.width(), b.height()).0);
     // Effect Controls: wide enough by default, wider as dragged, kept on the card.
     let (lo, def, _) = fx_range(b.width(), b.height());
     assert!(g0.fx.unwrap().width() == def && def > lo);
     let mut d3 = snap.clone();
-    resize(&mut d3, page, card, Size { fx: Some(def * 2.0), ..Size::default() }, &[], &mut HashMap::new()).unwrap();
+    resize(&mut d3, page, card, Size { fx: Some(def * 2.0), ..Size::default() }, &[]).unwrap();
     assert_eq!(geom_of(&d3, card, true, 0).unwrap().fx.unwrap().width(), def * 2.0);
     assert_eq!(d3.node(card).unwrap().plugin_data.get(FX_WIDTH_KEY).map(String::as_str), Some(format!("{:.1}", def * 2.0).as_str()));
 }
