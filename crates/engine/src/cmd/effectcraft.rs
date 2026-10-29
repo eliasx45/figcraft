@@ -21,7 +21,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "effectcraft.info",
             "EffectCraft comp info",
-            "{ids?}  the EffectCraft cards among `ids` (default the selection, else every card on the page) → {cards: [{id, name, comp, compId, project, start, end, fps, offset, rate, startFrame, endFrame, width, height, x, y, cardWidth, cardHeight, sound, poster}]}",
+            "{ids?}  the EffectCraft cards among `ids` (default the selection, else every card on the page) → {cards: [{id, name, comp, compId, project, start, end, fps, offset, rate, startFrame, endFrame, width, height, x, y, cardWidth, cardHeight, sound, poster, peak (comp seconds of the scene's peak, board.autoMain), still (what the idle card and its poster show: the peak, else the middle)}]}",
             false,
             info
         ),
@@ -390,7 +390,7 @@ pub fn card_json(doc: &Document, id: NodeId) -> Value {
     json!({"id": id, "name": n.name, "comp": c.comp, "compId": c.comp_id, "project": c.project, "start": round6(c.start), "end": round6(c.end),
         "fps": c.fps, "offset": round6(c.offset), "rate": c.rate, "startFrame": c.frames().start(), "endFrame": c.frames().end(),
         "width": c.width, "height": c.height, "x": b.map(|b| b.x0), "y": b.map(|b| b.y0), "cardWidth": n.width, "cardHeight": n.height,
-        "sound": c.sound, "poster": poster})
+        "sound": c.sound, "poster": poster, "peak": c.peak.map(round6), "still": round6(c.still())})
 }
 
 fn info(s: &mut Session, p: &Value) -> Result<Value> {

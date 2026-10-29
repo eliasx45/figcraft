@@ -429,6 +429,10 @@ fn auto_main(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let chapters = chapters_of(&answer);
     let scenes = scenes_of(&answer);
+    // Each card's still: its scene's peak (a board.json beat, else the longest stressed word),
+    // never its first frame (often black). No speech map: board.json beats only.
+    let beats = answer.get("beats").and_then(Value::as_array).cloned().unwrap_or_default();
+    let words = host_call(s, cmd, &project, "figcraft.speech", &q).ok().map(|v| words_of(&v)).unwrap_or_default();
     let page = s.page()?;
     let before = board_of(s, &project)?;
     let (vx, vy) = s.ds().map(|d| (d.view.cx, d.view.cy))?;
@@ -536,6 +540,7 @@ fn auto_main(s: &mut Session, p: &Value) -> Result<Value> {
             (c.width, c.height) = sc.size;
             c.offset = sc.offset;
             c.rate = sc.rate;
+            c.peak = stress_of(&beats, &words, sc.main.0, sc.main.1).map(|(_, t, _)| (t - sc.offset) * sc.rate);
             c.sanitize();
             let h = (CARD_W * f64::from(c.height) / f64::from(c.width.max(1))).clamp(9.0, 4.0 * CARD_W);
             let label = format!("{} · {}", sc.name, clock(sc.main.0));
@@ -550,6 +555,11 @@ fn auto_main(s: &mut Session, p: &Value) -> Result<Value> {
                     if let Some(n) = doc.node_mut(id) {
                         // The person's sound choice stays.
                         c.sound = n.effectcraft.as_deref().is_none_or(|old| old.sound);
+                        // A still that moved: the saved poster (another moment) goes, so the
+                        // app takes it again at the new still.
+                        if n.effectcraft.as_deref().is_none_or(|old| old.still() != c.still()) {
+                            n.fills.retain(|f| !matches!(f.kind, figcraft_color::PaintKind::Image(_)));
+                        }
                         n.effectcraft = Some(Box::new(c));
                     }
                     id

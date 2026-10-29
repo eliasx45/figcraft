@@ -44,6 +44,10 @@ pub struct EcComp {
     /// Play the comp's own sound.
     #[serde(default = "yes")]
     pub sound: bool,
+    /// Fork: comp seconds of the scene's peak (its board.json beat, else its longest stressed
+    /// word; set by `board.autoMain`), the still the card shows when idle ([`EcComp::still`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak: Option<f64>,
 }
 
 fn default_fps() -> f64 {
@@ -76,6 +80,7 @@ impl EcComp {
             offset: 0.0,
             rate: 1.0,
             sound: true,
+            peak: None,
         };
         c.sanitize();
         c
@@ -105,6 +110,19 @@ impl EcComp {
         self.rate = self.rate.clamp(0.01, 100.0);
         self.width = self.width.clamp(1, 32_768);
         self.height = self.height.clamp(1, 32_768);
+        if self.peak.is_some_and(|t| !t.is_finite()) {
+            self.peak = None;
+        }
+    }
+
+    /// Fork: comp seconds of the card's still (what an idle card and its poster show): the
+    /// scene's peak when it falls in the stretch shown, else the stretch's middle (its first
+    /// frame is often black: a fade or a cut in).
+    pub fn still(&self) -> f64 {
+        match self.peak {
+            Some(t) if t.is_finite() && t >= self.start && t < self.end => t,
+            _ => self.start + self.span() / 2.0,
+        }
     }
 
     /// Seconds of comp time shown.

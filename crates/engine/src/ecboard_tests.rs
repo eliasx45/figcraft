@@ -400,3 +400,39 @@ fn presence_shows_agents_on_their_cards_without_touching_the_document() {
     assert!(s.execute("canvas.presence.set", &json!({"agent": "one more", "card": card})).is_err());
     assert!(s.execute("canvas.presence.set", &json!({"agent": "A0", "card": card, "status": "done"})).is_ok(), "an agent shown can still change");
 }
+
+#[test]
+fn a_card_stills_on_its_peak_else_its_middle_never_its_black_first_frame() {
+    let (mut s, _) = sess();
+    let r = auto(&mut s);
+    let st = s.execute("board.state", &json!({})).unwrap();
+    let card = |row: usize, k: usize| st["rows"][row]["cards"][k]["card"].as_u64().unwrap();
+    let info = |s: &mut Session, id: u64| s.execute("effectcraft.info", &json!({"ids": [id]})).unwrap()["cards"][0].clone();
+    // S1 05 (MAIN 21.0–26.5): the board.json beat at 25.5 wins over the stressed "sixty" at 25.4.
+    let spot = info(&mut s, card(1, 0));
+    assert!((spot["peak"].as_f64().unwrap() - 4.5).abs() < 1e-6, "{spot}");
+    assert!((spot["still"].as_f64().unwrap() - 4.5).abs() < 1e-6);
+    // HV1 01 (MAIN 0.5–2.7): no beat, the longest stressed word "content" at 2.4.
+    let cal = info(&mut s, card(0, 0));
+    assert!((cal["peak"].as_f64().unwrap() - 1.9).abs() < 1e-6, "{cal}");
+    // S1 06 (MAIN 26.5–35.0): neither, so the middle of its 0–8.5 stretch, not frame 0.
+    let old = info(&mut s, card(1, 1));
+    assert!(old["peak"].is_null(), "{old}");
+    assert!((old["still"].as_f64().unwrap() - 4.25).abs() < 1e-6);
+    assert!(r["cards"] == 3);
+    // A peak outside the stretch (or none) is the middle; a card whose stretch starts at 0 still
+    // shows its middle.
+    let mut c = figcraft_doc::EcComp::new("X", 0.0, 4.0, 25.0);
+    assert_eq!(c.still(), 2.0);
+    c.peak = Some(9.0);
+    assert_eq!(c.still(), 2.0);
+    c.peak = Some(f64::NAN);
+    c.sanitize();
+    assert_eq!(c.peak, None);
+    c.peak = Some(0.0);
+    assert_eq!(c.still(), 0.0, "a peak on the first frame is the peak");
+    // A saved card without the field reads as before (no peak).
+    let old_json = json!({"comp": "X", "start": 1.0, "end": 3.0});
+    let c: figcraft_doc::EcComp = serde_json::from_value(old_json).unwrap();
+    assert_eq!((c.peak, c.still()), (None, 2.0));
+}

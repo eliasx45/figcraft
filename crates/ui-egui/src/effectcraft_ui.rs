@@ -634,7 +634,9 @@ pub(crate) fn card_time(app: &FigApp, doc: &Document, id: NodeId, c: &EcComp, ho
     if ec.node == Some(id) {
         return ec.time();
     }
-    app.effectcraft.shown.get(&id).copied().unwrap_or(c.start)
+    // Fork: an idle card shows its still (the scene's peak, else the middle), never its first
+    // frame (often black); the poster is the first frame fetched, so it is the still too.
+    app.effectcraft.shown.get(&id).copied().unwrap_or_else(|| c.still())
 }
 
 pub(crate) fn frame_at(c: &EcComp, t: f64) -> i64 {
@@ -967,7 +969,7 @@ pub fn input(app: &mut FigApp, ctx: &egui::Context, pos: Pos2, hovered: bool, do
     #[cfg(feature = "effectcraft-inproc")]
     if pressed && let Some(id) = strips::closed_at(app, &doc, page, pos) {
         if !app.effectcraft_open_panel(id) {
-            let t = doc.node(id).and_then(|n| n.effectcraft.as_deref()).map(|c| app.effectcraft.shown.get(&id).copied().unwrap_or(c.start));
+            let t = doc.node(id).and_then(|n| n.effectcraft.as_deref()).map(|c| app.effectcraft.shown.get(&id).copied().unwrap_or_else(|| c.still()));
             app.run("effectcraft.reveal", json!({"id": id, "time": t}));
         }
         return true;
@@ -1229,7 +1231,7 @@ impl FigApp {
             let job = match kind {
                 // The comps showing at the frame the card shows, not every precomp of its stretch
                 // (a 10-minute MAIN holds dozens).
-                "effectcraft.explode" => io::Job::Tree { card: id, comp: c.clone(), at: self.effectcraft.shown.get(&id).copied().unwrap_or(c.start) },
+                "effectcraft.explode" => io::Job::Tree { card: id, comp: c.clone(), at: self.effectcraft.shown.get(&id).copied().unwrap_or_else(|| c.still()) },
                 _ => io::Job::Reveal { comp: c.clone(), time: data.get("time").and_then(Value::as_f64).unwrap_or(c.start) },
             };
             if !self.effectcraft_send(job) {
@@ -1359,7 +1361,7 @@ impl FigApp {
     fn effectcraft_sync_playhead(&mut self, p: &mut crate::effectcraft_panel::Panel) {
         let Some(c) = self.session.doc().ok().and_then(|d| d.node(p.card)?.effectcraft.as_deref().cloned()) else { return };
         let t = &self.session.effectcraft;
-        let card_t = if t.node == Some(p.card) { t.time() } else { self.effectcraft.shown.get(&p.card).copied().unwrap_or(c.start) };
+        let card_t = if t.node == Some(p.card) { t.time() } else { self.effectcraft.shown.get(&p.card).copied().unwrap_or_else(|| c.still()) };
         let ec_t = p.host.time();
         let half = 0.5 / c.fps.max(1.0);
         let (card_t, ec_t) = match p.synced {
