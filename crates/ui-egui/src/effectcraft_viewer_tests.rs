@@ -1,5 +1,5 @@
 //! EffectCraft's viewer tools on a card, against FigCraft's own host (`EcHost`, the Timeline's
-//! session): tool keys and the tool row, masks, rotation, the anchor point, the Pen and typed
+//! session): tool keys, EffectCraft's tool row and viewer bar (EMBED16), masks, rotation, the anchor point, the Pen and typed
 //! text landing in the comp, the card's pointer mapping at several canvas zooms, and junk input;
 //! (EMBED14) guides and grids drawn only while on and the grid button, motion-path keys and
 //! tangents dragged on the card, the Mask Feather tool.
@@ -16,7 +16,7 @@ use figcraft_doc::EcComp;
 use figcraft_ec_inproc::effectcraft_engine::project::{LayerId, LayerSource};
 use serde_json::json;
 
-use super::{ROW, Slot, grid_button, paint_grid_icon, paint_icon, tool_row};
+use super::{ELSEWHERE, card_can, tool_row, viewer_bar, zoom_about};
 use crate::effectcraft_panel::EcHost;
 
 /// The sample project (a 64×36 comp "C" with a full-size red solid) plus a 16×16 Box in the
@@ -133,7 +133,7 @@ fn tool_keys_switch_the_card_tools() {
 }
 
 #[test]
-fn the_tool_row_draws_and_lights_the_current_tool() {
+fn the_tool_row_is_effectcrafts_whole_tools_bar() {
     let (mut h, _, _) = host("row");
     let ctx = egui::Context::default();
     h.ui_mut().tool = Tool::Ellipse;
@@ -142,9 +142,49 @@ fn the_tool_row_draws_and_lights_the_current_tool() {
     })
     .textures_delta
     .clear();
-    let lit: Vec<Slot> = ROW.iter().map(|(s, ..)| *s).filter(|s| s.has(Tool::Ellipse)).collect();
-    assert_eq!(lit, vec![Slot::Shape]);
-    assert!(Slot::Pen.has(Tool::PenConvert) && Slot::Type.has(Tool::TypeVertical) && !Slot::Selection.has(Tool::Rotate));
+    // Every slot of EffectCraft's Tools bar is in the row (its automation ids), not six redrawn ones.
+    for slot in Tool::SLOTS {
+        let id = format!("tools.{:?}", slot[0]);
+        assert!(h.auto().elements.iter().any(|e| e.id == id), "{id} in the card's row");
+    }
+    // Hand and Zoom work on a card (on the canvas); paint, roto, puppet and camera tools don't.
+    for t in [Tool::Selection, Tool::Hand, Tool::Zoom, Tool::Rotate, Tool::PanBehind, Tool::Star, Tool::Pen, Tool::MaskFeather, Tool::Type] {
+        assert!(card_can(t), "{t:?}");
+    }
+    for t in [Tool::Orbit, Tool::PanCamera, Tool::Dolly, Tool::Brush, Tool::Clone, Tool::Eraser, Tool::RotoBrush, Tool::ObjectMatte, Tool::Puppet] {
+        assert!(!card_can(t), "{t:?}");
+    }
+    assert!(!ELSEWHERE.is_empty());
+}
+
+/// EffectCraft's viewer bar draws under the card on the Timeline's session; nothing is picked
+/// without a click, and junk magnifications never panic.
+#[test]
+fn the_viewer_bar_draws_on_the_timelines_session() {
+    let (mut h, _, _) = host("bar");
+    let ctx = egui::Context::default();
+    for shown in [0.25_f32, 1.0, f32::NAN, 0.0, -3.0, 1e9] {
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            let picked = viewer_bar(ui, &mut h, Rect::from_min_size(pos2(0.0, 100.0), vec2(480.0, 30.0)), shown);
+            assert!(picked.is_none());
+        })
+        .textures_delta
+        .clear();
+    }
+    assert!(h.auto().elements.iter().any(|e| e.id == "viewer.magnification"));
+}
+
+/// A Zoom tool click keeps the page point under the pointer and zooms by two (Alt: a half);
+/// junk views give nothing.
+#[test]
+fn the_zoom_tool_zooms_the_canvas_about_the_click() {
+    let (cx, cy, z) = zoom_about((0.0, 0.0, 1.0), (100.0, 50.0), 2.0).unwrap();
+    assert_eq!(z, 2.0);
+    // The point stays where it was on screen: (p - c) * zoom is the same before and after.
+    assert!(((100.0 - cx) * z - 100.0).abs() < 1e-9 && ((50.0 - cy) * z - 50.0).abs() < 1e-9);
+    let (_, _, out) = zoom_about((10.0, 10.0, 1.0), (0.0, 0.0), 0.5).unwrap();
+    assert_eq!(out, 0.5);
+    assert!(zoom_about((f64::NAN, 0.0, 1.0), (0.0, 0.0), 2.0).is_none());
 }
 
 /// The card maps the pointer to comp pixels at any canvas zoom.
@@ -266,15 +306,6 @@ fn guides_and_grids_show_on_the_card_only_while_on() {
     assert!(shapes > 0, "the grid while the tools sit out");
     vh::toggle_grid_option(&mut h, 2);
     assert!(!vh::grid_options_on(&h));
-    // The grid button and its open menu draw (lit while one is on).
-    egui::Popup::open_id(&ctx, super::grid_popup_id());
-    for _ in 0..2 {
-        ctx.run_ui(egui::RawInput::default(), |ui| {
-            ui.horizontal(|ui| grid_button(ui, &mut h));
-        })
-        .textures_delta
-        .clear();
-    }
 }
 
 /// A Position keyframe of the selected layer drags on the card at several canvas zooms, one
@@ -323,7 +354,7 @@ fn the_mask_feather_tool_works_on_the_card() {
     h.invoke(&ctx, "mask.new", json!({"layer": plate.0, "vertices": [[8, 8], [40, 8], [40, 28], [8, 28]], "closed": true})).unwrap();
     h.invoke(&ctx, "layer.select", json!({"layers": [plate.0]})).unwrap();
     h.ui_mut().tool = Tool::MaskFeather;
-    assert!(Slot::Pen.has(Tool::MaskFeather) && vh::active(&h) == Tool::MaskFeather);
+    assert!(vh::active(&h) == Tool::MaskFeather);
     drag(&ctx, &mut h, card(4.0), &[[24.0, 8.0], [24.0, 7.0], [24.0, 4.0]]);
     let c = h.session().active_comp().unwrap();
     let l = c.layer(plate).unwrap();
@@ -333,7 +364,7 @@ fn the_mask_feather_tool_works_on_the_card() {
     assert!((sp.feather[0].radius - 4.0).abs() < 0.3, "radius {}", sp.feather[0].radius);
 }
 
-/// Junk maps, pointer positions and icon boxes never panic.
+/// Junk maps, pointer positions and the tool row with any tool never panic.
 #[test]
 fn junk_never_panics() {
     let (mut h, _, _) = host("junk");
@@ -359,19 +390,13 @@ fn junk_never_panics() {
             }
         }
     }
-    ctx.run_ui(egui::RawInput::default(), |ui| {
-        for tool in Tool::ALL {
-            for r in [
-                Rect::NOTHING,
-                Rect::from_min_size(Pos2::ZERO, vec2(0.0, 0.0)),
-                Rect::from_min_size(pos2(f32::NAN, 0.0), vec2(16.0, 16.0)),
-                Rect::from_min_size(Pos2::ZERO, vec2(16.0, 16.0)),
-            ] {
-                paint_icon(ui.painter(), r, tool, egui::Color32::WHITE);
-                paint_grid_icon(ui.painter(), r, egui::Color32::WHITE);
-            }
-        }
-    })
-    .textures_delta
-    .clear();
+    // The tool row with every tool current.
+    for tool in Tool::ALL {
+        h.ui_mut().tool = tool;
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.horizontal(|ui| tool_row(ui, &mut h));
+        })
+        .textures_delta
+        .clear();
+    }
 }

@@ -1318,7 +1318,9 @@ impl FigApp {
             let job = match kind {
                 // The comps showing at the frame the card shows, not every precomp of its stretch
                 // (a 10-minute MAIN holds dozens).
-                "effectcraft.explode" => io::Job::Tree { card: id, comp: c.clone(), at: self.effectcraft.shown.get(&id).copied().unwrap_or_else(|| c.still()) },
+                "effectcraft.explode" => {
+                    io::Job::Tree { card: id, comp: c.clone(), at: self.effectcraft.shown.get(&id).copied().unwrap_or_else(|| c.still()) }
+                }
                 _ => io::Job::Reveal { comp: c.clone(), time: data.get("time").and_then(Value::as_f64).unwrap_or(c.start) },
             };
             if !self.effectcraft_send(job) {
@@ -1561,6 +1563,9 @@ impl FigApp {
         };
         let mut close = false;
         let mut save = false;
+        // The magnification picked in the viewer bar under the card (`Some(None)`: Fit).
+        let mut magnification: Option<Option<f32>> = None;
+        let mut shown_mag = 0.0_f32;
         let mut screen: Vec<Rect> = Vec::new();
         let mut fx_screen: Option<Rect> = None;
         let mut zones: Vec<Rect> = Vec::new();
@@ -1570,12 +1575,16 @@ impl FigApp {
             ctx.set_transform_layer(egui::LayerId::new(egui::Order::Middle, id), xf);
             let strip = strips::to_panel(g.strip, g.k);
             let fx = g.fx.map(|f| strips::to_panel(f, g.k));
-            let whole = fx.map_or(strip, |f| strip.union(f));
+            // EffectCraft's viewer bar under the card's picture.
+            let footer = g.footer.map(|f| strips::to_panel(f, g.k));
+            let whole = [fx, footer].into_iter().flatten().fold(strip, |a, r| a.union(r));
+            let shown = viewer::shown_magnification(self, p.card, &p.host);
+            shown_mag = shown;
             let canvas = self.canvas.rect;
             let inv = xf.inverse();
             let clip = Rect::from_two_pos(inv * canvas.min, inv * canvas.max);
             let visible = |r: Rect| Some((xf * r).intersect(canvas)).filter(|r| r.is_positive());
-            screen = [Some(strip), fx].into_iter().flatten().filter_map(visible).collect();
+            screen = [Some(strip), fx, footer].into_iter().flatten().filter_map(visible).collect();
             fx_screen = fx.and_then(visible);
             // Space held pans the canvas and a pinch or ⌘-scroll zooms it: the Timeline sits out.
             let zooming = ctx.input(|i| (i.zoom_delta() - 1.0).abs() > 1e-4);
@@ -1596,7 +1605,7 @@ impl FigApp {
                 |ui| {
                     ui.set_clip_rect(clip);
                     let painter = ui.painter().clone();
-                    for r in [Some(strip), fx].into_iter().flatten() {
+                    for r in [Some(strip), fx, footer].into_iter().flatten() {
                         painter.rect_filled(r, CornerRadius::same(4), t.panel);
                         painter.rect_stroke(r, CornerRadius::same(4), Stroke::new(1.0, t.border), egui::StrokeKind::Outside);
                     }
@@ -1622,6 +1631,9 @@ impl FigApp {
                     });
                     let body = Rect::from_min_max(pos2(strip.min.x, head.max.y + 1.0), strip.max);
                     p.host.show(ui, body, fx);
+                    if let Some(foot) = footer {
+                        magnification = viewer::viewer_bar(ui, &mut p.host, foot, shown);
+                    }
                     ui.advance_cursor_after_rect(whole);
                 },
             );
@@ -1631,6 +1643,10 @@ impl FigApp {
                 let layer = egui::LayerId::new(egui::Order::Foreground, id.with("edges"));
                 strips::draw_edge(&ctx.layer_painter(layer).with_clip_rect(canvas), s_strip, s_fx, edge);
             }
+        }
+        // The view is the canvas's: the viewer bar's magnification zooms it (see viewer::card_can).
+        if let Some(want) = magnification {
+            viewer::set_magnification(self, p.card, want, shown_mag);
         }
         // The canvas leaves the pointer over the panels and their resize zones to them.
         let owned: Vec<Rect> = screen.iter().copied().chain(zones).collect();
