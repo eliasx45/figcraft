@@ -93,7 +93,9 @@ const IN_FLIGHT: usize = 2;
 /// Seconds before a frame EffectCraft is still rendering is asked for again.
 const REPOLL: f64 = 0.2;
 /// Seconds between checks of EffectCraft's project revision (edits there refresh the cards).
-const REVISION_EVERY: f64 = 0.5;
+/// Fork: 0.25 (was 0.5: half a second on average, up to a whole one, before a card saw an edit;
+/// `app.revision` is a one-number answer).
+const REVISION_EVERY: f64 = 0.25;
 /// Seconds before a frame that failed is asked for again.
 pub(crate) const FAILED_RETRY: f64 = 10.0;
 /// Seconds between attempts to reach an EffectCraft that wasn't running.
@@ -386,6 +388,19 @@ impl Store {
         self.want.is_some() && self.file != self.want
     }
 
+    /// Fork: the frame at `at` is on screen from an older revision of the app's project (an
+    /// edit in EffectCraft): it is being refreshed. Not for frames rendered here from the saved
+    /// file (`headless`, `file`): the in-process worker already renders a few at a time, and a
+    /// newer request for the card replaces a queued one.
+    pub(crate) fn refreshing(&self, at: i64, headless: bool) -> bool {
+        !headless && self.file.is_none() && self.frames.contains_key(&at)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hold(&mut self, f: i64, tex: egui::TextureHandle, rev: u64) {
+        self.frames.insert(f, Slot { tex: FrameTex::Cpu(tex), rev, bytes: 0 });
+    }
+
     #[cfg(test)]
     pub(crate) fn with_revisions(file: Option<u64>, want: Option<u64>) -> Store {
         Store { file, want, ..Store::default() }
@@ -548,6 +563,18 @@ pub(crate) fn order(c: &EcComp, at: i64) -> Vec<i64> {
         out.extend((lo..at).rev());
     }
     out
+}
+
+/// Fork: the frames to ask for in one request. While the frame on screen (`at`) is refreshed
+/// after an edit it goes alone: EffectCraft answers a `figcraft.frames` request once every frame
+/// in it is encoded, and the link thread decodes them all before the card sees any, so with the
+/// usual 24 the shown frame waited for 23 others (and each other card's 24 on the one link
+/// thread). The rest follow in the next request.
+pub(crate) fn first_batch(mut frames: Vec<i64>, at: i64, refreshing: bool) -> Vec<i64> {
+    if refreshing && frames.first() == Some(&at) {
+        frames.truncate(1);
+    }
+    frames
 }
 
 /// Seconds of a comp time as milliseconds (sound keys).
@@ -1751,7 +1778,9 @@ impl FigApp {
         if wanted.is_empty() {
             return;
         }
-        if !self.effectcraft.revision_out && now - self.effectcraft.revision_asked > REVISION_EVERY {
+        // (`>=`: the repaint asked for below lands right on the interval; with `>` it could
+        // fall a hair short and wait for some other repaint)
+        if !self.effectcraft.revision_out && now - self.effectcraft.revision_asked >= REVISION_EVERY {
             self.effectcraft.revision_asked = now;
             self.effectcraft.revision_out = self.effectcraft_send(io::Job::Revision);
             ctx.request_repaint_after(std::time::Duration::from_secs_f64(REVISION_EVERY));
@@ -1805,6 +1834,8 @@ impl FigApp {
             if frames.is_empty() {
                 continue;
             }
+            // Fork: after an edit the frame on screen comes back alone first.
+            let frames = first_batch(frames, *at, s.refreshing(*at, headless));
             for f in &frames {
                 s.pending.insert(*f, now);
             }

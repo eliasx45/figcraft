@@ -148,3 +148,25 @@ fn a_host_given_effectcraft_port_wins_over_the_environment_and_9877() {
     // (The setter itself is global state: not set here, so no other test's card reaches a real
     // EffectCraft port through it.)
 }
+
+/// Night run 29 Oct: a card took ~2.3 s to show an edit made in EffectCraft. After the edit the
+/// card asked for 24 frames at once, and EffectCraft answers only when all are encoded (the link
+/// thread then decodes all of them) before the card sees the one it shows. Now the shown frame
+/// is asked for alone first while it is being refreshed; the rest follow.
+#[test]
+fn after_an_edit_the_shown_frame_is_asked_for_alone_first() {
+    use crate::effectcraft_ui::{Store, first_batch, wants};
+    let ctx = egui::Context::default();
+    let tex = ctx.load_texture("t", egui::ColorImage::new([2, 2], vec![egui::Color32::BLACK; 4]), egui::TextureOptions::LINEAR);
+    let mut s = Store::default();
+    assert!(!s.refreshing(40, false), "nothing held yet: the first load asks for the usual batch");
+    s.hold(40, tex, 3);
+    assert!(s.refreshing(40, false), "the frame on screen is held");
+    assert!(!wants(&s, 40, 0.0, 3, false), "fresh at the revision it was rendered at");
+    assert!(wants(&s, 40, 0.0, 4, false), "an edit (revision 4) makes it stale");
+    let batch: Vec<i64> = (40..64).collect();
+    assert_eq!(first_batch(batch.clone(), 40, true), vec![40], "the shown frame goes alone");
+    assert_eq!(first_batch(batch.clone(), 40, false), batch, "not refreshing: the whole batch");
+    assert_eq!(first_batch((41..65).collect(), 40, true).len(), 24, "the shown frame already asked for: the rest");
+    assert!(!s.refreshing(40, true), "frames rendered here from the saved file: the worker paces them");
+}
